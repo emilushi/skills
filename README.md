@@ -148,7 +148,9 @@ When reporting bugs you've found, feel free to mention:
 
 ## Contributing
 
-We welcome contributions! Please see [CLAUDE.md](CLAUDE.md) for skill authoring guidelines.
+We welcome contributions! See [AGENTS.md](AGENTS.md) for skill authoring guidelines, and
+run `make check` before you push — it runs most of CI locally (see AGENTS.md for
+what it does not cover).
 
 ## License
 
