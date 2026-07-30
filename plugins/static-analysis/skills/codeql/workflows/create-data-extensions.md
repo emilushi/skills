@@ -121,7 +121,11 @@ Cross-reference the project's API surface against CodeQL's known models.
 
 #### 3a: Map the Project's API Surface
 
-Read source code to identify security-relevant patterns:
+Read source code to identify security-relevant patterns. **Pick the table that matches
+`$CODEQL_LANG`** — the patterns that carry taint in a web application are not the patterns that
+carry taint in native code, and running the wrong table finds nothing.
+
+##### For Python, JavaScript/TypeScript, Java/Kotlin, Go, Ruby, C#
 
 | Pattern | What To Find | Likely Model Type |
 |---------|-------------|-------------------|
@@ -134,6 +138,33 @@ Read source code to identify security-relevant patterns:
 | HTTP clients | URL construction | `sinkModel` (kind: `ssrf`) |
 | Sanitizers | Input validation, escaping | `neutralModel` |
 | Pass-through wrappers | Logging, caching, encoding | `summaryModel` (kind: `taint`) |
+
+##### For C/C++ (`$CODEQL_LANG` = `cpp`)
+
+C/C++ projects rarely have HTTP handlers, ORMs, or template engines. What they do have is
+custom memory management, thin wrappers over `libc`, and hand-rolled parsers — and C/C++ is
+the only language with extensible predicates for the first of those.
+
+| Pattern | What To Find | Likely Model Type |
+|---------|-------------|-------------------|
+| Custom allocators | `*_alloc`, `*_malloc`, `*_new`, `*_calloc`, pool/arena/slab allocators | `allocationFunctionModel` |
+| Custom deallocators | `*_free`, `*_release`, `*_destroy`, `*_put`, pool returns | `deallocationFunctionModel` |
+| Exec wrappers | Functions wrapping `system`, `popen`, `exec*`, `posix_spawn`, `CreateProcess` | `sinkModel` |
+| Network/IPC readers | Wrappers over `recv`, `read`, `recvfrom`, socket/pipe/device reads, RPC entry points | `sourceModel` (kind: `remote`) |
+| Local input readers | `argv`/`getenv` handling, config and file parsers, out-params filled from disk | `sourceModel` (kind: `local`) |
+| Parser entry points | `parse_*`, `decode_*`, `unmarshal_*` taking a buffer + length | `sourceModel` or `summaryModel` |
+| Copy/transform helpers | Project `str*`/`mem*` wrappers, encoders, buffer copy utilities | `summaryModel` (kind: `taint`) |
+| Bounds/format validators | Length checks, range checks, path canonicalizers, escaping | `neutralModel` / `barrierGuardModel` |
+
+**Format-string logging wrappers cannot be modelled as data extensions.**
+`FormattingFunction` is an `abstract` QL class, not an extensible predicate — there is no MaD
+row that adds one. Do not try. CodeQL already detects them two ways, both automatic:
+
+- `AttributeFormattingFunction` — the function carries GNU `__attribute__((format(printf, N, M)))`
+- `UserDefinedFormattingFunction` — a varargs function that forwards to a `vprintf`-family callee
+
+(Both in `semmle/code/cpp/commons/Printf.qll`.) If a project's logging wrapper is missed, the
+fix is the `format` attribute in the source or a custom QL class — not this workflow.
 
 Use `Grep` to search for these patterns in source code (adapt per language).
 
@@ -171,6 +202,24 @@ options:
 
 Generate YAML data extension files for the gaps confirmed by the user.
 
+#### C/C++: get the indirection right, or the model does nothing
+
+The most common way a C/C++ model fails is silently. For a pointer or buffer argument, taint
+lives in the pointed-to memory, not in the pointer value — so an out-parameter must be written
+`Argument[*N]`, with the star, and a returned buffer `ReturnValue[*]`. Write `Argument[1]` for a
+`char *` out-param and the row validates cleanly, loads cleanly, and matches nothing.
+
+This is not a corner case: it is how the shipped models are written.
+
+```yaml
+- ["", "", False, "zmq_recv", "", "", "Argument[*1]", "remote", "manual"]                 # buffer out-param
+- ["", "", False, "GetEnvironmentVariableA", "", "", "Argument[*1]", "local", "manual"]   # buffer out-param
+- ["", "", False, "getc", "", "", "ReturnValue", "remote", "manual"]                      # scalar return, no star
+```
+
+Rule of thumb: **star the argument whenever the data arrives through the pointer.** Omit it only
+when the value itself is the tainted thing (a returned `int`, a passed-by-value handle).
+
 #### File Structure
 
 Create files in `$OUTPUT_DIR/extensions/`:
@@ -180,6 +229,7 @@ $OUTPUT_DIR/extensions/
   sources.yml       # sourceModel entries
   sinks.yml         # sinkModel entries
   summaries.yml     # summaryModel and neutralModel entries
+  allocations.yml   # C/C++ only: allocationFunctionModel and deallocationFunctionModel
 ```
 
 #### YAML Format and Deployment
@@ -196,6 +246,12 @@ Use the `Write` tool to create each file. Only create files that have entries �
 **Exit:** Finding delta measured (with-extensions count >= baseline count); extensions validated as loading correctly
 
 Run a full security analysis with and without extensions to measure the finding delta.
+
+**If any source model uses kind `local`, both runs need `--threat-model local`.** The default
+threat model tracks `remote` only, so `local` sources contribute nothing and the delta reads
+zero — indistinguishable from a broken model. This bites C/C++ hardest, because CLI tools, file
+parsers, and config readers are the common shape there and their sources are `local`, not
+`remote`. See [threat-models.md](../references/threat-models.md).
 
 #### 5a: Run Baseline Analysis (without extensions)
 
@@ -226,7 +282,7 @@ WITH_EXT=$(python3 -c "import json; print(sum(len(r.get('results',[])) for r in 
 echo "Findings: $BASELINE → $WITH_EXT (+$((WITH_EXT - BASELINE)))"
 ```
 
-**If counts did not increase:** Check extension loading (`-vvv`), pre-compiled pack workaround, Java `True`/`False` capitalization, column value accuracy.
+**If counts did not increase:** Check extension loading (`-vvv`), pre-compiled pack workaround, Java/C++ `True`/`False` capitalization, column value accuracy. For C/C++ specifically, check the two silent failures first: a missing indirection star (`Argument[1]` where `Argument[*1]` was meant), and a sink `kind` that validates but no query consumes — see the kind vocabulary note in [extension-yaml-format.md](../references/extension-yaml-format.md).
 
 ---
 
@@ -243,6 +299,7 @@ echo "Findings: $BASELINE → $WITH_EXT (+$((WITH_EXT - BASELINE)))"
 - $OUTPUT_DIR/extensions/sources.yml — <N> source models
 - $OUTPUT_DIR/extensions/sinks.yml — <N> sink models
 - $OUTPUT_DIR/extensions/summaries.yml — <N> summary/neutral models
+- $OUTPUT_DIR/extensions/allocations.yml — <N> allocation/deallocation models (C/C++ only)
 
 ### Model Coverage:
 - Sources: <BEFORE> → <AFTER> (+<DELTA>)

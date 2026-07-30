@@ -19,7 +19,7 @@ Supported languages: Python, JavaScript/TypeScript, Go, Java/Kotlin, C/C++, C#, 
 
 1. **Database quality is non-negotiable.** A database that builds is not automatically good. Always run quality assessment (file counts, baseline LoC, extractor errors) and compare against expected source files. A cached build produces zero useful extraction.
 
-2. **Data extensions catch what CodeQL misses.** Even projects using standard frameworks (Django, Spring, Express) have custom wrappers around database calls, request parsing, or shell execution. Skipping the create-data-extensions workflow means missing vulnerabilities in project-specific code paths.
+2. **Data extensions catch what CodeQL misses.** Even projects using standard frameworks (Django, Spring, Express) have custom wrappers around database calls, request parsing, or shell execution. In C/C++ the gap is different but wider — custom allocators, thin `libc` wrappers, and hand-rolled parsers, with two extensible predicates (`allocationFunctionModel`, `deallocationFunctionModel`) that exist for no other language. Skipping the create-data-extensions workflow means missing vulnerabilities in project-specific code paths.
 
 3. **Explicit suite references prevent silent query dropping.** Never pass pack names directly to `codeql database analyze` — each pack's `defaultSuiteFile` applies hidden filters that can produce zero results. Always generate a custom `.qls` suite file.
 
@@ -145,6 +145,8 @@ These shortcuts lead to missed findings. Do not accept them:
 - **"security-and-quality is the broadest suite"** - `security-and-quality` excludes all `experimental/` query paths. For run-all mode, import both `security-and-quality` and `security-experimental`. The delta is 1–52 queries depending on the language.
 - **"The database built, so it's good"** - A database that builds does not mean it extracted well. Always run quality assessment and check file counts against expected source files.
 - **"Data extensions aren't needed for standard frameworks"** - Even Django/Spring apps have custom wrappers that CodeQL does not model. Skipping extensions means missing vulnerabilities.
+- **"C/C++ has no frameworks, so there's nothing to model"** - The web patterns (HTTP handlers, ORMs, templates) are absent, not the modelling opportunity. C/C++ projects have custom allocators, exec wrappers, and parser entry points, and are the only language with `allocationFunctionModel` and `deallocationFunctionModel`. Use the C/C++ table in the create-data-extensions workflow, not the web one.
+- **"The extension validated, so it works"** - Validation checks shape, not effect. Kind names are validated against a list shared across all languages, so a `command-injection` sink on a C/C++ row passes and is then consumed by nothing. A C/C++ pointer model missing its indirection star (`Argument[1]` for `Argument[*1]`) also validates and matches nothing. Confirm with a finding delta, not a clean validation.
 - **"build-mode=none is fine for compiled languages"** - It produces severely incomplete analysis. Only use as an absolute last resort. On macOS, try the arm64 toolchain workaround or Rosetta first.
 - **"The build fails on macOS, just use build-mode=none"** - Exit code 137 is caused by `arm64e`/`arm64` mismatch, not a fundamental build failure. See [macos-arm64e-workaround.md](references/macos-arm64e-workaround.md).
 - **"No findings means the code is secure"** - Zero findings can indicate poor database quality, missing models, or wrong query packs. Investigate before reporting clean results.
