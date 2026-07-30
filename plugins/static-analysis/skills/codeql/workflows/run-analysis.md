@@ -15,19 +15,7 @@ Two modes control analysis scope. Both use all installed packs — the differenc
 
 ---
 
-## Task System
-
-Create these tasks on workflow start:
-
-```
-TaskCreate: "Select database and detect language" (Step 1)
-TaskCreate: "Select scan mode, check additional packs" (Step 2) - blockedBy: Step 1
-TaskCreate: "Select query packs, model packs, and threat models" (Step 3) - blockedBy: Step 2
-TaskCreate: "Execute analysis" (Step 4) - blockedBy: Step 3
-TaskCreate: "Process and report results" (Step 5) - blockedBy: Step 4
-```
-
-### Gates
+## Gates
 
 | Task | Gate Type | Cannot Proceed Until |
 |------|-----------|---------------------|

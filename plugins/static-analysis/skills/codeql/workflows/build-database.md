@@ -2,21 +2,6 @@
 
 Create high-quality CodeQL databases by trying build methods in sequence until one produces good results.
 
-## Task System
-
-Create these tasks on workflow start:
-
-```
-TaskCreate: "Detect language and configure" (Step 1)
-TaskCreate: "Build database" (Step 2) - blockedBy: Step 1
-TaskCreate: "Apply fixes if needed" (Step 3) - blockedBy: Step 2
-TaskCreate: "Assess quality" (Step 4) - blockedBy: Step 3
-TaskCreate: "Improve quality if needed" (Step 5) - blockedBy: Step 4
-TaskCreate: "Generate final report" (Step 6) - blockedBy: Step 5
-```
-
----
-
 ## Overview
 
 Database creation differs by language type:

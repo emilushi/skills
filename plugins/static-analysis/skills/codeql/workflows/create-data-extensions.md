@@ -2,19 +2,7 @@
 
 Generate data extension YAML files to improve CodeQL's data flow coverage for project-specific APIs. Runs after database build and before analysis.
 
-## Task System
-
-Create these tasks on workflow start:
-
-```
-TaskCreate: "Check for existing data extensions" (Step 1)
-TaskCreate: "Query known sources and sinks" (Step 2) - blockedBy: Step 1
-TaskCreate: "Identify missing sources and sinks" (Step 3) - blockedBy: Step 2
-TaskCreate: "Create data extension files" (Step 4) - blockedBy: Step 3
-TaskCreate: "Validate with re-analysis" (Step 5) - blockedBy: Step 4
-```
-
-### Early Exit Points
+## Early Exit Points
 
 | After Step | Condition | Action |
 |------------|-----------|--------|
