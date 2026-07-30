@@ -87,6 +87,15 @@ def merge_with_multitool(sarif_files: list[Path]) -> dict | None:
         tmp_path.unlink(missing_ok=True)
 
 
+def is_parseable(path: Path) -> bool:
+    """Whether a SARIF file can be read and parsed as JSON."""
+    try:
+        json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return False
+    return True
+
+
 def merge_sarif_pure_python(sarif_files: list[Path]) -> dict:
     """Pure Python SARIF merge (fallback)."""
     merged = {
@@ -104,7 +113,7 @@ def merge_sarif_pure_python(sarif_files: list[Path]) -> dict:
     for sarif_file in sorted(sarif_files):
         try:
             data = json.loads(sarif_file.read_text())
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             print(f"Warning: Failed to parse {sarif_file}: {e}", file=sys.stderr)
             skipped_files.append(str(sarif_file))
             continue
@@ -173,6 +182,26 @@ def main() -> int:
     if not sarif_files:
         print("No SARIF files found, nothing to merge", file=sys.stderr)
         return 1
+
+    # Pre-flight: every input unreadable is a failed scan, not a clean one. Both produce
+    # zero findings, so merging on would hand back "no vulnerabilities" for a run in which
+    # nothing was actually analysed. Checked here rather than inside a backend so the
+    # result does not depend on whether SARIF Multitool happens to be installed.
+    readable = [f for f in sarif_files if is_parseable(f)]
+    if not readable:
+        print(
+            f"Error: all {len(sarif_files)} SARIF file(s) failed to parse — nothing to "
+            f"merge. This is a scan failure, not a clean result.",
+            file=sys.stderr,
+        )
+        return 1
+    if len(readable) < len(sarif_files):
+        print(
+            f"Warning: {len(sarif_files) - len(readable)} of {len(sarif_files)} SARIF "
+            f"files could not be parsed. Results may be incomplete.",
+            file=sys.stderr,
+        )
+    sarif_files = readable
 
     # Ensure output directory exists
     output_file.parent.mkdir(parents=True, exist_ok=True)
