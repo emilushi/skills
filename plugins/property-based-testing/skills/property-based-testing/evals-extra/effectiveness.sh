@@ -57,9 +57,16 @@ command -v uv >/dev/null || {
 # it as "found no bugs" would quietly flatter a broken run.
 run_suite() {
   local dir="$1" out
-  out="$(cd "$dir" && uv run --quiet --with hypothesis --with pytest \
-    python -m pytest tests/test_codec_props.py -q --tb=no -rf \
-    -p no:cacheprovider 2>&1 || true)"
+  # cd gets its own line rather than `cd && uv || true`: in that form a failed cd
+  # lands in $out, matches neither guard below, and the run reports zero failing
+  # tests — the flattered broken run the comment above rules out. Exiting the
+  # subshell trips set -e instead.
+  out="$(
+    cd "$dir" || exit 3
+    uv run --quiet --with hypothesis --with pytest \
+      python -m pytest tests/test_codec_props.py -q --tb=no -rf \
+      -p no:cacheprovider 2>&1 || true
+  )"
   if grep -qE 'ERROR |ModuleNotFoundError|Interrupted' <<<"$out"; then
     echo "COLLECT_ERROR"
     return
