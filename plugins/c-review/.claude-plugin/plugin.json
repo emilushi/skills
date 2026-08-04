@@ -1,7 +1,7 @@
 {
   "name": "c-review",
-  "version": "1.2.0",
-  "description": "Comprehensive C/C++ security code review with specialized bug-finding agents covering memory safety, type safety, concurrency, and Linux/Windows userspace-specific issues",
+  "version": "2.0.0",
+  "description": "C/C++ security code review driven by a Workflow script: parallel bug-class hunters, dedup, false-positive and severity judgement, SARIF output, and a ground-truth CVE eval",
   "author": {
     "name": "Paweł Płatek"
   },

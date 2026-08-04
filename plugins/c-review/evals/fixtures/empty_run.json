@@ -1,0 +1,12 @@
+{
+  "_comment": "A structurally valid run that found nothing. The grader must refuse to score this: 0/7 from an empty run is a pipeline failure, and reporting it as a recall number makes a broken run look like a measured one.",
+  "run": {
+    "threat_model": "REMOTE",
+    "severity_filter": "all",
+    "finding_scope_root": "expat/lib",
+    "context_roots": "."
+  },
+  "stats": { "merged": 0 },
+  "coverage": [],
+  "findings": []
+}
