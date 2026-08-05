@@ -225,8 +225,8 @@ ANSWER_KEY_PATTERNS = (
     # future layout change does not silently drop it.
     re.compile(r"/staged/"),
     # The harness's own source, not a corpus directory that happens to be called tests/.
-    re.compile(r"c-review/bench/(?:lib|corpora|arms|tests|judge_bench)/"),
-    re.compile(r"c-review/bench/(?:README\.md|bench\.py)"),
+    re.compile(r"c-review[-/]bench/(?:lib|corpora|arms|tests|judge_bench)/"),
+    re.compile(r"c-review[-/]bench/(?:README\.md|bench\.py)"),
     re.compile(r"\bC-REVIEW-EVALUATION\.md\b"),
 )
 

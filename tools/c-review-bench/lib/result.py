@@ -35,7 +35,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-PLUGIN_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+
+def _plugin_root() -> Path:
+    """See lib/plan.plugin_root: the harness lives outside the plugin on purpose."""
+    for base in Path(__file__).resolve().parents:
+        cand = base / "plugins" / "c-review"
+        if (cand / "scripts").is_dir():
+            return cand
+    raise ResultError("cannot locate the c-review plugin above " + str(Path(__file__).resolve()))
+
+
+PLUGIN_SCRIPTS = _plugin_root() / "scripts"
 
 REQUIRED_FINDING_FIELDS = ("file", "line", "title", "description")
 OPTIONAL_FINDING_FIELDS = (

@@ -36,6 +36,7 @@ from lib import plan as plan_mod  # noqa: E402
 from lib import recipe as recipe_mod  # noqa: E402
 from lib import report as report_mod  # noqa: E402
 from lib import result as result_mod  # noqa: E402
+from lib import seal as seal_mod  # noqa: E402
 from lib import verify as verify_mod  # noqa: E402
 
 CORPORA = HERE / "corpora"
@@ -119,6 +120,28 @@ def cmd_partition(args: argparse.Namespace) -> int:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
+    # Refuse to deal packets while any corpus still has its answers in plaintext. A manual
+    # seal step gets skipped exactly once, and that run looks clean — so the ordering is
+    # enforced here rather than trusted to the operator, like `plan` already refusing an
+    # unverified corpus and `collect` refusing a half-written result.
+    workroot = Path(args.workdir) if args.workdir else DEFAULT_WORK
+    wanted = args.corpus or list(_recipes())
+    exposed: list[str] = []
+    for name in wanted:
+        wd = workroot / name
+        if not wd.is_dir():
+            continue
+        exposed += [str(p) for p in seal_mod.unsealed_plaintext(wd, HERE / "corpora")]
+    if exposed and not args.allow_unsealed:
+        print(
+            "bench: refusing to write packets while the answers are readable.\n"
+            + "".join(f"  {p}\n" for p in sorted(set(exposed))[:12])
+            + f"Run `bench.py seal --corpus <name>` first (key in ${seal_mod.KEY_ENV}).\n"
+            "An arm that can read these is not measuring anything. Use --allow-unsealed "
+            "only for a dry run whose numbers you will discard.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         plan = plan_mod.build_plan(
             tier=args.tier,
@@ -135,6 +158,44 @@ def cmd_plan(args: argparse.Namespace) -> int:
         print(f"bench: {exc}", file=sys.stderr)
         return 3
     print(plan_mod.format_plan(plan))
+    return 0
+
+
+def cmd_seal(args: argparse.Namespace) -> int:
+    workdir = Path(args.workdir or DEFAULT_WORK / args.corpus)
+    minted = None
+    try:
+        if args.mint_key:
+            minted = seal_mod.mint_key()
+            key = minted
+        else:
+            key = seal_mod.key_from_env(args.key)
+        info = seal_mod.seal(workdir, HERE / "corpora", key)
+    except seal_mod.SealError as exc:
+        print(f"bench: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"sealed {len(info['private_dirs'])} private dir(s) and "
+        f"{len(info['recipes'])} recipe(s) into {info['archive']} "
+        f"({info['sealed_bytes']} bytes); plaintext removed after a verified round-trip"
+    )
+    if minted:
+        print(
+            "\n!! PASSPHRASE — the only copy. Nothing on disk records it, and without it the\n"
+            "!! ground truth is unrecoverable. Save it now, then export it for `unseal`:\n"
+            f"!!\n!!     export {seal_mod.KEY_ENV}={minted}\n!!"
+        )
+    return 0
+
+
+def cmd_unseal(args: argparse.Namespace) -> int:
+    workdir = Path(args.workdir or DEFAULT_WORK / args.corpus)
+    try:
+        info = seal_mod.unseal(workdir, HERE / "corpora", seal_mod.key_from_env(args.key))
+    except seal_mod.SealError as exc:
+        print(f"bench: {exc}", file=sys.stderr)
+        return 2
+    print(f"unsealed {len(info['restored'])} path(s) from {info['archive']}")
     return 0
 
 
@@ -242,7 +303,28 @@ def main(argv: list[str] | None = None) -> int:
         help="plan a tier even though no corpus exists for one of its sizes; the plan and the "
         "report both record that the run was reduced",
     )
+    p.add_argument(
+        "--allow-unsealed",
+        action="store_true",
+        help="emit packets even though the answers are readable (dry runs only)",
+    )
     p.set_defaults(func=cmd_plan)
+
+    for name, fn, helptext in (
+        ("seal", cmd_seal, "encrypt the ground truth and recipes before any arm runs"),
+        ("unseal", cmd_unseal, "restore the ground truth so a run can be scored"),
+    ):
+        q = sub.add_parser(name, help=helptext)
+        q.add_argument("--corpus", required=True)
+        q.add_argument("--workdir")
+        q.add_argument("--key", help=f"passphrase; defaults to ${seal_mod.KEY_ENV}")
+        if name == "seal":
+            q.add_argument(
+                "--mint-key",
+                action="store_true",
+                help="generate a passphrase and print it (the only copy)",
+            )
+        q.set_defaults(func=fn)
 
     p = sub.add_parser("collect", help="normalise and schema-check one arm's result")
     p.add_argument("--run", required=True)

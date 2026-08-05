@@ -30,7 +30,7 @@ from lib import result as result_mod  # noqa: E402
 
 FIXTURES = HERE / "fixtures"
 SIGIL = HERE.parent / "corpora" / "sigil" / "recipe.json"
-WORKFLOW = HERE.parents[1] / "workflows" / "c-review.js"
+WORKFLOW = plan_mod.plugin_root() / "workflows" / "c-review.js"
 
 
 def write(path: Path, obj) -> Path:

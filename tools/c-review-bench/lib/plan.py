@@ -184,6 +184,25 @@ def _render(template: str, values: dict[str, str]) -> str:
     return out
 
 
+def plugin_root() -> Path:
+    """The c-review plugin, resolved explicitly.
+
+    The harness deliberately lives OUTSIDE the plugin: `pluginRoot` is handed to
+    c-review's own agents, so a benchmark under it would give the arm under test the
+    parent directory of its own answer key while no baseline had it. Do not move the
+    harness back in, and do not derive this from __file__'s ancestry.
+    """
+    here = Path(__file__).resolve()
+    for base in here.parents:
+        cand = base / "plugins" / "c-review"
+        if (cand / "workflows" / "c-review.js").is_file():
+            return cand
+    raise PlanError(
+        "cannot locate the c-review plugin from " + str(here) + "; expected a "
+        "plugins/c-review/workflows/c-review.js above the harness"
+    )
+
+
 def build_plan(
     tier: str,
     recipes: dict[str, dict[str, Any]],
@@ -241,7 +260,7 @@ def build_plan(
             raise PlanError(f"corpus {name!r} has a stamp that says verified=false; fix the corpus")
         stamps[name] = stamp
 
-    taxonomy = extract_taxonomy(Path(__file__).resolve().parents[2] / "workflows" / "c-review.js")
+    taxonomy = extract_taxonomy(plugin_root() / "workflows" / "c-review.js")
     taxonomy_text = "\n".join(f"- **{c['id']}** ({c['title']}): {c['brief']}" for c in taxonomy)
 
     run_dir = Path(run_dir)

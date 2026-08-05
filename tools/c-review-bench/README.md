@@ -16,7 +16,7 @@ Every design decision below is a response to one of those.
 ## The measurement loop
 
 ```sh
-cd plugins/c-review/bench
+cd tools/c-review-bench
 
 uv run bench.py corpora                        # what exists
 uv run bench.py verify --corpus sigil          # the integrity gate — required first
