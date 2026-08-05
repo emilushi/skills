@@ -7,7 +7,7 @@ within the window of the recorded site), and its text identifies the actual defe
 mechanism. Site proximity alone is not a hit — "there is something wrong around
 here" is not a finding.
 
-Four outcomes, not two:
+Five outcomes, not two:
 
 - `HIT` — found and reported to the user.
 - `SUPPRESSED` — some reviewer found it and the pipeline dropped it (a judge
@@ -16,6 +16,10 @@ Four outcomes, not two:
   misdiagnosed as a discovery problem.
 - `NEAR_MISS` — right site, mechanism keywords did not match. Read it: either the
   finding describes something else at that line, or the keyword list is stale.
+- `AMBIGUOUS` — one finding was the *only* mechanism-matching evidence for this bug
+  and for another bug at the same site, so at most one of them was really found and
+  the grader cannot say which. Not counted as recall. See `_resolve_ambiguity`: this
+  is the fix for a demonstrated recall inflation, not a hypothetical one.
 - `MISS` — nothing at that site.
 
 False positives are counted in three buckets, deliberately not one:
@@ -45,6 +49,7 @@ from .recipe import DECOY_CLAIM_TERMS
 HIT = "HIT"
 SUPPRESSED = "SUPPRESSED"
 NEAR_MISS = "NEAR_MISS"
+AMBIGUOUS = "AMBIGUOUS"
 MISS = "MISS"
 
 DECOY_FP = "DECOY_FP"
@@ -102,33 +107,163 @@ def finding_text(finding: dict[str, Any]) -> str:
     return finding_text_raw(finding).lower()
 
 
+SITE_FUNCTION = "function"
+SITE_LINE = "line"
+SITE_LINE_CROSS_FUNCTION = "line-cross-function"
+
+
 def site_matches(finding: dict[str, Any], item: dict[str, Any], window: int) -> tuple[bool, str]:
+    ok, why, _kind = site_match(finding, item, window)
+    return ok, why
+
+
+def site_match(finding: dict[str, Any], item: dict[str, Any], window: int) -> tuple[bool, str, str]:
+    """Is this finding at this bug's site, and on what evidence?
+
+    The rule is the documented one and deliberately an inclusive OR: a matching function
+    name, **or** a line within the window. The window is kept because a reviewer who
+    names a neighbouring function and points at the right line has found the bug, and the
+    ground truth's own idea of "the enclosing function" is a judgement call.
+
+    The third return value says *which* arm of the OR fired, because the two are not
+    equally strong and the harness used to lose that distinction. On the shipped `sigil`
+    corpus `tags_equal` (SGL-B13, line 87) and `tag_check` (SGL-B14, line 97) are ten
+    lines apart in different functions, so every finding naming one of them also lands at
+    the other's site by window. That is tolerable when it is visible and resolved in
+    favour of the function match, and silently wrong when it is not: in the one real run
+    a finding about `sgl_tag_compute` was graded at `tags_equal`'s site.
+    """
     function = normalise_function(finding.get("function"))
     wanted = normalise_function(item.get("function"))
     if function and wanted and function == wanted:
-        return True, f"function {finding.get('function')}"
+        return True, f"function {finding.get('function')}", SITE_FUNCTION
     try:
         line = int(finding.get("line", 0))
     except (TypeError, ValueError):
         line = 0
     anchor = int(item.get("line", 0))
     if line and anchor and abs(line - anchor) <= window:
-        return True, f"line {line} within {window} of {anchor}"
-    return False, ""
+        kind = SITE_LINE_CROSS_FUNCTION if (function and wanted) else SITE_LINE
+        detail = f"line {line} within {window} of {anchor}"
+        if kind == SITE_LINE_CROSS_FUNCTION:
+            detail += f" but names {finding.get('function')}, not {item.get('function')}"
+        return True, detail, kind
+    return False, "", ""
 
 
 def mechanism_matches(finding: dict[str, Any], item: dict[str, Any]) -> tuple[bool, list[str]]:
+    groups = item.get("mechanism_all_of") or []
+    if not groups:
+        # `all()` over an empty list is True, so an item with no keyword groups would turn
+        # every finding merely *near* its site into a HIT — the grader's own rule is that
+        # "proximity alone is not a hit", and this is how it would stop being true. The
+        # recipe validator rejects an empty group list, but the grader reads
+        # ground_truth.json, which is a separate file that can be stale or hand-edited.
+        raise GradeError(
+            f"ground-truth item {item.get('id')!r} has no mechanism_all_of groups, so its "
+            f"mechanism test would accept any finding at its site. A site match is not a hit."
+        )
     text = finding_text(finding)
     missing = [
         "/".join(group[:3]) + ("/..." if len(group) > 3 else "")
-        for group in item["mechanism_all_of"]
+        for group in groups
         if not any(term.lower() in text for term in group)
     ]
     return (not missing), missing
 
 
+def _best_candidate(
+    candidates: list[dict[str, Any]],
+    item: dict[str, Any],
+    contention: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Which finding to show as the evidence for this bug.
+
+    Not simply the first in file order, which is what this used to be. In both real runs
+    of the shipped corpus that picked a finding that described a *different* bug in the
+    same function: `SGL-B12` was reported as found by a finding about `SGL-B17`, while the
+    finding that actually described B12 sat unmentioned further down the list. A human
+    reading REPORT.md to check the grader was shown the wrong evidence for a right answer,
+    which is the worst possible combination.
+
+    Preference order, chosen so the result is total and stable:
+
+    1. a function-name match over a line-window match;
+    2. **the least contested finding** — one that matches only this bug is better evidence
+       for it than one that matches three. This is what separates the two findings in
+       `sgl_field_decode`, where both name the function and neither line is near either
+       anchor, so a distance tie-break would be coin-flipping on noise;
+    3. the closest line, then the id.
+    """
+    try:
+        anchor = int(item.get("line", 0))
+    except (TypeError, ValueError):
+        anchor = 0
+    contention = contention or {}
+
+    def key(candidate: dict[str, Any]) -> tuple[int, int, int, str]:
+        strength = 0 if candidate["site_kind"] == SITE_FUNCTION else 1
+        contested = contention.get(candidate["id"], 1)
+        distance = abs(candidate["line"] - anchor) if (candidate["line"] and anchor) else 10**6
+        return (strength, contested, distance, candidate["id"])
+
+    return min(candidates, key=key)
+
+
 def _reported(finding: dict[str, Any]) -> bool:
     return bool(finding.get("reported", True))
+
+
+def _resolve_ambiguity(rows: list[dict[str, Any]]) -> None:
+    """One finding must not be the *sole* evidence for two different bugs.
+
+    This is the defect that inflated recall on the one real run, and it is invisible in
+    the output it produces. Two bugs in the same function are graded against the same
+    findings, and the mechanism test is a keyword search over twelve concatenated fields,
+    so a single sufficiently discursive finding can satisfy both bugs' keyword groups
+    while describing only one of them. Demonstrated on the shipped corpus: delete the one
+    finding that actually describes `SGL-B12` (a state-machine bypass) and the run still
+    scores it a HIT, on a finding about `SGL-B17` that happens to contain the words
+    "state", "before", "tag", "record" and "authentication" somewhere in its prose.
+
+    The rule: if a finding is the only mechanism-matching candidate for more than one bug,
+    at most one of those bugs was actually found. The best-supported one keeps its outcome
+    and the rest become `AMBIGUOUS` — not `HIT`, because nothing in the run demonstrably
+    describes them, and not `MISS`, because something in the run might. A human reads it.
+
+    A bug with a *second*, independent matching finding is untouched: it has evidence that
+    does not depend on the contested one. That is why neither real run loses a hit here —
+    both filed a separate correct finding for the second bug — and it is exactly the
+    distinction that makes this safe to apply retroactively.
+    """
+    resolvable = [r for r in rows if r["outcome"] in (HIT, SUPPRESSED) and r["matching_findings"]]
+    sole: dict[str, list[dict[str, Any]]] = {}
+    for row in resolvable:
+        if len(row["matching_findings"]) == 1:
+            sole.setdefault(row["matching_findings"][0], []).append(row)
+    for finding_id, contested in sole.items():
+        if len(contested) < 2:
+            continue
+
+        # Keep the bug whose own function the finding named, then the closest line, then
+        # the lowest id, so the choice is total and does not depend on dict order.
+        def key(row: dict[str, Any]) -> tuple[int, int, str]:
+            evidence = row["evidence"] or {}
+            strength = 0 if evidence.get("site_kind") == SITE_FUNCTION else 1
+            distance = (
+                abs(evidence.get("line", 0) - row["line"])
+                if evidence.get("line") and row["line"]
+                else 10**6
+            )
+            return (strength, distance, str(row["id"]))
+
+        keeper = min(contested, key=key)
+        for row in contested:
+            if row is keeper:
+                continue
+            row["outcome"] = AMBIGUOUS
+            row["ambiguous_with"] = keeper["id"]
+            row["ambiguous_finding"] = finding_id
 
 
 def grade(
@@ -144,27 +279,59 @@ def grade(
             "the ground truth holds zero items, so grading would compare against nothing and "
             "report every arm as 0/0"
         )
-    if not findings:
+    variant = result.get("variant", ground_truth.get("variant", "bench"))
+    present = variant != "control"
+    if not findings and present:
         raise GradeError(
             f"arm {result.get('arm')!r} on corpus {result.get('corpus')!r} produced zero findings. "
             f"That is a run to investigate, not a recall of 0/{len(items)} — a scorer that "
             f"inspected nothing must not report a score."
         )
-
-    variant = result.get("variant", ground_truth.get("variant", "bench"))
-    present = variant != "control"
+    # On the patched control, zero findings is the *correct* outcome and the only perfect
+    # one: there is nothing there to find, so every claim would be a false positive. The
+    # bench-tree guard above must not fire here, or the first `--tier full` run refuses to
+    # score its own best result.
+    if "decoys" not in ground_truth:
+        raise GradeError(
+            "the ground truth has no `decoys` key, so the decoy-false-positive scan would "
+            "inspect nothing and report zero decoy hits — which reads identically to an arm "
+            "that fell for none of them. Rebuild the corpus."
+        )
+    if not ground_truth["decoys"]:
+        raise GradeError(
+            "the ground truth holds zero decoys, so the decoy-false-positive scan would "
+            "inspect nothing and report zero decoy hits. Every recipe is required to declare "
+            "decoys; a manifest without them was not built by this harness."
+        )
 
     matched: set[str] = set()
     rows: list[dict[str, Any]] = []
+    # How many bugs each finding is a mechanism-matching candidate for, computed over the
+    # whole item list before any evidence is chosen. A finding that matches one bug is
+    # better evidence for that bug than one that matches four.
+    contention: dict[str, int] = {}
+    for item in items:
+        for finding in findings:
+            if not file_matches(finding.get("file"), item["file"]):
+                continue
+            if not site_match(finding, item, window)[0]:
+                continue
+            if mechanism_matches(finding, item)[0]:
+                fid = str(finding.get("id", "?"))
+                contention[fid] = contention.get(fid, 0) + 1
     for item in items:
         candidates = []
         for finding in findings:
             if not file_matches(finding.get("file"), item["file"]):
                 continue
-            at_site, why = site_matches(finding, item, window)
+            at_site, why, site_kind = site_match(finding, item, window)
             if not at_site:
                 continue
             ok, missing = mechanism_matches(finding, item)
+            try:
+                found_line = int(finding.get("line", 0))
+            except (TypeError, ValueError):
+                found_line = 0
             candidates.append(
                 {
                     "id": str(finding.get("id", "?")),
@@ -172,6 +339,8 @@ def grade(
                     "mechanism_ok": ok,
                     "missing_mechanism_groups": missing,
                     "site": why,
+                    "site_kind": site_kind,
+                    "line": found_line,
                     "title": str(finding.get("title", "")),
                     "severity": str(finding.get("severity", "")),
                     "fp_verdict": str(finding.get("fp_verdict", "")),
@@ -182,11 +351,11 @@ def grade(
         suppressed = [c for c in candidates if c["mechanism_ok"] and not c["reported"]]
         near = [c for c in candidates if not c["mechanism_ok"]]
         if hits:
-            outcome, evidence = HIT, hits[0]
+            outcome, evidence = HIT, _best_candidate(hits, item, contention)
         elif suppressed:
-            outcome, evidence = SUPPRESSED, suppressed[0]
+            outcome, evidence = SUPPRESSED, _best_candidate(suppressed, item, contention)
         elif near:
-            outcome, evidence = NEAR_MISS, near[0]
+            outcome, evidence = NEAR_MISS, _best_candidate(near, item, contention)
         else:
             outcome, evidence = MISS, None
         # Every finding that describes this bug correctly is attributed to it, not only
@@ -206,8 +375,11 @@ def grade(
                 "outcome": outcome,
                 "evidence": evidence,
                 "candidate_count": len(candidates),
+                "matching_findings": sorted(c["id"] for c in candidates if c["mechanism_ok"]),
             }
         )
+
+    _resolve_ambiguity(rows)
 
     known = ground_truth.get("known_extra_findings") or []
 
@@ -268,7 +440,9 @@ def grade(
     by_difficulty: dict[str, dict[str, int]] = {}
     for row in rows:
         for bucket, key in ((by_class, row["bug_class"]), (by_difficulty, row["difficulty"])):
-            slot = bucket.setdefault(key, {"total": 0, "hits": 0, "suppressed": 0, "near": 0})
+            slot = bucket.setdefault(
+                key, {"total": 0, "hits": 0, "suppressed": 0, "near": 0, "ambiguous": 0}
+            )
             slot["total"] += 1
             if row["outcome"] == HIT:
                 slot["hits"] += 1
@@ -276,6 +450,8 @@ def grade(
                 slot["suppressed"] += 1
             elif row["outcome"] == NEAR_MISS:
                 slot["near"] += 1
+            elif row["outcome"] == AMBIGUOUS:
+                slot["ambiguous"] += 1
 
     reported_findings = [f for f in findings if _reported(f)]
     decoy_ids = {d["finding"] for d in decoy_hits}
@@ -295,11 +471,29 @@ def grade(
 
     control_fps = []
     if not present:
-        control_fps = [
-            {"finding": r["evidence"]["id"], "claimed": r["id"], "title": r["evidence"]["title"]}
-            for r in rows
-            if r["evidence"] is not None and r["outcome"] in (HIT, SUPPRESSED)
-        ]
+        by_id = {str(f.get("id", "?")): f for f in findings}
+        for row in rows:
+            evidence = row["evidence"]
+            if evidence is None or row["outcome"] not in (HIT, SUPPRESSED, AMBIGUOUS):
+                continue
+            # A control-tree claim is a false positive "certain by construction" only if
+            # there is genuinely nothing to find there. Where the recipe itself records a
+            # weakness of the clean code at that function, there is: the weakness is present
+            # in the control tree by definition. Charging it would penalise an arm for being
+            # right, which is the same mistake that was already fixed once for decoys.
+            source = by_id.get(evidence["id"])
+            if source is not None and known_extra_for(source):
+                known_extras.append(
+                    {
+                        "finding": evidence["id"],
+                        "function": row["function"],
+                        "note": known_extra_for(source)["note"],
+                    }
+                )
+                continue
+            control_fps.append(
+                {"finding": evidence["id"], "claimed": row["id"], "title": evidence["title"]}
+            )
 
     return {
         "arm": result.get("arm"),
@@ -313,6 +507,7 @@ def grade(
         "recall": len(hit_rows) / len(items) if present else None,
         "suppressed": sum(1 for r in rows if r["outcome"] == SUPPRESSED),
         "near_misses": sum(1 for r in rows if r["outcome"] == NEAR_MISS),
+        "ambiguous": sum(1 for r in rows if r["outcome"] == AMBIGUOUS),
         "misses": sum(1 for r in rows if r["outcome"] == MISS),
         "false_positives": {
             DECOY_FP: decoy_hits,
@@ -334,6 +529,7 @@ CONTROL_LABELS = {
     HIT: "FP_CLAIMED",
     SUPPRESSED: "FP_DROPPED",
     NEAR_MISS: "near-claim",
+    AMBIGUOUS: "FP_AMBIG",
     MISS: "silent",
 }
 
@@ -359,6 +555,11 @@ def format_grade(scored: dict[str, Any]) -> str:
             detail = (
                 f"{evidence['id']} found, not reported ({evidence['fp_verdict'] or 'no verdict'})"
             )
+        elif row["outcome"] == AMBIGUOUS:
+            detail = (
+                f"only evidence is {row['ambiguous_finding']}, which is also the only evidence "
+                f"for {row['ambiguous_with']} — not credited to both"
+            )
         else:
             detail = f"{evidence['id']} [{evidence['severity'] or '-'}] {evidence['site']}"
         outcome = CONTROL_LABELS[row["outcome"]] if control else row["outcome"]
@@ -370,8 +571,14 @@ def format_grade(scored: dict[str, Any]) -> str:
         lines.append(
             f"recall: {scored['hits']}/{scored['graded_items']} = {scored['recall']:.1%}   "
             f"suppressed: {scored['suppressed']}   near-miss: {scored['near_misses']}   "
-            f"miss: {scored['misses']}"
+            f"ambiguous: {scored['ambiguous']}   miss: {scored['misses']}"
         )
+        if scored["ambiguous"]:
+            lines.append(
+                "  AMBIGUOUS means one finding was the only evidence for two bugs at the same "
+                "site, so at most one of them was actually found. Read those findings before "
+                "quoting the recall figure."
+            )
     else:
         lines.append(
             "patched control: every claim of an injected bug here is a false positive "

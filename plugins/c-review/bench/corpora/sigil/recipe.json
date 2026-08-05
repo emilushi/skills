@@ -2,8 +2,8 @@
   "id": "sigil",
   "tier": "small",
   "description": "A telemetry framing library written from scratch for this harness. No upstream exists, so there is nothing to look up, diff or recall: the code, the bugs and the decoys are all ours.",
-  "threat_model": "REMOTE",
-  "attacker_controls": "every byte of the frames handed to sgl_feed(), including all lengths, names, values and tags",
+  "threat_model": "REMOTE and LOCAL_UNPRIVILEGED",
+  "attacker_controls": "every byte of the frames handed to sgl_feed(), including all lengths, names, values and tags. A local unprivileged process is also in scope: it can act on the filesystem paths the embedding application passes to sgl_spool_write()",
   "scope_subpath": ".",
   "base": {
     "kind": "authored",
@@ -72,11 +72,11 @@
         ],
         [
           "value_len",
-          "value",
-          "memcpy",
           "sgl_value_max",
-          "96",
-          "buffer"
+          "96-byte",
+          "value array",
+          "out->value",
+          "value buffer"
         ]
       ],
       "call_path": [
@@ -174,8 +174,7 @@
           "delimiter",
           "sgl_sep",
           "invariant",
-          "inject",
-          "ambiguous"
+          "inject"
         ],
         [
           "scope",
@@ -363,11 +362,12 @@
           "beyond"
         ],
         [
-          "sub",
-          "len",
           "remaining",
-          "group",
-          "bound"
+          "sub-length",
+          "sublength",
+          "sub length",
+          "len - off",
+          "bytes left"
         ]
       ],
       "call_path": [
@@ -539,7 +539,7 @@
           "double free",
           "double-free",
           "twice",
-          "again",
+          "second time",
           "stale pointer"
         ],
         [
@@ -580,18 +580,17 @@
       "attacker_control": "the flags byte of the first frame on a connection",
       "mechanism_all_of": [
         [
-          "state",
           "handshake",
-          "before",
           "bypass",
-          "unauthenticated"
+          "unauthenticated",
+          "state machine",
+          "without authenticating"
         ],
         [
-          "init",
-          "flag",
-          "tag",
-          "record",
-          "authentication"
+          "hello",
+          "sgl_flag_hello",
+          "init state",
+          "sgl_st_init"
         ]
       ],
       "call_path": [
@@ -680,17 +679,18 @@
       "mechanism_all_of": [
         [
           "nonce",
-          "iv",
           "reuse",
+          "reused",
           "replay",
-          "counter"
+          "replayable"
         ],
         [
-          "payload_len",
           "zero-length",
-          "increment",
+          "empty payload",
+          "empty-payload",
           "advance",
-          "tag"
+          "increment",
+          "only advances"
         ]
       ],
       "call_path": [
@@ -733,11 +733,11 @@
           "atomic"
         ],
         [
-          "stat",
-          "open",
           "o_excl",
           "exclusive",
-          "path"
+          "stat-then-open",
+          "stat followed",
+          "existence test"
         ]
       ],
       "call_path": [
@@ -786,10 +786,11 @@
           "previous"
         ],
         [
-          "record",
+          "field_count",
           "scope",
-          "field",
-          "reset"
+          "previous frame",
+          "earlier frame",
+          "fields["
         ]
       ],
       "call_path": [
@@ -815,7 +816,7 @@
     {
       "id": "SGL-B17",
       "bug_class": "validate-one-copy-use-another",
-      "difficulty": "HARD",
+      "difficulty": "MEDIUM",
       "file": "src/session.c",
       "function": "sgl_feed",
       "mechanism": "The size that is validated against the scratch buffer is the frame span, but the size that is copied is the caller's whole buffer length, so a peer that sends more bytes than the header declares overflows the session scratch buffer.",
@@ -823,17 +824,16 @@
       "mechanism_all_of": [
         [
           "validated",
-          "checked",
+          "validates",
           "different",
-          "one",
-          "mismatch"
+          "mismatch",
+          "not the same",
+          "instead of"
         ],
         [
           "span",
-          "len",
-          "memcpy",
           "scratch",
-          "copy"
+          "memcpy"
         ]
       ],
       "call_path": [
@@ -856,72 +856,100 @@
         "  }",
         "  memcpy(session->scratch, buf, len);"
       ],
-      "site_marker": "  memcpy(session->scratch, buf, len);"
+      "site_marker": "  memcpy(session->scratch, buf, len);",
+      "tier_note": "Re-tiered from HARD by audit 2026-08-05: the substituted value is subtle, but the symptom is memcpy(fixed_buffer, attacker_buf, attacker_len), which a reviewer flags without needing the span/len distinction."
     }
   ],
   "decoys": [
     {
       "id": "SGL-D01",
-      "decoy_kind": "extra-init",
-      "file": "src/session.c",
-      "safe_because": "session is assigned from calloc before its first read on every path that reaches one, so an initialiser cannot change any value the function returns.",
+      "decoy_kind": "value-preserving-cast",
+      "file": "src/path.c",
+      "safe_because": "name_len + 1 cannot exceed 32, so the cast to uint8_t (maximum 255) changes no value on any input. sgl_path_build returns SGL_E_FORMAT unless the sgl_name_check(name) call earlier in the same function returned SGL_OK, and sgl_name_check returns SGL_OK only after scanning to the NUL with a scanned length below SGL_NAME_MAX, which is 32 — that holds with SGL-D05's loop bound applied too, since a scan that stops at SGL_PATH_MAX leaves i at 96 and fails the same SGL_NAME_MAX test. name_len is then strlen(name), which is that scanned length. The memcpy therefore copies name_len + 1 bytes either way, and no other statement reads the cast expression.",
       "anchor": [
-        "sgl_session *sgl_session_new(const unsigned char key[SGL_KEY_LEN]) {",
-        "  sgl_session *session;"
+        "  scope_len = strlen(scope);",
+        "  name_len = strlen(name);",
+        "  if (scope_len + name_len + 2 > out_size) {",
+        "    return SGL_E_LIMIT;",
+        "  }",
+        "",
+        "  memcpy(out, scope, scope_len);",
+        "  out[scope_len] = SGL_SEP;",
+        "  memcpy(out + scope_len + 1, name, name_len + 1);"
       ],
       "replacement": [
-        "sgl_session *sgl_session_new(const unsigned char key[SGL_KEY_LEN]) {",
-        "  sgl_session *session = NULL;"
+        "  scope_len = strlen(scope);",
+        "  name_len = strlen(name);",
+        "  if (scope_len + name_len + 2 > out_size) {",
+        "    return SGL_E_LIMIT;",
+        "  }",
+        "",
+        "  memcpy(out, scope, scope_len);",
+        "  out[scope_len] = SGL_SEP;",
+        "  memcpy(out + scope_len + 1, name, (uint8_t)(name_len + 1));"
       ],
-      "function": "sgl_session_new"
+      "site_marker": "  memcpy(out + scope_len + 1, name, (uint8_t)(name_len + 1));",
+      "function": "sgl_path_build"
     },
     {
       "id": "SGL-D02",
-      "decoy_kind": "equivalent-expression",
+      "decoy_kind": "extra-assert",
       "file": "src/table.c",
-      "safe_because": "size_t multiplication is commutative and both operands are unsigned with no intermediate conversion, so the byte count handed to memset is bit-for-bit identical and nothing else observes the expression.",
+      "safe_because": "the assertion holds on every reachable path, so it never fires and the realloc it now precedes is unchanged. table->cap is set to 4 by sgl_table_new and is only ever assigned cap at the end of a table_grow whose realloc succeeded, so it is a power of two of at least 4: cap = table->cap * 2 is therefore greater than table->cap, and cap <= SIZE_MAX / sizeof(char *) fails only once table->cap exceeds SIZE_MAX / (2 * sizeof(char *)), which would require an earlier realloc of more than half the address space to have succeeded. No injected bug touches cap: SGL-B09 discards this function's return value without changing its arithmetic. Moving the realloc below the assertion is unobservable because the assertion has no side effects and cannot fire.",
       "anchor": [
-        "  memset(slots + table->cap, 0, (cap - table->cap) * sizeof(char *));"
+        "static int table_grow(sgl_table *table) {",
+        "  size_t cap = table->cap * 2;",
+        "  char **slots = realloc(table->slots, cap * sizeof(char *));",
+        "",
+        "  if (slots == NULL) {",
+        "    return SGL_E_MEM;",
+        "  }"
       ],
       "replacement": [
-        "  memset(slots + table->cap, 0, sizeof(char *) * (cap - table->cap));"
+        "#include <assert.h>",
+        "",
+        "static int table_grow(sgl_table *table) {",
+        "  size_t cap = table->cap * 2;",
+        "  char **slots;",
+        "",
+        "  /* The table doubles from four, so the byte count cannot wrap. */",
+        "  assert(cap > table->cap && cap <= SIZE_MAX / sizeof(char *));",
+        "  slots = realloc(table->slots, cap * sizeof(char *));",
+        "  if (slots == NULL) {",
+        "    return SGL_E_MEM;",
+        "  }"
       ],
+      "site_marker": "  assert(cap > table->cap && cap <= SIZE_MAX / sizeof(char *));",
       "function": "table_grow"
     },
     {
       "id": "SGL-D03",
-      "decoy_kind": "renamed-local",
-      "file": "src/path.c",
-      "safe_because": "a loop index rename inside one function; no other declaration of either name is in scope and the index is not used after the loop except in the same comparison.",
+      "decoy_kind": "reordered-independent",
+      "file": "src/session.c",
+      "safe_because": "names is a copy of the pointer value, loaded before free(session), and the table it points at is a separate allocation returned by sgl_table_new — it does not live inside the session block. Nothing after free(session) reads *session: sgl_table_free is passed the local copy and touches only the table, its slots array and the slot strings. The two frees release disjoint allocations, so which goes first is not observable program behaviour, and every table this function can be handed is freed exactly once either way.",
       "anchor": [
-        "int sgl_name_check(const char *name) {",
-        "  size_t i;",
-        "",
-        "  if (name == NULL || name[0] == '\\0') {",
-        "    return SGL_E_FORMAT;",
+        "void sgl_session_free(sgl_session *session) {",
+        "  if (session == NULL) {",
+        "    return;",
         "  }",
-        "  for (i = 0; name[i] != '\\0'; i++) {",
-        "    if (!SGL_IS_NAME_CH((unsigned char)name[i])) {",
-        "      return SGL_E_FORMAT;",
-        "    }",
-        "  }",
-        "  if (i >= SGL_NAME_MAX) {"
+        "  sgl_table_free(session->names);",
+        "  free(session);",
+        "}"
       ],
       "replacement": [
-        "int sgl_name_check(const char *name) {",
-        "  size_t pos;",
+        "void sgl_session_free(sgl_session *session) {",
+        "  sgl_table *names;",
         "",
-        "  if (name == NULL || name[0] == '\\0') {",
-        "    return SGL_E_FORMAT;",
+        "  if (session == NULL) {",
+        "    return;",
         "  }",
-        "  for (pos = 0; name[pos] != '\\0'; pos++) {",
-        "    if (!SGL_IS_NAME_CH((unsigned char)name[pos])) {",
-        "      return SGL_E_FORMAT;",
-        "    }",
-        "  }",
-        "  if (pos >= SGL_NAME_MAX) {"
+        "  names = session->names;",
+        "  free(session);",
+        "  sgl_table_free(names);",
+        "}"
       ],
-      "function": "sgl_name_check"
+      "site_marker": "  sgl_table_free(names);",
+      "function": "sgl_session_free"
     },
     {
       "id": "SGL-D04",
@@ -945,16 +973,25 @@
     },
     {
       "id": "SGL-D05",
-      "decoy_kind": "equivalent-expression",
-      "file": "src/frame.c",
-      "safe_because": "the four shifted bytes occupy disjoint bit ranges of a uint32_t, so combining them with + gives the same value as | with no carry between them.",
+      "decoy_kind": "strengthened-bound",
+      "file": "src/path.c",
+      "safe_because": "the added loop bound is SGL_PATH_MAX (96) while the check immediately after the loop rejects any name whose scanned length reaches SGL_NAME_MAX (32), so the loop can only stop early on a name that the function then refuses with SGL_E_LIMIT — exactly the value it returned before. No caller can even reach the bound: sgl_table_intern passes a strdup of sgl_field.name, which is a 32-byte array that sgl_field_decode NUL-terminates, and sgl_path_build passes an interned name from that same array, so every name this function sees is shorter than 32 bytes in both variants (SGL-B05 raises that ceiling to 32, still far below 96). The only input whose result would differ is a name longer than 96 bytes whose first invalid character sits past byte 95, which no call site can construct.",
       "anchor": [
-        "  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];"
+        "  for (i = 0; name[i] != '\\0'; i++) {",
+        "    if (!SGL_IS_NAME_CH((unsigned char)name[i])) {",
+        "      return SGL_E_FORMAT;",
+        "    }",
+        "  }"
       ],
       "replacement": [
-        "  return ((uint32_t)p[0] << 24) + ((uint32_t)p[1] << 16) + ((uint32_t)p[2] << 8) + (uint32_t)p[3];"
+        "  for (i = 0; i < SGL_PATH_MAX && name[i] != '\\0'; i++) {",
+        "    if (!SGL_IS_NAME_CH((unsigned char)name[i])) {",
+        "      return SGL_E_FORMAT;",
+        "    }",
+        "  }"
       ],
-      "function": "rd32"
+      "site_marker": "  for (i = 0; i < SGL_PATH_MAX && name[i] != '\\0'; i++) {",
+      "function": "sgl_name_check"
     },
     {
       "id": "SGL-D06",
@@ -973,18 +1010,19 @@
     },
     {
       "id": "SGL-D07",
-      "decoy_kind": "extra-init",
+      "decoy_kind": "equivalent-expression",
       "file": "src/table.c",
-      "safe_because": "the index is assigned by the for statement on the next line before any read, so an initialiser cannot change which slots are freed.",
+      "safe_because": "table->cap is the literal 4 assigned on the line immediately above and nothing between the two statements can change it, so the product is 4 * sizeof(char *) — a constant that cannot wrap on any target. calloc allocates nmemb * size zeroed bytes and is required to return storage aligned for any fundamental type whatever the split of its two arguments, so calloc(4 * sizeof(char *), 1) and calloc(4, sizeof(char *)) return interchangeable blocks: the same byte count, the same zeroed contents, the same alignment. No injected bug reaches this statement; SGL-B09 and SGL-B10 are in sgl_table_intern.",
       "anchor": [
-        "void sgl_table_free(sgl_table *table) {",
-        "  size_t i;"
+        "  table->cap = 4;",
+        "  table->slots = calloc(table->cap, sizeof(char *));"
       ],
       "replacement": [
-        "void sgl_table_free(sgl_table *table) {",
-        "  size_t i = 0;"
+        "  table->cap = 4;",
+        "  table->slots = calloc(table->cap * sizeof(char *), 1);"
       ],
-      "function": "sgl_table_free"
+      "site_marker": "  table->slots = calloc(table->cap * sizeof(char *), 1);",
+      "function": "sgl_table_new"
     },
     {
       "id": "SGL-D08",
@@ -1024,18 +1062,27 @@
     },
     {
       "id": "SGL-D10",
-      "decoy_kind": "renamed-local",
-      "file": "src/frame.c",
-      "safe_because": "a parameter rename in a two-line function; the name is not referenced anywhere else and no other declaration of it is in scope.",
+      "decoy_kind": "reordered-independent",
+      "file": "src/table.c",
+      "safe_because": "the three operands of the disjunction are side-effect-free and none of them can trap, so || evaluates to the same value whatever order the last two sit in. table == NULL stays first, so table->used is still only read for a non-NULL table. Swapping the other two changes nothing because the second already covers the third: converting a negative int to size_t is defined and yields at least SIZE_MAX - INT_MAX + 1, and table->used counts successfully allocated slot pointers of at least one byte each, so it can never reach that. Every negative slot therefore returns NULL through (size_t)slot >= table->used exactly as it previously did through slot < 0, and the accepted range is unchanged.",
       "anchor": [
-        "size_t sgl_frame_span(const sgl_frame *frame) {",
-        "  return (size_t)SGL_HEADER_LEN + (size_t)frame->payload_len + (size_t)SGL_TAG_LEN;"
+        "const char *sgl_table_name(const sgl_table *table, int slot) {",
+        "  if (table == NULL || slot < 0 || (size_t)slot >= table->used) {",
+        "    return NULL;",
+        "  }",
+        "  return table->slots[slot];",
+        "}"
       ],
       "replacement": [
-        "size_t sgl_frame_span(const sgl_frame *header) {",
-        "  return (size_t)SGL_HEADER_LEN + (size_t)header->payload_len + (size_t)SGL_TAG_LEN;"
+        "const char *sgl_table_name(const sgl_table *table, int slot) {",
+        "  if (table == NULL || (size_t)slot >= table->used || slot < 0) {",
+        "    return NULL;",
+        "  }",
+        "  return table->slots[slot];",
+        "}"
       ],
-      "function": "sgl_frame_span"
+      "site_marker": "  if (table == NULL || (size_t)slot >= table->used || slot < 0) {",
+      "function": "sgl_table_name"
     }
   ],
   "known_extra_findings": [
@@ -1048,6 +1095,11 @@
       "file": "src/spool.c",
       "function": "sgl_spool_write",
       "note": "The spool line prints field->name with %s, and a name is only NUL-terminated because sgl_field_decode terminates it; a reviewer who does not follow that invariant across the two files reasonably flags it. Present in the clean tree, so it is neither an injected bug nor a false positive."
+    },
+    {
+      "file": "src/session.c",
+      "function": "tag_check",
+      "note": "The tag is computed over the payload only, so the ten-byte header - flags, seq, version and payload_len - is unauthenticated. That is true of the clean tree and of the control variant, so it is a property of the corpus's own toy framing rather than an injected bug. Both real runs reported it. Recorded so it is neither credited as the nonce-reuse injection that sits at the same site nor charged as a false positive on the control tree, and so repeat runs stop re-triaging it."
     }
   ]
 }

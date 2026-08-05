@@ -177,6 +177,11 @@ def normalise_c_review(doc: dict[str, Any]) -> dict[str, Any]:
     return {
         "findings": findings,
         "external_sources_consulted": consulted,
+        # How many hunters declared anything at all. Carried through so `score` can say
+        # whether the declaration check inspected zero records: an empty list and a list of
+        # sixteen clean declarations both produce `consulted: false`, and only one of them
+        # is evidence.
+        "declarations_seen": sum(1 for e in externals if isinstance(e, dict)),
         "external_sources_detail": detail or "none",
         "native_stats": doc.get("stats", {}),
         "groups_attempted": doc.get("run", {}).get("groups_attempted", []),
@@ -198,6 +203,9 @@ def normalise_generic(doc: dict[str, Any]) -> dict[str, Any]:
     return {
         "findings": findings,
         "external_sources_consulted": bool(doc.get("external_sources_consulted", False)),
+        # A generic arm's packet asks for the field explicitly, so its presence is the
+        # declaration and its absence is silence. The two are not the same evidence.
+        "declarations_seen": 1 if "external_sources_consulted" in doc else 0,
         "external_sources_detail": str(doc.get("external_sources_detail", "none")),
     }
 

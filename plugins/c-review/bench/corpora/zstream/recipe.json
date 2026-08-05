@@ -998,7 +998,7 @@
           "double-free",
           "freed twice",
           "second time",
-          "again"
+          "twice"
         ],
         [
           "state->size",
@@ -1062,26 +1062,21 @@
       "mechanism_all_of": [
         [
           "unbounded",
-          "not clamped",
-          "no clamp",
+          "clamp",
           "not limited",
-          "unchecked",
-          "overflow",
-          "past the end",
-          "beyond"
+          "no limit"
         ],
         [
-          "output",
           "avail_out",
-          "left",
-          "output buffer"
+          "output buffer",
+          "remaining output",
+          "output space"
         ],
         [
           "stored",
-          "copy",
-          "memcpy",
-          "length",
-          "block"
+          "stored-block",
+          "stored block",
+          "memcpy"
         ]
       ],
       "call_path": [

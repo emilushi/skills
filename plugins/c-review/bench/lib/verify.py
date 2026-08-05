@@ -37,6 +37,7 @@ from typing import Any
 
 from . import corpus as corpus_mod
 from . import deidentify as deid_mod
+from . import grade as grade_mod
 from . import inject as inject_mod
 from .recipe import DECOY_KINDS, counts
 
@@ -350,14 +351,86 @@ def _mechanism_self_match(item: dict[str, Any]) -> list[str]:
     will not match a reviewer's correct description either, and recall drops for a
     reason that has nothing to do with the reviewer.
     """
-    text = " ".join(
-        str(item.get(field, "")) for field in ("mechanism", "bug_class", "attacker_control")
-    ).lower()
+    text = _mechanism_text(item)
     return [
         "/".join(group[:3])
         for group in item["mechanism_all_of"]
         if not any(term.lower() in text for term in group)
     ]
+
+
+def _mechanism_text(item: dict[str, Any]) -> str:
+    return " ".join(
+        str(item.get(field, "")) for field in ("mechanism", "bug_class", "attacker_control")
+    ).lower()
+
+
+def _satisfies(text: str, groups: list[list[str]]) -> bool:
+    return all(any(term.lower() in text for term in group) for group in groups)
+
+
+def check_mechanism_discrimination(manifest: dict[str, Any], window: int) -> Check:
+    """Can the keyword groups tell two bugs at the same grading site apart?
+
+    `check_ground_truth` is the grader's *positive* control: each bug's own description
+    must satisfy its own keyword groups, or a correct finding scores NEAR_MISS. This is the
+    negative control, and it was missing.
+
+    The grader keys on the enclosing function, falling back to a line window, so two bugs
+    in one function are graded against the same set of findings. If bug X's keyword groups
+    are loose enough to be satisfied by a description of bug Y, then one finding about Y is
+    scored as having found both — recall goes up by one for a bug nothing in the run
+    describes. That is not hypothetical: on the shipped `sigil` corpus, deleting the only
+    finding that described the state-machine bypass left it scored as a HIT on a finding
+    about a different bug eleven lines away in the same function.
+
+    The probe is each bug's own `mechanism` sentence, because that is the only text this
+    harness owns that is known to be a correct description of one bug and not of another.
+    It is a weaker probe than a reviewer's prose — the terse sentence has less surface for
+    an accidental match than twelve concatenated finding fields — so passing this is a
+    floor, not a guarantee. `grade._resolve_ambiguity` is the backstop for what gets
+    through.
+    """
+    items = manifest["items"]
+    pairs = 0
+    problems: list[str] = []
+    for x in items:
+        for y in items:
+            if x["id"] == y["id"] or x["file"] != y["file"]:
+                continue
+            colocated = x["function"] == y["function"] or abs(x["line"] - y["line"]) <= window
+            if not colocated:
+                continue
+            pairs += 1
+            if _satisfies(_mechanism_text(x), y["mechanism_all_of"]):
+                where = (
+                    f"the same function {x['function']}()"
+                    if x["function"] == y["function"]
+                    else (
+                        f"{abs(x['line'] - y['line'])} line(s) apart, inside the "
+                        f"{window}-line window"
+                    )
+                )
+                problems.append(
+                    f"{y['id']}'s keyword groups are satisfied by {x['id']}'s own mechanism text, "
+                    f"and the two are at {where}. One finding about {x['id']} would be scored as "
+                    f"having found {y['id']} too. Make {y['id']}'s groups name something only "
+                    f"{y['id']} has."
+                )
+    return Check(
+        name="mechanism_discrim",
+        ok=not problems,
+        # The unit of inspection is the item, not the pair: a corpus whose bugs are all in
+        # different functions has zero co-located pairs, and that is a good property rather
+        # than a check that ran on nothing. Zero *items* is what would be vacuous, and the
+        # recipe validator has already refused that.
+        inspected=len(items),
+        detail=(
+            f"{len(items)} bug(s), {pairs} co-located ordered pair(s); each pair's keyword "
+            f"groups must reject the other's mechanism"
+        ),
+        problems=problems,
+    )
 
 
 def check_ground_truth(tree: Path, manifest: dict[str, Any]) -> Check:
@@ -486,6 +559,9 @@ def gate(
         check_deidentified(bench_tree, manifests[corpus_mod.BENCH], recipe, bench_private)
     )
     checks.append(check_ground_truth(bench_tree, manifests[corpus_mod.BENCH]))
+    checks.append(
+        check_mechanism_discrimination(manifests[corpus_mod.BENCH], grade_mod.DEFAULT_WINDOW)
+    )
     checks.append(check_variants(manifests[corpus_mod.BENCH], manifests[corpus_mod.CONTROL]))
 
     passed = verdict(checks)

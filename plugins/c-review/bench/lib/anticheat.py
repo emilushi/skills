@@ -43,6 +43,12 @@ from typing import Any
 # fetch, a search or a browser is treated the same way: this is a benchmark, and a
 # tool that can read the internet can read a project's advisories.
 ORACLE_TOOLS = {"webfetch", "websearch"}
+# Substrings that make an MCP tool name a network tool. The first version listed only
+# `web_search`, `web_fetch`, `browser`, `search_exa` and `fetch_url`, which let through
+# every MCP server whose tool is called plainly `fetch`, `scrape` or `crawl` — and those
+# are the common names. `fetch` and `download` are deliberately bare substrings: in a
+# benchmark, a tool that fetches or downloads is an oracle whatever else its name says,
+# and a cloud-drive read is an external source exactly as much as an HTTP GET is.
 ORACLE_MCP_HINTS = (
     "web_search",
     "web_fetch",
@@ -50,8 +56,71 @@ ORACLE_MCP_HINTS = (
     "webfetch",
     "browser",
     "search_exa",
-    "fetch_url",
+    "fetch",
+    "crawl",
+    "scrape",
+    "download",
+    "puppeteer",
+    "playwright",
+    "open_url",
+    "read_url",
+    "http_get",
+    "urlopen",
 )
+
+# Interpreters that can open a socket in one line, so the binary name says nothing about
+# whether the command reached the network. `curl` is caught by name; `python3 -c
+# "urllib.request.urlopen(...)"` was not caught at all, and base64-obscuring the host made
+# even the advisory disappear. The pairing rule below is what closes it.
+SCRIPT_INTERPRETERS = {
+    "python",
+    "python2",
+    "python3",
+    "perl",
+    "ruby",
+    "node",
+    "deno",
+    "bun",
+    "php",
+    "osascript",
+    "Rscript",
+    "julia",
+    "lua",
+    "tclsh",
+    "ghc",
+    "runghc",
+}
+# Calls that open a connection. Paired with an interpreter these are a violation: there is
+# no reading of a local corpus that needs them.
+NETWORK_CALLS = (
+    "urlopen",
+    "urllib",
+    "requests.get",
+    "requests.post",
+    "urlretrieve",
+    "http.client",
+    "httpx",
+    "aiohttp",
+    "socket.create_connection",
+    "socket.connect",
+    "net::http",
+    "lwp::",
+    "open-uri",
+    "fetch(",
+    "createconnection",
+    "https.get",
+    "http.get",
+)
+# A bare URL in a script is only an advisory. A recommendation string can legitimately
+# contain one, and a violation excludes the arm from the comparison — too heavy a
+# consequence for a URL that was printed rather than opened.
+URL_SCHEMES = ("https://", "http://", "ftp://", "git://")
+# Wrappers that hide the real binary one token to the right. Without this, `uv run python
+# -c "urlopen(...)"` presents `uv` as the command and nothing matches.
+RUNNER_PREFIXES = {("uv", "run"), ("poetry", "run"), ("pipx", "run"), ("pnpm", "exec")}
+RUNNER_WORDS = {"uvx", "npx", "bunx", "xargs", "stdbuf"}
+# Tools that answer "how do these two trees differ", which on this corpus is the answer key.
+TREE_COMPARERS = {"diff", "cmp", "comm", "diff3", "vimdiff", "delta", "difft", "rsync", "meld"}
 
 NETWORK_BINARIES = {
     "curl",
@@ -138,13 +207,23 @@ ORACLE_HOSTS = (
 # reported as a violation, and the first real arm run scored INVALID for doing its job.
 # An over-triggering integrity check is worse than none: it gets switched off.
 ANSWER_KEY_PATTERNS = (
-    re.compile(r"ground_truth\.json"),
+    # Not `ground_truth\.json`: a glob or a `find -name 'ground_truth*'` evaded that and
+    # scored VALID. The stem is enough — no corpus contains the word.
+    re.compile(r"ground_truth"),
     re.compile(r"verified\.json"),
     re.compile(r"maps\.json"),
     re.compile(r"recipe\.json"),
     # `bench-private/`, `control-private/`: the answer-key directory convention. The
-    # trailing slash and the `-` prefix are both required, so `/private/tmp` is not it.
-    re.compile(r"[A-Za-z0-9_.]+-private/"),
+    # `-private/` is required literally, so macOS's `/private/tmp` is not it — that
+    # over-trigger scored the first honest arm INVALID for reading its own corpus. The
+    # leading character class now admits glob metacharacters, because
+    # `.../work/sigil/*-private/g*.json` reads the answer key just as effectively as
+    # spelling it out and used to pass.
+    re.compile(r"[A-Za-z0-9_.*?\[\]{}-]*-private/"),
+    # The pre-de-identification tree. It is the diff that gives every injection away, and
+    # it is only ever reachable under a `*-private/` path, but name it explicitly so a
+    # future layout change does not silently drop it.
+    re.compile(r"/staged/"),
     # The harness's own source, not a corpus directory that happens to be called tests/.
     re.compile(r"c-review/bench/(?:lib|corpora|arms|tests|judge_bench)/"),
     re.compile(r"c-review/bench/(?:README\.md|bench\.py)"),
@@ -154,6 +233,86 @@ ANSWER_KEY_PATTERNS = (
 CVE_RE = re.compile(r"\bCVE-\d{4}-\d{3,7}\b", re.IGNORECASE)
 SPLIT_RE = re.compile(r"(?:\|\||&&|[;|\n&])")
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+PATH_RE = re.compile(r"/(?:[A-Za-z0-9_.*?@+~-]|\\ )+(?:/(?:[A-Za-z0-9_.*?@+~-]|\\ )*)*")
+
+
+class Containment:
+    """Which absolute paths this arm was given, and which ones are the answers.
+
+    The name-pattern rules above catch a path *shaped* like an answer key. This catches a
+    path that simply is not the arm's own tree, which is a stronger and simpler claim — and
+    it is the one that was missing.
+
+    The layout makes it necessary. `verify` emits, side by side under one work root:
+
+        <workroot>/<corpus>/bench/            the tree the packet hands the arm
+        <workroot>/<corpus>/control/          the same code with the bugs removed
+        <workroot>/<corpus>/bench-private/    ground_truth.json, maps.json, staged/
+        <workroot>/<corpus>/verified.json
+
+    and `fetch_base` caches the pristine upstream tarball and its extraction in the parent
+    of the default work root:
+
+        ~/.cache/c-review-bench/zstream-<digest>-src/     un-de-identified zlib, ChangeLog and all
+
+    So `diff -r ../bench ../control` lists every injected bug, and `ls ../..` finds the
+    upstream the de-identifier exists to hide. Neither was detected: `diff -r` names no
+    network binary and no answer-key filename, and `zstream-…-src/` matches no pattern.
+    De-identification is a real defence against recalling upstream from training data; it
+    is no defence at all against upstream being on the same disk, two directories up.
+
+    Every arm packet already says to work only from the tree it was given, so this
+    enforces the instruction rather than adding one.
+    """
+
+    def __init__(
+        self, tree: Path | str, roots: list[Path | str], allow: list[Path | str] | None = None
+    ) -> None:
+        self.tree = self._forms(tree)
+        self.roots = [form for r in roots if r for form in self._forms(r)]
+        # The run directory is normally elsewhere, but nothing stops `plan --out` putting it
+        # inside the work root, and the arm has to write its result there.
+        self.allow = [form for a in (allow or []) if a for form in self._forms(a)]
+
+    @staticmethod
+    def _forms(path: Path | str) -> list[str]:
+        """Every spelling of one path a transcript might contain.
+
+        On macOS `/tmp` and `/var` are symlinks into `/private`, so `Path.resolve()` on the
+        harness's own root yields `/private/tmp/...` while the agent's tool call says
+        `/tmp/...` — and a containment check comparing the two finds nothing. This is the
+        same trap that made `[-/]private/` match the corpus's own location and score the
+        first honest arm INVALID; it is worth being explicit about both directions.
+        """
+        absolute = str(Path(path).absolute()).rstrip("/")
+        resolved = str(Path(path).resolve()).rstrip("/")
+        forms = {absolute, resolved}
+        for form in (absolute, resolved):
+            if form.startswith("/private/"):
+                forms.add(form[len("/private") :])
+            else:
+                forms.add("/private" + form)
+        return sorted(f for f in forms if f and f != "/")
+
+    def _inside(self, path: str, roots: list[str]) -> bool:
+        return any(path == root or path.startswith(root + "/") for root in roots)
+
+    def violations_in(self, payload: str) -> list[str]:
+        """Paths in this payload that are under a harness root but outside the arm's tree.
+
+        Absolute paths only. A relative `diff -r ../bench ../control` cannot be resolved
+        without the cwd of that particular tool call, so it is not caught here — the
+        `-private/` name pattern and the tree-comparison rule in `_classify_bash` are what
+        cover that case, and the gap is stated rather than assumed away.
+        """
+        out: list[str] = []
+        for candidate in PATH_RE.findall(payload):
+            path = candidate.rstrip("/")
+            if self._inside(path, self.tree) or self._inside(path, self.allow):
+                continue
+            if self._inside(path, self.roots):
+                out.append(path)
+        return sorted(set(out))
 
 
 class AntiCheatError(Exception):
@@ -190,21 +349,70 @@ def _segments(command: str) -> list[list[str]]:
     out: list[list[str]] = []
     for chunk in SPLIT_RE.split(command):
         tokens = [t for t in chunk.strip().split() if t]
-        while tokens and (
-            ASSIGN_RE.match(tokens[0]) or tokens[0] in {"sudo", "env", "time", "nohup", "exec"}
-        ):
-            tokens = tokens[1:]
+        while tokens:
+            head = Path(tokens[0].strip("'\"")).name
+            if ASSIGN_RE.match(tokens[0]) or head in {
+                "sudo",
+                "env",
+                "time",
+                "nohup",
+                "exec",
+                *RUNNER_WORDS,
+            }:
+                tokens = tokens[1:]
+                continue
+            if len(tokens) > 1 and (head, tokens[1]) in RUNNER_PREFIXES:
+                tokens = tokens[2:]
+                continue
+            break
         if tokens:
             out.append(tokens)
     return out
 
 
+def _subcommand(tokens: list[str]) -> str:
+    """The first non-flag argument, which is where the subcommand actually is.
+
+    `git clone` was caught and `git -C /tmp clone` was not, because the old form read
+    `tokens[1]` and stopped. Same for `git --git-dir=… log`. Skipping flags — and the
+    value of a flag that takes one — is the whole fix.
+    """
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("-"):
+            return token
+        # `-C /tmp/x` consumes the next token; `--git-dir=/x` and `-q` do not.
+        if "=" not in token and token in {"-C", "-c", "--git-dir", "--work-tree", "--exec-path"}:
+            index += 1
+        index += 1
+    return ""
+
+
 def _classify_bash(command: str) -> list[tuple[str, str]]:
     """(severity, why) for one Bash command, matching only on command position."""
     found: list[tuple[str, str]] = []
+    lowered = command.lower()
+    # A shell redirect to /dev/tcp needs no binary at all: `exec 3<>/dev/tcp/host/80` has
+    # `exec` stripped as a prefix word and then no recognisable command name, so nothing
+    # matched it and the host only raised an advisory.
+    if "/dev/tcp/" in lowered or "/dev/udp/" in lowered:
+        found.append(("violation", "opened a socket through a /dev/tcp or /dev/udp redirect"))
     for tokens in _segments(command):
         binary = Path(tokens[0].strip("'\"")).name
-        sub = tokens[1] if len(tokens) > 1 else ""
+        sub = _subcommand(tokens)
+        # Comparing the two variants of one corpus *is* the answer key: they differ in
+        # exactly the injected bugs and nowhere else, which the `variants` gate check
+        # proves. It needs no network and no answer-key filename, so nothing else here
+        # sees it. Caught by name so a relative path is covered too.
+        if binary in TREE_COMPARERS and re.search(r"\bbench\b", lowered) and "control" in lowered:
+            found.append(
+                (
+                    "violation",
+                    f"ran `{binary}` across the bench and control trees, which differ in exactly "
+                    f"the injected bugs",
+                )
+            )
         if binary in NETWORK_BINARIES:
             found.append(("violation", f"ran network binary `{binary}`"))
         elif binary == "git" and sub in GIT_REMOTE_SUBCOMMANDS:
@@ -217,10 +425,84 @@ def _classify_bash(command: str) -> list[tuple[str, str]]:
             found.append(("violation", f"ran `gh {sub}`"))
         elif (binary, sub) in PACKAGE_FETCH:
             found.append(("violation", f"ran `{binary} {sub}`"))
+        elif binary in SCRIPT_INTERPRETERS:
+            # An interpreter is not evidence of anything on its own — the arms are
+            # expected to run one. It becomes a violation only paired with a call that
+            # opens a connection, which keeps `python3 -c "print(1)"` clean. A bare URL
+            # stays an advisory, because a printed recommendation may contain one and a
+            # violation costs the arm its place in the comparison.
+            call = next((i for i in NETWORK_CALLS if i in lowered), "")
+            if call:
+                found.append(
+                    ("violation", f"ran `{binary}` with a network call in the script (`{call}`)")
+                )
+            else:
+                scheme = next((s for s in URL_SCHEMES if s in lowered), "")
+                if scheme:
+                    found.append(
+                        ("advisory", f"ran `{binary}` on a script containing a {scheme} URL")
+                    )
     return found
 
 
-def _classify_tool(name: str, payload: str) -> list[tuple[str, str]]:
+# Arms that are *defined* as one agent. If one of these fans out it is a different arm,
+# which the previous evaluation disqualified a baseline for — by reading the transcript by
+# hand, because nothing checked it.
+SINGLE_AGENT_ARMS = {"bare", "taxonomy"}
+FANOUT_TOOLS = {"task", "agent"}
+# The artifact under test. A baseline arm that runs it is not a baseline.
+SUBJECT_MARKERS = ("c-review", "creview")
+
+
+def _classify_arm_protocol(name: str, payload: str, arm: str | None) -> list[tuple[str, str]]:
+    """Did this arm run as its packet says?
+
+    The README lists this as something the harness "cannot check", and on the strength of
+    that nothing looked. It is checkable: the arm name and the tool invocations are both in
+    hand. In the one real run, the `bare` cell — one generic agent, one prompt, the
+    baseline every other arm is measured against — invoked `Skill(c-review:c-review)` on
+    its second turn, because the packet's own words ("review this C code for security
+    vulnerabilities") are what that skill's description triggers on. It then searched for
+    the `Workflow` tool, did not get it, and fell back to reading by hand. The number was
+    collected and reported as `bare`.
+
+    Whether that particular run was contaminated in the end is a judgement for a human.
+    That it was never surfaced is the defect.
+    """
+    if not arm:
+        return []
+    lowered_name = name.lower()
+    lowered_payload = payload.lower()
+    found: list[tuple[str, str]] = []
+    if arm != "c-review":
+        subject = lowered_name in {"skill", "workflow"} and any(
+            marker in lowered_payload for marker in SUBJECT_MARKERS
+        )
+        if subject:
+            found.append(
+                (
+                    "violation",
+                    f"arm {arm!r} invoked the artifact under test (`{name}` -> c-review), so it is "
+                    f"not the baseline it is being compared as",
+                )
+            )
+    if arm in SINGLE_AGENT_ARMS and lowered_name in FANOUT_TOOLS:
+        found.append(
+            (
+                "violation",
+                f"arm {arm!r} is defined as exactly one agent and invoked `{name}`; a fan-out is "
+                f"a different arm",
+            )
+        )
+    return found
+
+
+def _classify_tool(
+    name: str,
+    payload: str,
+    containment: Containment | None = None,
+    arm: str | None = None,
+) -> list[tuple[str, str]]:
     lowered = name.lower()
     found: list[tuple[str, str]] = []
     if lowered in ORACLE_TOOLS or any(hint in lowered for hint in ORACLE_MCP_HINTS):
@@ -232,6 +514,17 @@ def _classify_tool(name: str, payload: str) -> list[tuple[str, str]]:
                 ("violation", f"`{name}` touched the harness answer key ({match.group(0)})")
             )
             break
+    if containment is not None:
+        strayed = containment.violations_in(payload)
+        if strayed:
+            found.append(
+                (
+                    "violation",
+                    f"`{name}` reached outside the tree this arm was given, into "
+                    f"{', '.join(strayed[:3])}",
+                )
+            )
+    found += _classify_arm_protocol(name, payload, arm)
     if lowered not in ORACLE_TOOLS:
         for host in ORACLE_HOSTS:
             if host in payload.lower():
@@ -240,7 +533,11 @@ def _classify_tool(name: str, payload: str) -> list[tuple[str, str]]:
     return found
 
 
-def scan_transcripts(paths: list[Path]) -> dict[str, Any]:
+def scan_transcripts(
+    paths: list[Path],
+    containment: Containment | None = None,
+    arm: str | None = None,
+) -> dict[str, Any]:
     """Parse every transcript and classify every tool invocation in it."""
     files: list[Path] = []
     for path in paths:
@@ -285,7 +582,7 @@ def scan_transcripts(paths: list[Path]) -> dict[str, Any]:
                 invocations += 1
                 name = str(block.get("name", "?"))
                 payload = json.dumps(block.get("input", {}), ensure_ascii=False)
-                hits = _classify_tool(name, payload)
+                hits = _classify_tool(name, payload, containment, arm)
                 if name.lower() == "bash":
                     hits += _classify_bash(str((block.get("input") or {}).get("command", "")))
                 for severity, why in hits:
@@ -336,16 +633,38 @@ def assess(scan: dict[str, Any], declared: dict[str, Any] | None = None) -> dict
                 "input": str(declared.get("external_sources_detail", ""))[:400],
             }
         )
+    # How many declarations the check actually read. c-review declares
+    # `hunter_external_sources` per hunter; an absent or empty list folds to
+    # `external_sources_consulted: false`, which used to be indistinguishable in the output
+    # from a run whose hunters all declared themselves clean. That is the exact shape of the
+    # defect this repository has paid for twice — a contamination check printing "0 of 0
+    # hunter group(s) flagged" while a reviewer had openly declared fetching upstream. The
+    # transcript scan is the real defence; this number stops the declaration layer from
+    # looking like a second one when it inspected nothing.
+    declarations = int((declared or {}).get("declarations_seen") or 0)
     verdict = "INVALID" if violations else "VALID"
-    return {**scan, "violations": violations, "verdict": verdict}
+    return {
+        **scan,
+        "violations": violations,
+        "verdict": verdict,
+        "declarations_seen": declarations,
+    }
 
 
 def format_assessment(assessment: dict[str, Any]) -> str:
+    declarations = assessment.get("declarations_seen", 0)
     lines = [
         f"anti-cheat: {assessment['verdict']} — {assessment['invocations_seen']} "
         f"tool invocation(s) "
         f"inspected across {len(assessment['transcripts'])} transcript(s); "
         f"{assessment['tool_definitions_seen']} tool definition(s) seen and not counted as use",
+        f"  self-declared external-source records inspected: {declarations}"
+        + (
+            "  (none — the arm made no declaration either way, so this layer established "
+            "nothing and the verdict rests entirely on the transcript scan)"
+            if not declarations
+            else ""
+        ),
     ]
     for violation in assessment["violations"]:
         lines.append(

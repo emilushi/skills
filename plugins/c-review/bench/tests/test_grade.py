@@ -302,9 +302,9 @@ def test_a_cve_citation_is_recorded_as_a_canary(gt):
 def test_breakdowns_cover_every_class_and_tier(gt):
     scored = grade.grade(arm("result_suppressed.json"), gt)
     assert scored["by_difficulty"] == {
-        "EASY": {"total": 1, "hits": 1, "suppressed": 0, "near": 0},
-        "MEDIUM": {"total": 1, "hits": 0, "suppressed": 1, "near": 0},
-        "HARD": {"total": 1, "hits": 0, "suppressed": 1, "near": 0},
+        "EASY": {"total": 1, "hits": 1, "suppressed": 0, "near": 0, "ambiguous": 0},
+        "MEDIUM": {"total": 1, "hits": 0, "suppressed": 1, "near": 0, "ambiguous": 0},
+        "HARD": {"total": 1, "hits": 0, "suppressed": 1, "near": 0, "ambiguous": 0},
     }
     assert set(scored["by_class"]) == {"buffer-overflow", "use-after-free", "delimiter-injection"}
 
@@ -314,6 +314,195 @@ def test_report_text_names_the_controls_and_the_canary(gt):
     assert "recall: 3/3" in text
     assert "CANARY" in text
     assert "by difficulty: EASY 1/1" in text
+
+
+# ------------------------------------------------- regressions found by validation
+#
+# Every test below is named after a defect that was live in the shipped harness and
+# that produced a plausible wrong number rather than an error.
+
+
+def _colocated(gt):
+    """Put a second bug in the same function as D-1, the way real corpora do.
+
+    Four of `sigil`'s seventeen bugs share a function with another, and four of
+    `zstream`'s fifteen share `inflate()`. That is the configuration in which one
+    finding is graded against two bugs.
+    """
+    twin = json.loads(json.dumps(gt["items"][0]))
+    twin.update(
+        {
+            "id": "D-1B",
+            "bug_class": "off-by-one",
+            "difficulty": "EASY",
+            "line": 44,
+            "mechanism": (
+                "The name bound is off by one so the terminator lands one byte past the array."
+            ),
+            "mechanism_all_of": [["off-by-one", "one byte past"], ["name_len", "terminator"]],
+        }
+    )
+    gt["items"].append(twin)
+    return gt
+
+
+def test_one_finding_is_not_the_sole_evidence_for_two_bugs(gt):
+    """Demonstrated on the shipped corpus: deleting the only finding that described
+    `SGL-B12` left it scored HIT on a finding about `SGL-B17` eleven lines away."""
+    gt = _colocated(gt)
+    doc = arm("result_perfect.json")
+    # One finding whose prose satisfies both bugs' keyword groups at the shared site.
+    doc["findings"] = [
+        {
+            "id": "F-1",
+            "file": "src/a.c",
+            "line": 41,
+            "function": "decode_value",
+            "title": "memcpy overrun",
+            "description": (
+                "value_len is unchecked so memcpy overruns the buffer; the terminator for "
+                "name_len also lands one byte past the array"
+            ),
+        }
+    ]
+    scored = grade.grade(doc, gt)
+    got = outcomes(scored)
+    assert sorted([got["D-1"], got["D-1B"]]) == [grade.AMBIGUOUS, grade.HIT], got
+    assert scored["hits"] == 1
+    assert scored["ambiguous"] == 1
+    assert "AMBIGUOUS" in grade.format_grade(scored)
+
+
+def test_a_bug_with_its_own_second_finding_keeps_its_hit(gt):
+    """The ambiguity rule must not cost a run a bug that two findings both describe."""
+    gt = _colocated(gt)
+    doc = arm("result_perfect.json")
+    doc["findings"] = [
+        {
+            "id": "F-1",
+            "file": "src/a.c",
+            "line": 41,
+            "function": "decode_value",
+            "title": "memcpy overrun",
+            "description": (
+                "value_len is unchecked so memcpy overruns the buffer; the terminator for "
+                "name_len also lands one byte past the array"
+            ),
+        },
+        {
+            "id": "F-2",
+            "file": "src/a.c",
+            "line": 44,
+            "function": "decode_value",
+            "title": "off-by-one on the name",
+            "description": "name_len may equal the max, so the terminator is one byte past it",
+        },
+    ]
+    scored = grade.grade(doc, gt)
+    assert outcomes(scored)["D-1"] == grade.HIT
+    assert outcomes(scored)["D-1B"] == grade.HIT
+    assert scored["ambiguous"] == 0
+
+
+def test_evidence_is_the_finding_that_describes_the_bug_not_the_first_in_the_file(gt):
+    """Both real runs attributed a bug to a finding about a different bug, because the
+    evidence was `hits[0]` in file order."""
+    gt = _colocated(gt)
+    doc = arm("result_perfect.json")
+    doc["findings"] = [
+        {
+            "id": "F-1",
+            "file": "src/a.c",
+            "line": 41,
+            "function": "decode_value",
+            "title": "both",
+            "description": (
+                "value_len is unchecked so memcpy overruns the buffer; the terminator for "
+                "name_len also lands one byte past the array"
+            ),
+        },
+        {
+            "id": "F-2",
+            "file": "src/a.c",
+            "line": 44,
+            "function": "decode_value",
+            "title": "off-by-one only",
+            "description": "name_len may equal the max, so the terminator is one byte past it",
+        },
+    ]
+    rows = {r["id"]: r for r in grade.grade(doc, gt)["results"]}
+    # F-2 matches only D-1B, so it is the better evidence for D-1B even though F-1
+    # comes first and also matches.
+    assert rows["D-1B"]["evidence"]["id"] == "F-2"
+    assert rows["D-1"]["evidence"]["id"] == "F-1"
+
+
+def test_a_cross_function_line_window_match_is_labelled_as_one(gt):
+    """`tags_equal` (SGL-B13) and `tag_check` (SGL-B14) are ten lines apart in different
+    functions, so every finding naming one lands at the other's site by window. The match
+    is still allowed — the documented rule is an inclusive OR — but it must not be
+    indistinguishable from a function-name match."""
+    doc = arm("result_perfect.json")
+    doc["findings"][1]["function"] = "a_neighbouring_function"
+    doc["findings"][1]["line"] = 84  # within 12 of D-2's line 80
+    rows = {r["id"]: r for r in grade.grade(doc, gt)["results"]}
+    assert rows["D-2"]["outcome"] == grade.HIT
+    assert rows["D-2"]["evidence"]["site_kind"] == grade.SITE_LINE_CROSS_FUNCTION
+    assert "not index_record" in rows["D-2"]["evidence"]["site"]
+
+
+def test_an_item_with_no_mechanism_groups_is_refused(gt):
+    """`all()` over an empty group list is True, which would turn every finding merely
+    near the site into a HIT — the grader's own rule is that proximity is not a hit."""
+    gt["items"][0]["mechanism_all_of"] = []
+    with pytest.raises(grade.GradeError, match="no mechanism_all_of groups"):
+        grade.grade(arm("result_perfect.json"), gt)
+
+
+def test_a_ground_truth_with_no_decoys_is_refused(gt):
+    """Zero decoys inspected reads identically to an arm that fell for none of them."""
+    gt["decoys"] = []
+    with pytest.raises(grade.GradeError, match="zero decoys"):
+        grade.grade(arm("result_perfect.json"), gt)
+
+
+def test_a_ground_truth_missing_the_decoys_key_is_refused(gt):
+    del gt["decoys"]
+    with pytest.raises(grade.GradeError, match="no `decoys` key"):
+        grade.grade(arm("result_perfect.json"), gt)
+
+
+def test_zero_findings_on_the_control_is_the_correct_outcome_not_an_error(gt):
+    """On the patched control there is nothing to find, so an arm that reports nothing has
+    scored perfectly. The bench-tree guard used to fire here and make `score` refuse the
+    whole run — including every other cell — on the first `--tier full`."""
+    gt["variant"] = "control"
+    scored = grade.grade(
+        {"arm": "bare", "corpus": "demo", "variant": "control", "findings": []}, gt
+    )
+    assert scored["bugs_present"] is False
+    assert scored["false_positives"][grade.CONTROL_FP] == []
+    assert set(outcomes(scored).values()) == {grade.MISS}
+
+
+def test_a_documented_clean_tree_weakness_is_not_a_control_false_positive(gt):
+    """A control-tree claim is certain "by construction" only where there is nothing to
+    find. Where the recipe records a weakness of the clean code at that function, there is
+    — and charging it penalises an arm for being right."""
+    gt["variant"] = "control"
+    gt["known_extra_findings"].append(
+        {
+            "file": "src/b.c",
+            "function": "index_record",
+            "note": "a real weakness of the clean tree at this exact function, recorded so it is "
+            "neither credited nor charged",
+        }
+    )
+    doc = arm("result_perfect.json", variant="control")
+    scored = grade.grade(doc, gt)
+    charged = {row["claimed"] for row in scored["false_positives"][grade.CONTROL_FP]}
+    assert "D-2" not in charged, scored["false_positives"]
+    assert any(e["finding"] for e in scored["false_positives"][grade.KNOWN_EXTRA])
 
 
 if __name__ == "__main__":

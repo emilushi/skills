@@ -274,5 +274,103 @@ def test_an_injection_that_breaks_benign_input_fails_the_gate(tmp_path):
     assert not behaviour.ok
 
 
+# --------------------------------------------- the grader's negative control
+#
+# `check_ground_truth` is the positive control: a bug's own description must satisfy its
+# own keyword groups. This is the other half, and it was missing — with the consequence
+# that one finding could be scored as having found two bugs.
+
+
+def _twin(first, **extra):
+    twin = dict(first)
+    twin.update(extra)
+    return twin
+
+
+def test_keyword_groups_that_cannot_tell_two_co_located_bugs_apart_fail():
+    first = manifest()["items"][0]
+    second = _twin(
+        first,
+        id="B2",
+        bug_class="unbounded-copy",
+        # Loose enough to be satisfied by B1's own description of a different bug.
+        mechanism_all_of=[["past the end", "unbounded"], ["loop", "copy"]],
+        mechanism="the copy is not clamped so it runs past the end of the loop's array",
+        line=42,
+    )
+    check = verify.check_mechanism_discrimination(manifest(items=[first, second]), window=12)
+    assert not check.ok
+    assert check.inspected == 2
+    assert any("would be scored as having found" in p for p in check.problems)
+
+
+def test_discriminating_groups_over_co_located_bugs_pass():
+    first = manifest()["items"][0]
+    second = _twin(
+        first,
+        id="B2",
+        bug_class="toctou-race",
+        mechanism=(
+            "the existence test and the create are two steps, so a symlink can land between them"
+        ),
+        attacker_control="the filesystem",
+        mechanism_all_of=[["symlink", "toctou"], ["existence test", "o_excl"]],
+        line=42,
+    )
+    check = verify.check_mechanism_discrimination(manifest(items=[first, second]), window=12)
+    assert check.ok, check.problems
+    assert check.inspected == 2
+
+
+def test_bugs_in_different_functions_and_far_apart_are_not_compared():
+    """Two bugs the grader can never confuse need no discrimination, and a corpus whose
+    bugs are all in distinct functions must not fail for having zero pairs to check. The
+    unit of inspection is the item, so the vacuity guard still means something."""
+    first = manifest()["items"][0]
+    second = _twin(
+        first, id="B2", function="other", line=400, mechanism_all_of=[["past the end"], ["loop"]]
+    )
+    check = verify.check_mechanism_discrimination(manifest(items=[first, second]), window=12)
+    assert check.ok
+    assert check.inspected == 2
+    assert "0 co-located ordered pair(s)" in check.detail
+
+
+def test_a_ground_truth_with_no_items_is_vacuous_here_too():
+    check = verify.check_mechanism_discrimination(manifest(items=[]), window=12)
+    assert check.vacuous
+
+
+@needs_cc
+def test_building_the_same_corpus_twice_emits_the_same_bytes(tmp_path):
+    """Non-deterministic injection or renaming would make two runs incomparable, and the
+    corpus is rebuilt on every machine that runs the gate. Sources, ground truth and the
+    identifier map all have to come out identical — the stamp's `tree_sha256` is the field a
+    reader would trust, so it is the one asserted."""
+    first = verify.gate(recipe_mod.load(SIGIL), tmp_path / "one", allow_network=False)
+    second = verify.gate(recipe_mod.load(SIGIL), tmp_path / "two", allow_network=False)
+    assert first["verified"] and second["verified"]
+    assert first["tree_sha256"] == second["tree_sha256"]
+    assert first["counts"] == second["counts"]
+    assert first["lines_of_code"] == second["lines_of_code"]
+    for variant in ("bench", "control"):
+        for name in ("ground_truth.json", "maps.json"):
+            a = (tmp_path / "one" / f"{variant}-private" / name).read_text(encoding="utf-8")
+            b = (tmp_path / "two" / f"{variant}-private" / name).read_text(encoding="utf-8")
+            # The emitted tree path is the one legitimate difference between two workdirs.
+            assert a.replace(str(tmp_path / "one"), "") == b.replace(str(tmp_path / "two"), "")
+
+
+@needs_cc
+def test_the_shipped_corpora_discriminate(tmp_path):
+    """The check has to hold on the corpora that ship, not just on synthetic manifests.
+    It failed on `zstream` when it was written, which is why the recipe changed."""
+    result = verify.gate(recipe_mod.load(SIGIL), tmp_path / "sigil", allow_network=False)
+    check = next(c for c in result["_checks"] if c.name == "mechanism_discrim")
+    assert check.ok, check.problems
+    assert check.inspected == 17
+    assert not check.vacuous
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

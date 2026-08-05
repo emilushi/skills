@@ -31,6 +31,23 @@ from .result import ResultError, load_plan
 VALID = "VALID"
 INVALID = "INVALID"
 UNVERIFIABLE = "UNVERIFIABLE"
+UNSCOREABLE = "UNSCOREABLE"
+
+
+def _blank_assessment(transcripts: list[Any], error: str) -> dict[str, Any]:
+    return {
+        "verdict": UNVERIFIABLE,
+        "violations": [],
+        "advisories": [],
+        "transcripts": [str(t) for t in transcripts],
+        "invocations_seen": 0,
+        "tool_definitions_seen": 0,
+        "records_parsed": 0,
+        "records_unparseable": 0,
+        "cve_mentioned_in_text": [],
+        "declarations_seen": 0,
+        "error": error,
+    }
 
 
 class ReportError(Exception):
@@ -75,59 +92,70 @@ def score_run(run_dir: Path, workroot: Path) -> dict[str, Any]:
         declared = {
             "external_sources_consulted": result.get("external_sources_consulted"),
             "external_sources_detail": result.get("external_sources_detail"),
+            "declarations_seen": result.get("declarations_seen", 0),
         }
+        # The arm was told to work only from its own tree. Everything else under the work
+        # root is the answer: the control variant, the private manifests, the staged
+        # pre-de-identification tree — and the cache above it holds the pristine upstream
+        # tarball the de-identifier exists to hide.
+        containment = anticheat.Containment(
+            tree=cell["tree"],
+            roots=[workroot, corpus_mod.cache_dir()],
+            allow=[run_dir],
+        )
         transcripts = [Path(t) for t in result.get("transcripts") or ()]
         if transcripts:
             try:
-                assessment = anticheat.assess(anticheat.scan_transcripts(transcripts), declared)
+                assessment = anticheat.assess(
+                    anticheat.scan_transcripts(transcripts, containment, result["arm"]), declared
+                )
             except anticheat.AntiCheatError as exc:
-                assessment = {
-                    "verdict": UNVERIFIABLE,
-                    "violations": [],
-                    "advisories": [],
-                    "transcripts": [str(t) for t in transcripts],
-                    "invocations_seen": 0,
-                    "tool_definitions_seen": 0,
-                    "records_parsed": 0,
-                    "records_unparseable": 0,
-                    "cve_mentioned_in_text": [],
-                    "error": str(exc),
-                }
+                assessment = _blank_assessment(transcripts, str(exc))
         else:
-            assessment = {
-                "verdict": UNVERIFIABLE,
-                "violations": [],
-                "advisories": [],
-                "transcripts": [],
-                "invocations_seen": 0,
-                "tool_definitions_seen": 0,
-                "records_parsed": 0,
-                "records_unparseable": 0,
-                "cve_mentioned_in_text": [],
-                "error": (
-                    "no transcript supplied, so no oracle check ran. Pass --transcript to collect; "
-                    "an unexamined arm cannot be reported as clean."
-                ),
-            }
+            assessment = _blank_assessment(
+                [],
+                "no transcript supplied, so no oracle check ran. Pass --transcript to collect; "
+                "an unexamined arm cannot be reported as clean.",
+            )
             if declared["external_sources_consulted"]:
                 assessment = anticheat.assess(
-                    {
-                        **assessment,
-                        "verdict": VALID,
-                        "violations": [],
-                    },
-                    declared,
+                    {**assessment, "verdict": VALID, "violations": []}, declared
                 )
                 assessment["error"] = (
                     "no transcript supplied; the verdict rests on the arm's own declaration"
                 )
 
+        meta = result["meta"]
         try:
             scored = grade.grade(result, ground_truth)
         except grade.GradeError as exc:
-            raise ReportError(f"{file.name}: {exc}") from exc
+            # One unscoreable cell must not take the whole run's report with it. The old
+            # behaviour raised, so `score` exited 3 and wrote nothing at all — no score.json,
+            # no REPORT.md, not even for the cells that were fine. The arm is excluded with
+            # its reason on the banner, which is the same treatment an arm that used an
+            # oracle gets, and `score` still exits non-zero.
+            arms.append(
+                {
+                    "arm": result["arm"],
+                    "corpus": result["corpus"],
+                    "variant": result["variant"],
+                    "verdict": UNSCOREABLE,
+                    "anticheat": {**assessment, "verdict": UNSCOREABLE, "error": str(exc)},
+                    "grade": None,
+                    "cost": {
+                        "agents": int(meta["agents"]),
+                        "tokens": int(meta["tokens"]),
+                        "wall_seconds": float(meta["wall_seconds"]),
+                        "model": meta.get("model", "?"),
+                        "token_basis": meta.get("token_basis"),
+                        "estimated_tokens": cell["estimated_tokens"],
+                        "estimated_agents": cell["estimated_agents"],
+                        "tokens_per_bug_found": None,
+                    },
+                }
+            )
+            continue
 
-        meta = result["meta"]
         hits = scored["hits"]
         arms.append(
             {
@@ -137,11 +165,14 @@ def score_run(run_dir: Path, workroot: Path) -> dict[str, Any]:
                 "verdict": assessment["verdict"],
                 "anticheat": assessment,
                 "grade": scored,
+                "groups_attempted": result.get("groups_attempted") or [],
+                "groups_failed": result.get("groups_failed") or [],
                 "cost": {
                     "agents": int(meta["agents"]),
                     "tokens": int(meta["tokens"]),
                     "wall_seconds": float(meta["wall_seconds"]),
                     "model": meta.get("model", "?"),
+                    "token_basis": meta.get("token_basis"),
                     "estimated_tokens": cell["estimated_tokens"],
                     "estimated_agents": cell["estimated_agents"],
                     "tokens_per_bug_found": (int(meta["tokens"]) // hits) if hits else None,
@@ -149,10 +180,25 @@ def score_run(run_dir: Path, workroot: Path) -> dict[str, Any]:
             }
         )
 
+    # `meta.token_basis` exists because the same cell reads 92,478 / 246,755 / 2,432,494
+    # tokens on three different bases. The README says mixing them in one run is refused; it
+    # was not, and the totals summed a `reported_subagent_tokens` figure straight into a
+    # `tokens_total` one, comparing 92 K against 2.4 M as though they were the same scale.
+    bases = sorted({a["cost"].get("token_basis") or "reported_subagent_tokens" for a in arms})
+    if len(bases) > 1:
+        raise ReportError(
+            "the cells in this run count tokens on different bases ("
+            + ", ".join(bases)
+            + "). A `reported_subagent_tokens` figure and a `tokens_total` figure differ by more "
+            "than an order of magnitude on the same run, so a table mixing them is not a "
+            "comparison. Re-derive the odd cells with `bench.py cost` and re-collect."
+        )
+
     invalid = [a for a in arms if a["verdict"] != VALID]
     return {
         "run_dir": str(run_dir),
         "tier": plan["tier"],
+        "token_basis": bases[0],
         "arms": arms,
         "invalid_arms": [
             {
@@ -195,6 +241,10 @@ def format_report(scored: dict[str, Any]) -> str:
     valid = [a for a in scored["arms"] if a["verdict"] == VALID]
     lines += [
         "## Comparison (valid arms only)",
+        "",
+        f"TOKENS are counted on the `{scored['token_basis']}` basis for every cell in this run. "
+        "The same cell reads 92,478 / 246,755 / 2,432,494 tokens on the three bases this "
+        "harness knows about, so the column means nothing without this line.",
         "",
         f"{'ARM':<14} {'CORPUS':<10} {'VAR':<8} {'RECALL':>9} {'FP':>10} "
         f"{'AGENTS':>7} {'TOKENS':>11} {'TOK/BUG':>10} {'WALL':>7}",
@@ -244,9 +294,28 @@ def format_report(scored: dict[str, Any]) -> str:
             "",
             anticheat.format_assessment(arm["anticheat"]),
             "",
-            grade.format_grade(arm["grade"]),
-            "",
         ]
+        # A c-review run in which most hunters died still produces findings and still
+        # scores. The v2.0 measurement lost 13 of 16 hunters to a session limit; nothing in
+        # this report used to say so, and the recall figure read as though the pipeline had
+        # run. It is not a disqualification — a partial run is a real data point — but it
+        # cannot be invisible.
+        failed = arm.get("groups_failed") or []
+        if failed:
+            attempted = arm.get("groups_attempted") or []
+            lines += [
+                f"PARTIAL RUN: {len(failed)} of {len(attempted) or '?'} hunter group(s) failed "
+                f"({', '.join(str(f) for f in failed[:8])}). This arm's recall is a floor, not a "
+                f"measurement of the configuration.",
+                "",
+            ]
+        if arm["grade"] is None:
+            lines += [
+                f"not scored: {arm['anticheat'].get('error', 'no grade')}",
+                "",
+            ]
+            continue
+        lines += [grade.format_grade(arm["grade"]), ""]
     return "\n".join(lines)
 
 

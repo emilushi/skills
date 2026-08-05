@@ -587,6 +587,161 @@ def test_the_full_tier_adds_control_cells(tmp_path):
     assert ("bare", "control") in variants
 
 
+def _two_cell_plan(tmp_path: Path, second_variant: str = "bench", second_arm: str = "fanout"):
+    """A run with two cells, so cross-cell rules have something to fire on."""
+    run = scaffold(tmp_path)
+    plan = json.loads((run / "plan.json").read_text(encoding="utf-8"))
+    private = tmp_path / "work" / "sigil" / f"{second_variant}-private"
+    if second_variant != "bench":
+        ground_truth = json.loads((FIXTURES / "gt_demo.json").read_text(encoding="utf-8"))
+        ground_truth["variant"] = second_variant
+        write(private / "ground_truth.json", ground_truth)
+    second = dict(plan["cells"][0])
+    second.update(
+        {
+            "arm": second_arm,
+            "variant": second_variant,
+            "private": str(private),
+            "tree": str(tmp_path / "work" / "sigil" / second_variant),
+        }
+    )
+    plan["cells"].append(second)
+    write(run / "plan.json", plan)
+    return run
+
+
+def _collect(run: Path, arm: str, result_name: str, meta: dict, variant: str = "bench"):
+    meta_path = run / f"meta_{arm}_{variant}.json"
+    write(meta_path, meta)
+    return result_mod.collect(
+        run_dir=run,
+        arm=arm,
+        corpus="sigil",
+        result_path=FIXTURES / result_name,
+        meta_path=meta_path,
+        transcripts=[FIXTURES / "transcript_clean.jsonl"],
+        variant=variant,
+        settle_seconds=0.01,
+        timeout=1,
+    )
+
+
+BASE_META = {"complete": True, "agents": 1, "tokens": 51234, "wall_seconds": 640, "model": "sonnet"}
+
+
+# --------------------------------------------- regressions found by validation
+
+
+def test_mixing_token_bases_across_cells_in_one_run_is_refused(tmp_path):
+    """The README says this is refused; it was not. The same cell reads 92,478 tokens on
+    one basis and 2,432,494 on another, and the run total summed one straight into the
+    other."""
+    run = _two_cell_plan(tmp_path)
+    _collect(run, "bare", "result_perfect.json", {**BASE_META, "token_basis": "tokens_total"})
+    _collect(
+        run,
+        "fanout",
+        "result_perfect.json",
+        {**BASE_META, "token_basis": "reported_subagent_tokens"},
+    )
+    with pytest.raises(report_mod.ReportError, match="different bases"):
+        report_mod.score_run(run, workroot=tmp_path / "work")
+
+
+def test_the_token_basis_is_named_in_the_report(tmp_path):
+    """A TOKENS column with no basis beside it is not a measurement anyone can compare."""
+    run = scaffold(tmp_path)
+    _collect(run, "bare", "result_perfect.json", {**BASE_META, "token_basis": "tokens_fresh"})
+    scored = report_mod.score_run(run, workroot=tmp_path / "work")
+    assert scored["token_basis"] == "tokens_fresh"
+    assert "`tokens_fresh` basis" in report_mod.format_report(scored)
+
+
+def test_one_unscoreable_cell_does_not_destroy_the_whole_run(tmp_path):
+    """A bench cell with zero findings is a run to investigate, and the guard that says so
+    used to raise out of `score_run` — so nothing was written at all, not even for the cells
+    that were fine. The arm is excluded by name instead."""
+    run = _two_cell_plan(tmp_path)
+    empty = run / "empty.json"
+    write(empty, {"findings": []})
+    meta_path = run / "meta_empty.json"
+    write(meta_path, BASE_META)
+    result_mod.collect(
+        run_dir=run,
+        arm="fanout",
+        corpus="sigil",
+        result_path=empty,
+        meta_path=meta_path,
+        transcripts=[FIXTURES / "transcript_clean.jsonl"],
+        settle_seconds=0.01,
+        timeout=1,
+    )
+    _collect(run, "bare", "result_perfect.json", BASE_META)
+    scored = report_mod.score_run(run, workroot=tmp_path / "work")
+    verdicts = {a["arm"]: a["verdict"] for a in scored["arms"]}
+    assert verdicts == {"bare": "VALID", "fanout": report_mod.UNSCOREABLE}
+    text = report_mod.format_report(scored)
+    assert "RESULTS EXCLUDED" in text
+    assert "3/3" in text  # the good cell still reports
+    assert "zero findings" in text
+
+
+def test_a_clean_control_cell_with_no_findings_scores(tmp_path):
+    """Zero findings on the patched control is the one perfect result, and it used to make
+    `score` refuse the entire run."""
+    run = _two_cell_plan(tmp_path, second_variant="control", second_arm="bare")
+    empty = run / "empty.json"
+    write(empty, {"findings": []})
+    meta_path = run / "meta_empty.json"
+    write(meta_path, BASE_META)
+    result_mod.collect(
+        run_dir=run,
+        arm="bare",
+        corpus="sigil",
+        result_path=empty,
+        meta_path=meta_path,
+        transcripts=[FIXTURES / "transcript_clean.jsonl"],
+        variant="control",
+        settle_seconds=0.01,
+        timeout=1,
+    )
+    _collect(run, "bare", "result_perfect.json", BASE_META)
+    scored = report_mod.score_run(run, workroot=tmp_path / "work")
+    control = next(a for a in scored["arms"] if a["variant"] == "control")
+    assert control["verdict"] == "VALID"
+    assert control["grade"]["false_positives"]["CONTROL_FP"] == []
+
+
+def test_scoring_the_same_run_twice_is_byte_identical(tmp_path):
+    """The first question asked of this harness was whether the grader is stable, because
+    two runs of one cell were scored 15/17 and 11/17. It is — the two result files differed
+    — and this is what keeps that true. `run_dir` is the only input-dependent field, so a
+    second pass over the same directory must produce the same bytes."""
+    run = scaffold(tmp_path)
+    _collect(run, "bare", "result_perfect.json", BASE_META)
+    first = report_mod.score_run(run, workroot=tmp_path / "work")
+    second = report_mod.score_run(run, workroot=tmp_path / "work")
+    assert json.dumps(first, indent=2, sort_keys=True) == json.dumps(
+        second, indent=2, sort_keys=True
+    )
+    assert report_mod.format_report(first) == report_mod.format_report(second)
+
+
+def test_failed_hunter_groups_are_surfaced_in_the_report(tmp_path):
+    """A c-review run that lost 13 of 16 hunters still produced findings and still scored,
+    and nothing in the report said so."""
+    run = scaffold(tmp_path)
+    _collect(run, "bare", "result_perfect.json", BASE_META)
+    collected = run / "collected" / "bare__sigil__bench.json"
+    doc = json.loads(collected.read_text(encoding="utf-8"))
+    doc["groups_attempted"] = ["a", "b", "c"]
+    doc["groups_failed"] = ["b", "c"]
+    write(collected, doc)
+    text = report_mod.format_report(report_mod.score_run(run, workroot=tmp_path / "work"))
+    assert "PARTIAL RUN: 2 of 3 hunter group(s) failed" in text
+    assert "floor, not a" in text
+
+
 def test_an_unfilled_placeholder_is_refused():
     with pytest.raises(plan_mod.PlanError, match="unfilled placeholder"):
         plan_mod._render("hello {{MISSING}}", {"OTHER": "x"})

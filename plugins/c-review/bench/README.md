@@ -52,8 +52,11 @@ it anyway. So the defence is that there is nothing to find:
    `"widgetlib: bad slot"` where `widgetlib` is never an identifier on its own. Ordinary
    English in an error message is left alone, and `forbidden_strings` in the recipe is
    the enforcement the gate checks.
-3. **Decoys.** Ten no-op mutations per corpus, so even a reconstructed diff is noise
-   rather than a list of our injections.
+3. **Decoys.** Ten no-op mutations per corpus, so a reconstructed diff *against upstream* is
+   noise rather than a list of our injections. Note what this does not cover: the decoys are
+   applied identically to both variants, which the `variants` gate check proves, so a
+   bench-versus-**control** diff shows the bugs and nothing else. The decoys defend the
+   upstream diff; the containment and tree-comparison rules defend the control diff.
 4. **Detection, then invalidation.** Transcripts are parsed and oracle use is a
    disqualification: the arm's numbers are excluded from the comparison table and a
    banner says so. Not a footnote — a footnote does not survive being copied into a
@@ -80,16 +83,61 @@ gets switched off. So nothing greps raw text:
 - tool definitions are counted separately and reported, never as violations;
 - a Bash command is split on shell separators and only the **first token** of each
   segment is matched, so `grep -rn curl src/` and a file named `wget-notes.txt` are clean
-  while `FOO=1 wget https://…` and `cc -c a.c && curl …` are not;
+  while `FOO=1 wget https://…` and `cc -c a.c && curl …` are not. Runner wrappers are
+  stripped, so `uv run python …` presents `python`, and a git subcommand is read past its
+  flags, so `git -C /tmp clone` classifies as `git clone`;
+- an interpreter is not evidence of anything, but an interpreter **plus a call that opens a
+  connection** is: `python3 -c "urllib.request.urlopen(…)"` is a violation, and
+  base64-obscuring the host does not help because the call is what matches. A bare URL in a
+  script is only an advisory, because a printed recommendation may contain one;
 - `git log` is an advisory, `git clone` is a violation;
-- a read of the harness's own answer key (`ground_truth.json`, `maps.json`, a
-  `*-private/` path) is a violation;
-- an arm's own `external_sources_consulted: true` is a violation on its own.
+- a read of the harness's own answer key (`ground_truth`, `maps.json`, a `*-private/` path,
+  a `staged/` path) is a violation, including through a glob or a `find -name` prefix;
+- **anything under the work root that is not the arm's own tree** is a violation, which is
+  the containment rule below;
+- **`diff` across the bench and control trees** is a violation on its own, by name, because
+  the relative-path form cannot be resolved from a transcript;
+- for any arm other than `c-review`, invoking the artifact under test (`Skill` or
+  `Workflow` naming c-review) is a violation — a baseline that runs the subject is not a
+  baseline — and for `bare` and `taxonomy`, which are *defined* as one agent, invoking
+  `Task` is a violation because a fan-out is a different arm;
+- an arm's own `external_sources_consulted: true` is a violation on its own, and the number
+  of declarations actually inspected is printed, because an absent declaration list and
+  sixteen clean ones both fold to `false` and only one of them is evidence.
 
-Both directions are tested (`tests/test_anticheat.py`): a transcript with the definition
-and the prose mention scores `VALID` with 7 definitions and 3 invocations; a transcript
-with a real `WebFetch` call, a `curl`, a `git clone` and an answer-key read scores
-`INVALID` with four named violations.
+Both directions are tested (`tests/test_anticheat.py`), and the false-negative half of that
+file is named after cases that scored `VALID` on the first version: a glob-obscured
+answer-key read, `find -name 'ground_truth*'`, `diff -r bench control`, a read of the cached
+pristine upstream, `python3 -c urlopen`, a `/dev/tcp` redirect, `git -C … clone`, an MCP tool
+called plainly `fetch`, and the `bare` arm invoking c-review.
+
+### Containment: the oracle is one directory up
+
+`verify` emits, side by side under one work root:
+
+```
+<workroot>/<corpus>/bench/            the tree the packet hands the arm
+<workroot>/<corpus>/control/          the same code with the bugs removed
+<workroot>/<corpus>/bench-private/    ground_truth.json, maps.json, staged/
+<workroot>/<corpus>/verified.json
+```
+
+and `fetch_base` caches the pristine upstream tarball and its extraction in the parent of
+the default work root — `~/.cache/c-review-bench/zstream-<digest>-src/` is un-de-identified
+zlib, ChangeLog included.
+
+So `diff -r ../bench ../control` lists every injected bug, and `ls ../..` finds the upstream
+that de-identification exists to hide. **De-identification is a real defence against
+recalling upstream from training data and no defence at all against upstream being on the
+same disk two directories up.** Each arm's packet already says to work only from the tree it
+was given; the containment check enforces that instruction rather than adding one, and
+`score` needs the cell's tree to do it, which is why it is computed there and not in
+`collect`.
+
+Residual gap, stated rather than assumed away: a **relative** path cannot be resolved
+without the working directory of that particular tool call, which the harness does not
+track. `../bench-private/` is still caught by name, and `diff` across the two trees is
+caught by name, but a relative read of `../control/src/x.c` is not.
 
 A third verdict exists: **`UNVERIFIABLE`**, for an arm collected without a transcript.
 It is excluded like an invalid one, because "we did not look" and "we looked and it was
@@ -163,9 +211,10 @@ declaring it had fetched upstream.
 | `decoys` | every decoy is a whitelisted no-op kind with a recorded safety argument, and none shares a function with a bug or sits within 3 lines of one |
 | `deidentified` | no original identifier (4+ chars) or filename stem survives, no file is byte-identical to its base, and no recipe-declared forbidden string remains |
 | `ground_truth` | every recorded site exists, is non-blank, names a function present in that file, and **its own mechanism description satisfies its own keyword groups** |
+| `mechanism_discrim` | for every pair of bugs the grader could confuse, each one's keyword groups **reject** the other's mechanism |
 | `variants` | bench and control differ in exactly the files that carry bugs and nowhere else |
 
-Two of those deserve their reasoning spelled out.
+Three of those deserve their reasoning spelled out.
 
 **Reachability is syntactic and says so.** The check verifies that each declared edge
 exists — the callee is called inside the caller's function body in the source — starting
@@ -180,6 +229,19 @@ bug's `mechanism_all_of` keyword groups must be satisfied by the bug's own `mech
 sentence. A keyword list that cannot match a correct description of the bug it describes
 will not match a reviewer's correct description either, and recall would fall for a
 reason that has nothing to do with the reviewer.
+
+**`mechanism_discrim` is the negative control, and it was the missing half.** The grader keys
+on the enclosing function, so two bugs in one function are graded against the same findings —
+four of `sigil`'s seventeen share a function with another, and four of `zstream`'s fifteen
+share `inflate()`. If bug X's groups are loose enough to be satisfied by a description of bug
+Y, one finding about Y scores as having found both, and recall rises by one for a bug nothing
+in the run describes. Demonstrated on the shipped corpus before the fix: deleting the only
+finding that described the state-machine bypass left it scored `HIT` on a finding about a
+different bug eleven lines away, on the strength of the words *state*, *before*, *tag*,
+*record* and *authentication* appearing somewhere in twelve concatenated fields. The probe is
+each bug's own terse `mechanism` sentence, which has less surface for an accidental match
+than a reviewer's prose, so passing this check is a floor and not a guarantee — `AMBIGUOUS`
+below is the backstop for what gets through.
 
 ## Arms
 
@@ -234,7 +296,13 @@ measured cell above, the same run reads as **92,478** (the platform's reported
 `subagent_tokens`), **246,755** (`tokens_fresh`: input + output + cache creation) or
 **2,432,494** (`tokens_total`, including cache reads). `bench.py cost --transcript …`
 prints all three from the transcript, so the figure in `meta.json` is measured rather
-than remembered. Mixing bases across cells in one run is refused.
+than remembered.
+
+Mixing bases across cells in one run is refused by `score`, and the basis in force is printed
+above the comparison table and stored in `score.json` as `token_basis`. Both of those were
+claimed here and not implemented: a run mixing `reported_subagent_tokens` with `tokens_total`
+scored fine and summed the two into one "actual tokens" total, comparing 92 K against 2.4 M
+as though they were the same scale.
 
 The smoke tier is split deliberately. `--arm bare` answers "does the loop work" for about
 50 K tokens and a few minutes, which is the sub-100K budget a smoke test should have.
@@ -258,12 +326,32 @@ whose *harness* cost is already known: everything except the arm itself costs ze
 tokens and a few seconds — the gate builds and checks both variants of `sigil` in 2.5 s,
 and the whole test suite runs in 8 s.
 
-## What the first real run showed
+## What the first real runs showed
 
-`bare` on `sigil`, one agent, opus, 642 s: **15 of 17 bugs, 88.2%** — EASY 5/5, MEDIUM
-7/8, HARD 3/4 — with **zero false positives**, zero decoys claimed, and two findings
-matching recorded corpus weaknesses. It missed the encoding-invariant violation and the
-stale-record reuse.
+Two runs of the same cell exist — `bare` on `sigil`, one agent, same corpus, same grading
+rule — and they scored **15/17** and **11/17**. The grader is not the variable: the two
+`ground_truth.json` files compare equal and cross-grading both result files against the same
+one reproduces 15 and 11 exactly. Scoring one run eight times in eight processes with varying
+`PYTHONHASHSEED` produces byte-identical `score.json` and `REPORT.md`. The spread is
+**reviewer variance**: the first run filed 18 findings and the second 12, and the four bugs
+that separate them (`sgl_scope_copy`, `tags_equal`, `tag_check`, `sgl_spool_write`) had no
+finding at their site at all in the second.
+
+That is the number that matters for using this harness: **on `sigil`, two runs of one
+configuration differ by 4 of 17 bugs — 23 percentage points.** A single-run difference smaller
+than that between two arms means nothing. Either run several times per cell, or use the larger
+corpora where 15 bugs are spread over 9 KLOC and 68 KLOC and a lucky reading order matters
+less. `sigil`'s job is regression detection — a drop from 15 to 8 is real — not ranking.
+
+The second of those runs is also, on the current harness, **`INVALID`**: its transcript shows
+the `bare` agent invoking `Skill(c-review:c-review)` on its second turn, because the packet's
+own words are what that skill's description triggers on. It loaded the phase outline, searched
+for the `Workflow` tool, did not get it, and reviewed by hand — so it was one agent holding
+part of c-review's taxonomy, which is not the `bare` arm. Nothing surfaced that at the time.
+
+Taking the 15/17 run at face value: EASY 5/5, MEDIUM 7/8, HARD 3/4, **zero false positives**,
+zero decoys claimed, and findings matching recorded corpus weaknesses. It missed the
+encoding-invariant violation and the stale-record reuse.
 
 Read that as a statement about the corpus, not a triumph: **`sigil` is too easy to
 discriminate between arms.** One generic agent with one prompt finds seven eighths of it,
@@ -283,10 +371,27 @@ A finding is a **HIT** when it names the right file, places itself at the right 
 matching function name, or a line within 12 of the recorded site), and its text identifies
 the actual defect mechanism. Proximity alone is not a hit.
 
-Four outcomes: `HIT`, `SUPPRESSED` (a reviewer found it and the pipeline dropped it — a
+Five outcomes: `HIT`, `SUPPRESSED` (a reviewer found it and the pipeline dropped it — a
 different failure from a miss, and the one that caused the previous recall loss),
-`NEAR_MISS` (right site, wrong mechanism — read it, the keyword list may be stale) and
-`MISS`.
+`NEAR_MISS` (right site, wrong mechanism — read it, the keyword list may be stale),
+`AMBIGUOUS` and `MISS`.
+
+`AMBIGUOUS` means one finding was the **only** mechanism-matching evidence for this bug and
+for another bug at the same site, so at most one of them was really found and the grader
+cannot say which. It is not counted as recall. A bug with a second, independent matching
+finding keeps its `HIT`, which is why applying this rule to the two runs that already exist
+changes neither of their numbers — both filed a separate correct finding for the second bug.
+The rule exists because without it a single verbose finding can be scored as two discoveries,
+and that biases the comparison towards verbose arms, which is the comparison the harness is
+for.
+
+The site rule is the documented inclusive OR — a matching function name **or** a line within
+the window — and the report now records which arm of the OR fired. On `sigil`, `tags_equal`
+and `tag_check` are ten lines apart in different functions, so every finding naming one lands
+at the other's site by window; a `line-cross-function` match is weaker evidence than a name
+match and is resolved in favour of the name match when both are available. The evidence shown
+for a bug is the least contested candidate, not the first in file order: that used to
+attribute a bug to a finding about a different bug, in both real runs.
 
 False positives are counted in three buckets rather than one:
 
@@ -298,7 +403,10 @@ False positives are counted in three buckets rather than one:
   arm for being right.
 - **known corpus weaknesses** — findings at a site the recipe's `known_extra_findings`
   documents: real, present in the clean tree, and therefore neither a hit nor a false
-  positive. They exist so a repeat run does not re-triage the same two findings forever.
+  positive. They exist so a repeat run does not re-triage the same findings forever. A
+  documented weakness also cannot be charged as a *control* false positive: "certain by
+  construction" only holds where there is genuinely nothing to find, and the recipe itself
+  says there is.
 
 Two rules keep the FP count honest, both of them written after a real run got them wrong:
 a finding that already matches an injected bug is never also charged as a decoy, and a
@@ -312,9 +420,15 @@ attributed too, not counted as unmatched.
 - **Whether a HARD bug is *fairly* hard.** The tier is a judgement call frozen before the
   run, which stops it being retrofitted to the result but does not make it right.
 - **Whether the model has memorised the base project.** See the honesty note above.
-- **Whether an arm was run as its packet says.** `collect` records digests and transcripts;
-  it cannot tell that a "one agent" arm did not quietly fan out. The previous evaluation
-  disqualified a baseline for exactly that, by reading the transcript.
+- **Whether a keyword group is too tight for prose nobody has written yet.** The gate proves
+  each group matches the bug's own description and rejects its neighbours' — it cannot prove
+  it matches every correct sentence a reviewer might write. A `NEAR_MISS` is the signal to
+  read the finding and decide.
+- **Whether an arm was run as its packet says, in general.** Three specific forms are now
+  checked — a non-`c-review` arm invoking c-review, a one-agent arm invoking `Task`, and any
+  tool call outside the arm's own tree — but a driver that runs the wrong prompt, or an arm
+  that fans out through a mechanism with a different tool name, still leaves no trace the
+  harness reads.
 
 ## What running it for real cost the harness
 
@@ -334,6 +448,22 @@ produced a plausible wrong number, and none was visible in 160 passing unit test
 | the large corpus | `0x7ff00000` was renamed to `0nexirn`, because `x7ff00000` matches an identifier unless the match is forbidden from starting after a digit |
 | the large corpus | one unbalanced paren inside a string literal aborted function indexing for the whole file, so half a real project's functions "did not exist" |
 
+A later validation pass found nine more by attacking the harness rather than running it. Every
+one produced a plausible number rather than an error, and none was visible in 165 passing
+tests:
+
+| Class | Defect |
+|---|---|
+| recall inflation | one finding could be the **sole** evidence for two bugs in one function; deleting the only finding that described `SGL-B12` still scored it a `HIT` |
+| wrong evidence | the evidence shown for a bug was `hits[0]` in file order, so both real runs attributed a bug to a finding about a different bug |
+| vacuous scoring | a ground truth with zero decoys reported zero decoy false positives; an item with zero keyword groups made every nearby finding a `HIT` |
+| refused a correct result | zero findings on the patched control — the one perfect outcome there — raised, and took the whole run's report with it |
+| undetected oracle | `diff -r bench control` lists every injected bug and matched nothing; the pristine upstream sits two directories above the tree the packet hands out |
+| undetected oracle | a glob or `find -name 'ground_truth*'` read the answer key; `python3 -c urlopen`, `/dev/tcp`, `git -C … clone` and MCP tools called plainly `fetch` all passed |
+| contaminated baseline | the `bare` arm invoked the artifact under test and was reported as `bare` |
+| cost accounting | mixing token bases in one run was accepted and summed, and the basis was printed nowhere |
+| unreported partial run | a c-review result whose hunters had all failed scored as though the pipeline ran |
+
 Each has a regression test named after the failure.
 
 ## Tests
@@ -342,7 +472,7 @@ Each has a regression test named after the failure.
 cd tests && uv run --no-project --with pytest python3 -m pytest -q --import-mode=importlib .
 ```
 
-165 deterministic tests over fixtures, all in `make check`. The load-bearing ones:
+201 deterministic tests over fixtures, all in `make check`. The load-bearing ones:
 
 - `test_grade.py::test_positive_control_perfect_run_scores_full_recall` — a synthetic run
   that describes every bug correctly scores 100%.
@@ -352,6 +482,16 @@ cd tests && uv run --no-project --with pytest python3 -m pytest -q --import-mode
   whole gate rests on.
 - `test_verify.py::test_a_vacuous_check_fails_the_gate` — a check that inspected nothing
   is a failure, never a pass.
+- `test_grade.py::test_one_finding_is_not_the_sole_evidence_for_two_bugs` — the recall
+  inflation, and `test_a_bug_with_its_own_second_finding_keeps_its_hit` is the other half:
+  the rule must not cost a run a bug two findings both describe.
+- `test_verify.py::test_keyword_groups_that_cannot_tell_two_co_located_bugs_apart_fail` —
+  the grader's negative control, which failed on `zstream` when it was written.
+- `test_anticheat.py::test_reading_the_arms_own_tree_is_never_a_violation` — the case that
+  matters most, because an over-triggering integrity check gets switched off.
+- `test_result_and_report.py::test_scoring_the_same_run_twice_is_byte_identical` and
+  `test_verify.py::test_building_the_same_corpus_twice_emits_the_same_bytes` — without these
+  two, no comparison across runs means anything.
 - `test_verify.py` also runs the real gate over `sigil` and asserts that a deliberately
   loud injection (one the compiler warns about) and a deliberately obvious one (one that
   breaks the smoke test) both **fail** it.

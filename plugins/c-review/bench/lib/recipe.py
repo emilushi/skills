@@ -66,6 +66,12 @@ DECOY_KINDS = {
     "hoisted-invariant": "moves a loop-invariant computation out of the loop",
     "extra-assert": "adds an assertion that holds on every reachable path",
     "widened-type": "widens a local to a type that cannot narrow any value it holds",
+    # The mirror of `widened-type`, and the strongest bait shape this corpus has: a
+    # narrowing conversion is what a reviewer flags on sight, and `safe_because` has to
+    # name the guard that bounds the value below the narrow type's maximum. It is a
+    # separate kind rather than an `equivalent-expression` because the argument it owes
+    # is a *range* argument, not an algebraic one.
+    "value-preserving-cast": "casts a value to a narrower type that provably holds it",
 }
 
 # Words that indicate a finding is about the *mutation* rather than about something else
@@ -93,6 +99,11 @@ DECOY_CLAIM_TERMS = {
     # findings, so they would charge an arm for a real bug that merely shares a function
     # with this decoy — which is exactly what happened on the first real run.
     "widened-type": ["widen", "narrow", "type mismatch", "inconsistent type", "declared type"],
+    # A reviewer who falls for a narrowing cast writes "truncated" or "narrowed", not
+    # "the cast is value-preserving". The terms are the vocabulary of the *report*, so
+    # they have to be the words a wrong finding would use — a term list phrased in
+    # refactoring language never fires and the decoy silently costs nothing.
+    "value-preserving-cast": ["truncat", "narrow", "downcast", "8-bit", "16-bit", "wrap"],
 }
 
 

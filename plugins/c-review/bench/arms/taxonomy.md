@@ -29,8 +29,13 @@ a class here.
 
 {{TAXONOMY}}
 
-Work only from the code in that directory. Do not fetch anything, do not search the
+Work only from the code in that directory. Do not read anything outside it — not a
+sibling directory, not a parent, not a cache. Do not fetch anything, do not search the
 web, and do not consult any repository, history, advisory or package index.
+
+Review the code yourself. Do not invoke a skill, a workflow or another agent: this cell
+is measuring one generic reviewer, and running a review tool makes it a measurement of
+that tool instead. If a skill offers itself, decline it.
 
 Write your findings as JSON to {{RESULT_PATH}} in exactly this shape:
 
