@@ -1,0 +1,1296 @@
+{
+  "id": "zstream",
+  "tier": "medium",
+  "description": "A general-purpose DEFLATE codec: raw/zlib/gzip stream decoding, a Huffman table builder, a checksum layer and a buffered stdio-style file layer. The base is a well-known upstream library, so de-identification is mandatory and the injected defects sit at sites we chose rather than at any site an advisory describes.",
+  "threat_model": "REMOTE",
+  "attacker_controls": "every byte of the compressed stream handed to the decoder, including all header fields, block types, code-length lists, stored-block lengths, match lengths and distances, and the trailer; for the file layer, the whole file content and (in an unpacking scenario) the member name used for error messages",
+  "scope_subpath": ".",
+  "base": {
+    "kind": "tarball",
+    "url": "https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v1.3.1",
+    "sha256": "17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c",
+    "strip_components": 1,
+    "files": [
+      "adler32.c",
+      "compress.c",
+      "crc32.c",
+      "deflate.c",
+      "gzclose.c",
+      "gzlib.c",
+      "gzread.c",
+      "gzwrite.c",
+      "infback.c",
+      "inffast.c",
+      "inflate.c",
+      "inftrees.c",
+      "trees.c",
+      "uncompr.c",
+      "zutil.c",
+      "deflate.h",
+      "gzguts.h",
+      "inffast.h",
+      "inffixed.h",
+      "inflate.h",
+      "inftrees.h",
+      "trees.h",
+      "zconf.h",
+      "zlib.h",
+      "zutil.h"
+    ],
+    "_files_note": "Only the root translation units and their private headers. crc32.h is deliberately excluded: it is a 9.4k-line generated table of hexadecimal constants, and the tree is built with the runtime table generator instead (see build.cflags and base.extra_files). test/, contrib/, examples/ and the per-platform directories are excluded because none of them compiles standalone.",
+    "extra_files": {
+      "buildcfg.h": "#ifndef ZSTREAM_BUILDCFG_H\n#define ZSTREAM_BUILDCFG_H\n#define HAVE_UNISTD_H 1\n#define DYNAMIC_CRC_TABLE 1\n#endif\n"
+    },
+    "_extra_files_note": "Rendered through the identifier map, so the two feature macros come out under the same pseudonyms the tree uses. That is why the flags are not passed as -D: a -D on the command line would name the original macro, which both defeats the renaming and leaves the original spelling sitting in build.sh."
+  },
+  "deidentify": {
+    "required": true,
+    "seed": "9f4be1c07a2d5386",
+    "rename_files": true,
+    "reserved_extra": [
+      "define",
+      "undef",
+      "ifdef",
+      "ifndef",
+      "endif",
+      "elif",
+      "include",
+      "pragma",
+      "error",
+      "warning",
+      "main",
+      "ATOMIC_FLAG_INIT",
+      "atomic_load",
+      "atomic_store",
+      "atomic_flag_test_and_set",
+      "x00",
+      "x0200",
+      "x0400",
+      "x0800",
+      "x1000",
+      "x1310",
+      "x20",
+      "x200",
+      "x20000000",
+      "x40000000",
+      "x410",
+      "x500",
+      "x550",
+      "x7f",
+      "x800",
+      "x8b1f",
+      "xa10d3d0c",
+      "xe000",
+      "xedb88320",
+      "xf0",
+      "xf3ffc07fUL",
+      "xff",
+      "xff00",
+      "xff0000",
+      "xff000000",
+      "xff00000000",
+      "xff0000000000",
+      "xff000000000000",
+      "xff00000000000000",
+      "xffff",
+      "xffffL",
+      "xffffUL",
+      "xffffffff",
+      "xffffffffL",
+      "xffffffffUL",
+      "xffffffffffffffff"
+    ],
+    "_reserved_extra_note": "Three groups. (1) Preprocessor directive keywords: the de-identifier renames identifiers in code regions and #define/#ifdef/#endif/#elif/#undef/#pragma/#error are not in its reserved list, so without these the whole tree turns into 'invalid preprocessing directive'. (2) <stdatomic.h> names the reserved list does not carry, used by the runtime CRC table's once() guard. (3) The token that the identifier regex finds inside a hexadecimal literal: 0xffff scans as the identifier 'xffff', which the renamer would rewrite to '0nubvax'. Reserving the 36 distinct hex tails that occur in the selected files is the only way to keep integer literals intact without editing the harness. 'main' is reserved because crc32.c carries a MAKECRCH-only main() and renaming it would rename the smoke test's entry point too.",
+    "string_scrub": [
+      [
+        "Jean-loup Gailly and Mark Adler",
+        "R. Ashworth and D. Okonkwo"
+      ],
+      [
+        "Jean-loup Gailly, Mark Adler",
+        "R. Ashworth, D. Okonkwo"
+      ],
+      [
+        "Jean-loup Gailly",
+        "R. Ashworth"
+      ],
+      [
+        "Mark Adler",
+        "D. Okonkwo"
+      ],
+      [
+        "1995-20[0-9][0-9]",
+        "2013-2025"
+      ],
+      [
+        "1\\.3\\.1",
+        "4.2.0"
+      ],
+      [
+        "zlib\\.h",
+        "the public header"
+      ],
+      [
+        "\\bzlib\\b",
+        "wrapper"
+      ],
+      [
+        "GEN_TREES_H",
+        "GEN_TABLES_H"
+      ],
+      [
+        "trees\\.h",
+        "codetab.h"
+      ],
+      [
+        "\\btrees\\b",
+        "tables"
+      ],
+      [
+        "inffixed\\.h",
+        "fixedtab.h"
+      ]
+    ],
+    "_string_scrub_note": "Identifier renaming already rewrites the project's symbols where they appear inside string literals, so the wire error messages lose their distinctive nouns for free. These patterns cover what is left: the author names and the copyright years, the version triple, and the three file stems that only ever appear inside literals (zlib.h, trees.h, inffixed.h) and so are never reached by the include rewriter.",
+    "forbidden_strings": [
+      "zlib",
+      "gzip",
+      "gunzip",
+      "Mark Adler",
+      "Jean-loup",
+      "Gailly",
+      "madler",
+      "1.3.1",
+      "inflate",
+      "deflate",
+      "adler32",
+      "inffixed",
+      "inftrees",
+      "zutil",
+      "gzguts",
+      "zconf",
+      "github.com",
+      "http://",
+      "https://",
+      "DEFLATE",
+      "PKWARE",
+      "PKZIP"
+    ]
+  },
+  "build": {
+    "sources": [
+      "*.c"
+    ],
+    "cflags": [
+      "-O1",
+      "-w",
+      "-include",
+      "./buildcfg.h",
+      "-Werror=implicit-function-declaration"
+    ]
+  },
+  "behaviour_check": {
+    "main": "tests/roundtrip.c",
+    "cflags": [
+      "-O1",
+      "-w",
+      "-include",
+      "./buildcfg.h",
+      "-Werror=implicit-function-declaration",
+      "-I."
+    ],
+    "run_args": "",
+    "main_template": "#include <stdio.h>\n#include <string.h>\n#include \"zlib.h\"\n\n#define PLAIN_LEN 4096u\n#define PACKED_CAP 8192u\n#define ROOM_SLACK 64u\n\nstatic unsigned char plain[PLAIN_LEN];\nstatic unsigned char squeezed[PACKED_CAP];\nstatic unsigned char restored[PLAIN_LEN + ROOM_SLACK];\n\nstatic void build_input(void) {\n    unsigned i;\n    for (i = 0; i < PLAIN_LEN; i++)\n        plain[i] = (unsigned char)(65u + ((i * 7u + (i >> 5)) % 23u));\n}\n\nstatic int bail(const char *what, long detail) {\n    fprintf(stderr, \"roundtrip: %s (%ld)\\n\", what, detail);\n    return 1;\n}\n\nint main(void) {\n    z_stream packer;\n    z_stream unpacker;\n    uLong sum_plain, sum_restored;\n    unsigned squeezed_len;\n    int rc;\n\n    build_input();\n    sum_plain = crc32(0L, Z_NULL, 0);\n    sum_plain = crc32(sum_plain, plain, PLAIN_LEN);\n    if (sum_plain == 0)\n        return bail(\"checksum of the input is zero\", 0);\n\n    memset(&packer, 0, sizeof(packer));\n    rc = deflateInit(&packer, Z_DEFAULT_COMPRESSION);\n    if (rc != Z_OK)\n        return bail(\"compressor init refused\", rc);\n    packer.next_in = plain;\n    packer.avail_in = PLAIN_LEN;\n    packer.next_out = squeezed;\n    packer.avail_out = PACKED_CAP;\n    rc = deflate(&packer, Z_FINISH);\n    if (rc != Z_STREAM_END)\n        return bail(\"compressor did not finish in one call\", rc);\n    squeezed_len = (unsigned)packer.total_out;\n    if (deflateEnd(&packer) != Z_OK)\n        return bail(\"compressor teardown refused\", 0);\n    if (squeezed_len == 0 || squeezed_len >= PACKED_CAP)\n        return bail(\"compressed length out of range\", (long)squeezed_len);\n\n    memset(&unpacker, 0, sizeof(unpacker));\n    rc = inflateInit(&unpacker);\n    if (rc != Z_OK)\n        return bail(\"decompressor init refused\", rc);\n    unpacker.next_in = squeezed;\n    unpacker.avail_in = squeezed_len;\n    unpacker.next_out = restored;\n    unpacker.avail_out = (uInt)sizeof(restored);\n    rc = inflate(&unpacker, Z_FINISH);\n    if (rc != Z_STREAM_END)\n        return bail(\"decompressor did not reach end of stream\", rc);\n    if (unpacker.total_out != PLAIN_LEN)\n        return bail(\"round trip length mismatch\", (long)unpacker.total_out);\n    if (inflateEnd(&unpacker) != Z_OK)\n        return bail(\"decompressor teardown refused\", 0);\n\n    if (memcmp(plain, restored, PLAIN_LEN) != 0)\n        return bail(\"round trip content mismatch\", 0);\n\n    sum_restored = crc32(0L, Z_NULL, 0);\n    sum_restored = crc32(sum_restored, restored, PLAIN_LEN);\n    if (sum_restored != sum_plain)\n        return bail(\"checksum mismatch after round trip\", (long)sum_restored);\n\n    if (adler32(adler32(0L, Z_NULL, 0), plain, PLAIN_LEN) !=\n        adler32(adler32(0L, Z_NULL, 0), restored, PLAIN_LEN))\n        return bail(\"rolling checksum mismatch after round trip\", 0);\n\n    printf(\"roundtrip: ok %u -> %u -> %u\\n\", (unsigned)PLAIN_LEN,\n           squeezed_len, (unsigned)unpacker.total_out);\n    return 0;\n}\n"
+  },
+  "entry_points": [
+    {
+      "function": "inflate",
+      "file": "inflate.c",
+      "why": "the stream decoder: every byte it consumes comes from an untrusted peer or file, and it is the function an attacker drives directly"
+    },
+    {
+      "function": "uncompress",
+      "file": "uncompr.c",
+      "why": "one-shot decompression of an attacker-supplied buffer, the API most callers reach for when inflating an untrusted blob"
+    },
+    {
+      "function": "inflateBack",
+      "file": "infback.c",
+      "why": "raw-stream decoding with caller-supplied input and output callbacks, used by gzip-style unpackers on wholly untrusted input"
+    },
+    {
+      "function": "gzread",
+      "file": "gzread.c",
+      "why": "reads and decompresses an untrusted file: the attacker controls the file's whole content, including its header fields and trailer"
+    },
+    {
+      "function": "gzopen",
+      "file": "gzlib.c",
+      "why": "opens a file by a name that, when unpacking an archive or following a manifest, an attacker chose"
+    },
+    {
+      "function": "gzclose",
+      "file": "gzclose.c",
+      "why": "tears down a file handle whose state was shaped entirely by attacker-controlled content and error paths"
+    },
+    {
+      "function": "crc32",
+      "file": "crc32.c",
+      "why": "computes a checksum directly over untrusted bytes, both from the decoder and from application code validating a payload"
+    },
+    {
+      "function": "adler32",
+      "file": "adler32.c",
+      "why": "computes the rolling checksum over untrusted bytes on every decode of a wrapped stream"
+    }
+  ],
+  "bugs": [
+    {
+      "id": "ZS-B01",
+      "bug_class": "off-by-one",
+      "difficulty": "EASY",
+      "file": "gzlib.c",
+      "function": "gz_error",
+      "mechanism": "The error-message buffer is allocated with strlen(path) + strlen(msg) + 2 bytes but the snprintf that fills it is still given a size limit of strlen(path) + strlen(msg) + 3, which is exactly what \"path\" + \": \" + msg + NUL needs. snprintf therefore writes one byte past the end of the heap allocation on every error message, an off-by-one heap overflow.",
+      "attacker_control": "the length of the message text (chosen by which decoder error the crafted stream provokes) and, when unpacking, the file name that is prefixed to it",
+      "mechanism_all_of": [
+        [
+          "off-by-one",
+          "off by one",
+          "one byte",
+          "one too few",
+          "overflow",
+          "overrun"
+        ],
+        [
+          "malloc",
+          "allocat",
+          "snprintf",
+          "size",
+          "buffer"
+        ],
+        [
+          "msg",
+          "path",
+          "message",
+          "error"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzread",
+          "to": "gz_read"
+        },
+        {
+          "from": "gz_read",
+          "to": "gz_fetch"
+        },
+        {
+          "from": "gz_fetch",
+          "to": "gz_decomp"
+        },
+        {
+          "from": "gz_decomp",
+          "to": "gz_error"
+        }
+      ],
+      "anchor": [
+        "    if ((state->msg = (char *)malloc(strlen(state->path) + strlen(msg) + 3)) ==",
+        "            NULL) {"
+      ],
+      "replacement": [
+        "    if ((state->msg = (char *)malloc(strlen(state->path) + strlen(msg) + 2)) ==",
+        "            NULL) {"
+      ],
+      "site_marker": "    if ((state->msg = (char *)malloc(strlen(state->path) + strlen(msg) + 2)) =="
+    },
+    {
+      "id": "ZS-B02",
+      "bug_class": "resource-leak",
+      "difficulty": "EASY",
+      "file": "gzlib.c",
+      "function": "gz_open",
+      "mechanism": "When open() fails, the function frees the duplicated path but no longer frees the gz_state it allocated at the top, so every failed open leaks the whole state structure. An attacker who can make opens fail repeatedly (names that do not exist, or that exceed a permission check) drives an unbounded memory leak.",
+      "attacker_control": "the file names an unpacker is asked to open, and therefore how often open() fails",
+      "mechanism_all_of": [
+        [
+          "leak",
+          "leaked",
+          "not freed",
+          "never freed",
+          "lost"
+        ],
+        [
+          "state",
+          "allocation",
+          "malloc",
+          "memory"
+        ],
+        [
+          "open",
+          "failure",
+          "error path",
+          "fails"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzopen",
+          "to": "gz_open"
+        }
+      ],
+      "anchor": [
+        "    if (state->fd == -1) {",
+        "        free(state->path);",
+        "        free(state);",
+        "        return NULL;",
+        "    }"
+      ],
+      "replacement": [
+        "    if (state->fd == -1) {",
+        "        free(state->path);",
+        "        return NULL;",
+        "    }"
+      ],
+      "site_marker": "    if (state->fd == -1) {"
+    },
+    {
+      "id": "ZS-B03",
+      "bug_class": "oob-read",
+      "difficulty": "EASY",
+      "file": "inflate.c",
+      "function": "inflate",
+      "mechanism": "In the code-lengths state, symbol 16 means \"repeat the previous length\", and the guard that rejected it when no previous length exists is gone. With have == 0 the code reads state->lens[-1], an out-of-bounds read of the struct member that precedes the lens array, and then stores that value as a code length, so lens[] can hold a value far above the 15-bit maximum the table builder documents as its precondition.",
+      "attacker_control": "the code-length code stream of a dynamic block: emitting symbol 16 as the very first code-length symbol reaches the site",
+      "mechanism_all_of": [
+        [
+          "out-of-bounds",
+          "out of bounds",
+          "oob",
+          "underflow",
+          "before the",
+          "negative index",
+          "lens[-1]"
+        ],
+        [
+          "lens",
+          "code length",
+          "code lengths",
+          "previous length",
+          "repeat"
+        ],
+        [
+          "have",
+          "zero",
+          "first",
+          "no previous",
+          "empty"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "uncompress",
+          "to": "uncompress2"
+        },
+        {
+          "from": "uncompress2",
+          "to": "inflate"
+        }
+      ],
+      "anchor": [
+        "                    if (here.val == 16) {",
+        "                        NEEDBITS(here.bits + 2);",
+        "                        DROPBITS(here.bits);",
+        "                        if (state->have == 0) {",
+        "                            strm->msg = (char *)\"invalid bit length repeat\";",
+        "                            state->mode = BAD;",
+        "                            break;",
+        "                        }",
+        "                        len = state->lens[state->have - 1];"
+      ],
+      "replacement": [
+        "                    if (here.val == 16) {",
+        "                        NEEDBITS(here.bits + 2);",
+        "                        DROPBITS(here.bits);",
+        "                        len = state->lens[state->have - 1];"
+      ],
+      "site_marker": "                        len = state->lens[state->have - 1];"
+    },
+    {
+      "id": "ZS-B04",
+      "bug_class": "use-after-free",
+      "difficulty": "EASY",
+      "file": "gzread.c",
+      "function": "gzclose_r",
+      "mechanism": "The state structure is freed before the descriptor it holds is closed, so close() reads state->fd out of freed heap memory: a use-after-free whose loaded value decides which file descriptor the process closes.",
+      "attacker_control": "the heap layout and the contents that land in the freed block, shaped by the allocation pattern the decompressed file produced",
+      "mechanism_all_of": [
+        [
+          "use-after-free",
+          "use after free",
+          "uaf",
+          "freed",
+          "dangling",
+          "after the free"
+        ],
+        [
+          "state",
+          "fd",
+          "descriptor",
+          "close"
+        ],
+        [
+          "order",
+          "before",
+          "reorder",
+          "sequence",
+          "moved"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzclose",
+          "to": "gzclose_r"
+        }
+      ],
+      "anchor": [
+        "    free(state->path);",
+        "    ret = close(state->fd);",
+        "    free(state);",
+        "    return ret ? Z_ERRNO : err;"
+      ],
+      "replacement": [
+        "    free(state->path);",
+        "    free(state);",
+        "    ret = close(state->fd);",
+        "    return ret ? Z_ERRNO : err;"
+      ],
+      "site_marker": "    ret = close(state->fd);"
+    },
+    {
+      "id": "ZS-B05",
+      "bug_class": "buffer-overflow",
+      "difficulty": "EASY",
+      "file": "gzread.c",
+      "function": "gz_avail",
+      "mechanism": "Leftover input is moved to the front of the state->size-byte input buffer and the refill is supposed to ask for only state->size - avail_in more bytes. The limit passed is now the full state->size while the destination is still in + avail_in, so a refill can write avail_in bytes past the end of the input buffer: a heap buffer overflow with attacker-supplied file bytes.",
+      "attacker_control": "the file content, and hence how many bytes are left unconsumed in the input buffer when a refill happens",
+      "mechanism_all_of": [
+        [
+          "overflow",
+          "overrun",
+          "past the end",
+          "out-of-bounds",
+          "out of bounds",
+          "beyond"
+        ],
+        [
+          "input buffer",
+          "state->in",
+          "in buffer",
+          "buffer"
+        ],
+        [
+          "avail_in",
+          "size",
+          "remaining",
+          "leftover",
+          "unconsumed"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzread",
+          "to": "gz_read"
+        },
+        {
+          "from": "gz_read",
+          "to": "gz_fetch"
+        },
+        {
+          "from": "gz_fetch",
+          "to": "gz_look"
+        },
+        {
+          "from": "gz_look",
+          "to": "gz_avail"
+        }
+      ],
+      "anchor": [
+        "        if (gz_load(state, state->in + strm->avail_in,",
+        "                    state->size - strm->avail_in, &got) == -1)"
+      ],
+      "replacement": [
+        "        if (gz_load(state, state->in + strm->avail_in,",
+        "                    state->size, &got) == -1)"
+      ],
+      "site_marker": "                    state->size, &got) == -1)"
+    },
+    {
+      "id": "ZS-B06",
+      "bug_class": "unchecked-return-value",
+      "difficulty": "MEDIUM",
+      "file": "inflate.c",
+      "function": "inflate",
+      "mechanism": "The return value of the distance-table build is discarded with a (void) cast instead of being checked, so an over-subscribed or incomplete distance code no longer sets the error state. Decoding continues with distcode pointing into a half-filled table and distbits left at its requested value, so the distance lookup and its second-level indexing read uninitialised code entries and index past the end of the codes array.",
+      "attacker_control": "the distance code lengths of a dynamic block, chosen so the table build fails",
+      "mechanism_all_of": [
+        [
+          "unchecked",
+          "ignored",
+          "discarded",
+          "not checked",
+          "return value",
+          "void"
+        ],
+        [
+          "inflate_table",
+          "table build",
+          "distance table",
+          "distcode",
+          "table"
+        ],
+        [
+          "error",
+          "failure",
+          "fails",
+          "invalid",
+          "uninitialised",
+          "uninitialized",
+          "partial"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "uncompress",
+          "to": "uncompress2"
+        },
+        {
+          "from": "uncompress2",
+          "to": "inflate"
+        }
+      ],
+      "anchor": [
+        "            state->distcode = (const code FAR *)(state->next);",
+        "            state->distbits = 6;",
+        "            ret = inflate_table(DISTS, state->lens + state->nlen, state->ndist,",
+        "                            &(state->next), &(state->distbits), state->work);",
+        "            if (ret) {",
+        "                strm->msg = (char *)\"invalid distances set\";",
+        "                state->mode = BAD;",
+        "                break;",
+        "            }"
+      ],
+      "replacement": [
+        "            state->distcode = (const code FAR *)(state->next);",
+        "            state->distbits = 6;",
+        "            (void)inflate_table(DISTS, state->lens + state->nlen, state->ndist,",
+        "                            &(state->next), &(state->distbits), state->work);"
+      ],
+      "site_marker": "            (void)inflate_table(DISTS, state->lens + state->nlen, state->ndist,"
+    },
+    {
+      "id": "ZS-B07",
+      "bug_class": "validate-one-copy-use-another",
+      "difficulty": "MEDIUM",
+      "file": "gzread.c",
+      "function": "gz_read",
+      "mechanism": "The copy out of the output buffer is clamped against state->size, the buffer's capacity, instead of against state->x.have, the number of bytes actually available at state->x.next. memcpy then reads past the valid data and the following state->x.have -= n underflows to a huge count, so the next iteration copies from far beyond the buffer: the value that was validated is not the value the copy depends on.",
+      "attacker_control": "how much decompressed data is sitting in the output buffer when a large read arrives, which the crafted stream decides",
+      "mechanism_all_of": [
+        [
+          "wrong field",
+          "different",
+          "instead of",
+          "not the",
+          "mismatch",
+          "validated",
+          "clamp"
+        ],
+        [
+          "state->size",
+          "size",
+          "capacity",
+          "x.have",
+          "have",
+          "available"
+        ],
+        [
+          "memcpy",
+          "copy",
+          "underflow",
+          "read past",
+          "out-of-bounds",
+          "out of bounds"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzread",
+          "to": "gz_read"
+        }
+      ],
+      "anchor": [
+        "            if (state->x.have < n)",
+        "                n = state->x.have;",
+        "            memcpy(buf, state->x.next, n);"
+      ],
+      "replacement": [
+        "            if (state->size < n)",
+        "                n = state->size;",
+        "            memcpy(buf, state->x.next, n);"
+      ],
+      "site_marker": "            if (state->size < n)"
+    },
+    {
+      "id": "ZS-B08",
+      "bug_class": "width-truncation",
+      "difficulty": "MEDIUM",
+      "file": "gzread.c",
+      "function": "gz_skip",
+      "mechanism": "The skip count is a 64-bit offset and the amount consumed from the output buffer must be the smaller of that offset and state->x.have. Both the clamp and the width guard are gone, so the 64-bit value is truncated straight into an unsigned n that can exceed x.have; state->x.have -= n then wraps to a huge count and state->x.next is advanced far past the end of the output buffer.",
+      "attacker_control": "the decompressed content, which decides how much sits in the output buffer when a pending seek is applied",
+      "mechanism_all_of": [
+        [
+          "truncat",
+          "narrow",
+          "cast",
+          "64-bit",
+          "width",
+          "wraps",
+          "wrap"
+        ],
+        [
+          "skip",
+          "len",
+          "offset",
+          "z_off64_t"
+        ],
+        [
+          "x.have",
+          "have",
+          "unsigned",
+          "clamp",
+          "underflow",
+          "out-of-bounds",
+          "out of bounds"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzread",
+          "to": "gz_read"
+        },
+        {
+          "from": "gz_read",
+          "to": "gz_skip"
+        }
+      ],
+      "anchor": [
+        "            n = GT_OFF(state->x.have) || (z_off64_t)state->x.have > len ?",
+        "                (unsigned)len : state->x.have;"
+      ],
+      "replacement": [
+        "            n = (unsigned)len;"
+      ],
+      "site_marker": "            n = (unsigned)len;"
+    },
+    {
+      "id": "ZS-B09",
+      "bug_class": "oob-write",
+      "difficulty": "MEDIUM",
+      "file": "inflate.c",
+      "function": "updatewindow",
+      "mechanism": "The first leg of the circular window copy must be limited to the space left between the write index and the end of the window, wsize - wnext. It is now limited to the whole wsize, so the copy of up to wsize bytes starts at window + wnext and runs wnext bytes past the end of the window allocation, and wnext itself is then advanced beyond wsize so the overflow repeats on later calls.",
+      "attacker_control": "the decompressed byte count per call, which sets both the copy length and the window write index",
+      "mechanism_all_of": [
+        [
+          "out-of-bounds",
+          "out of bounds",
+          "oob",
+          "overflow",
+          "overrun",
+          "past the end",
+          "beyond"
+        ],
+        [
+          "window",
+          "wsize",
+          "wnext",
+          "circular",
+          "sliding"
+        ],
+        [
+          "copy",
+          "memcpy",
+          "dist",
+          "write"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "uncompress",
+          "to": "uncompress2"
+        },
+        {
+          "from": "uncompress2",
+          "to": "inflate"
+        },
+        {
+          "from": "inflate",
+          "to": "updatewindow"
+        }
+      ],
+      "anchor": [
+        "        dist = state->wsize - state->wnext;",
+        "        if (dist > copy) dist = copy;",
+        "        zmemcpy(state->window + state->wnext, end - copy, dist);"
+      ],
+      "replacement": [
+        "        dist = state->wsize;",
+        "        if (dist > copy) dist = copy;",
+        "        zmemcpy(state->window + state->wnext, end - copy, dist);"
+      ],
+      "site_marker": "        dist = state->wsize;"
+    },
+    {
+      "id": "ZS-B10",
+      "bug_class": "state-machine-bypass",
+      "difficulty": "MEDIUM",
+      "file": "uncompr.c",
+      "function": "uncompress2",
+      "mechanism": "A stream that ran out of input before the decoder reached the end-of-stream state now returns success instead of a data error, because Z_BUF_ERROR is folded into the Z_OK arm. A truncated stream therefore reports success with a short output length, so a caller that treats success as \"the whole payload was decoded and its trailer checked\" accepts a prefix an attacker chose, skipping the terminating state and the trailer check entirely.",
+      "attacker_control": "where the compressed stream is cut, so the decoder stops before the end-of-stream state and its checksum and length trailer",
+      "mechanism_all_of": [
+        [
+          "bypass",
+          "skipped",
+          "never reached",
+          "without reaching",
+          "not reached",
+          "accepts",
+          "success"
+        ],
+        [
+          "truncat",
+          "incomplete",
+          "short",
+          "Z_BUF_ERROR",
+          "buffer error",
+          "prefix"
+        ],
+        [
+          "end of stream",
+          "end-of-stream",
+          "Z_STREAM_END",
+          "trailer",
+          "checksum",
+          "state"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "uncompress",
+          "to": "uncompress2"
+        }
+      ],
+      "anchor": [
+        "    return err == Z_STREAM_END ? Z_OK :",
+        "           err == Z_NEED_DICT ? Z_DATA_ERROR  :",
+        "           err == Z_BUF_ERROR && left + stream.avail_out ? Z_DATA_ERROR :",
+        "           err;"
+      ],
+      "replacement": [
+        "    return err == Z_STREAM_END || err == Z_BUF_ERROR ? Z_OK :",
+        "           err == Z_NEED_DICT ? Z_DATA_ERROR  :",
+        "           err == Z_BUF_ERROR && left + stream.avail_out ? Z_DATA_ERROR :",
+        "           err;"
+      ],
+      "site_marker": "    return err == Z_STREAM_END || err == Z_BUF_ERROR ? Z_OK :"
+    },
+    {
+      "id": "ZS-B11",
+      "bug_class": "unsigned-integer-overflow",
+      "difficulty": "HARD",
+      "file": "inffast.c",
+      "function": "inflate_fast",
+      "mechanism": "The wrap-around window case is entered when wnext is strictly less than op, because the code then does op -= wnext and drives a do/while that decrements op, which requires op to be at least one. Admitting wnext == op makes op zero at that point, so --op wraps around to the maximum unsigned value and the copy loop runs about four billion times, reading from beyond the end of the window and writing far past the output buffer.",
+      "attacker_control": "the match distance, chosen so that the distance back into the window is exactly equal to the window write index",
+      "mechanism_all_of": [
+        [
+          "unsigned",
+          "wrap",
+          "wraps",
+          "underflow",
+          "overflow",
+          "zero",
+          "negative"
+        ],
+        [
+          "op",
+          "wnext",
+          "decrement",
+          "--op",
+          "loop",
+          "counter"
+        ],
+        [
+          "window",
+          "copy",
+          "out-of-bounds",
+          "out of bounds",
+          "past",
+          "distance"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "inflate",
+          "to": "inflate_fast"
+        }
+      ],
+      "anchor": [
+        "                    else if (wnext < op) {      /* wrap around window */",
+        "                        from += wsize + wnext - op;"
+      ],
+      "replacement": [
+        "                    else if (wnext <= op) {      /* wrap around window */",
+        "                        from += wsize + wnext - op;"
+      ],
+      "site_marker": "                    else if (wnext <= op) {      /* wrap around window */"
+    },
+    {
+      "id": "ZS-B12",
+      "bug_class": "uninitialised-use",
+      "difficulty": "HARD",
+      "file": "inflate.c",
+      "function": "inflateReset",
+      "mechanism": "Resetting the stream clears wsize and wnext but no longer clears whave, and whave is set nowhere else before use because the state allocator does not zero its memory. The decoder therefore consults an uninitialised (or stale, on a reused stream) count of valid window bytes: the distance check that compares the back-distance against whave passes, and the match copy computes its source as window + (wsize - copy) with wsize still zero, reading up to a whole window's worth of memory from before the window allocation.",
+      "attacker_control": "the match distance in the first block after a reset, chosen to exceed the bytes emitted so far so the window path is taken",
+      "mechanism_all_of": [
+        [
+          "uninitialised",
+          "uninitialized",
+          "not initialised",
+          "not initialized",
+          "stale",
+          "garbage",
+          "never cleared",
+          "not cleared"
+        ],
+        [
+          "whave",
+          "window",
+          "valid bytes"
+        ],
+        [
+          "reset",
+          "inflateReset",
+          "reuse",
+          "reused"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzread",
+          "to": "gz_read"
+        },
+        {
+          "from": "gz_read",
+          "to": "gz_fetch"
+        },
+        {
+          "from": "gz_fetch",
+          "to": "gz_look"
+        },
+        {
+          "from": "gz_look",
+          "to": "inflateReset"
+        }
+      ],
+      "anchor": [
+        "    state = (struct inflate_state FAR *)strm->state;",
+        "    state->wsize = 0;",
+        "    state->whave = 0;",
+        "    state->wnext = 0;",
+        "    return inflateResetKeep(strm);"
+      ],
+      "replacement": [
+        "    state = (struct inflate_state FAR *)strm->state;",
+        "    state->wsize = 0;",
+        "    state->wnext = 0;",
+        "    return inflateResetKeep(strm);"
+      ],
+      "site_marker": "    state->wnext = 0;"
+    },
+    {
+      "id": "ZS-B13",
+      "bug_class": "encoding-invariant-violation",
+      "difficulty": "HARD",
+      "file": "inflate.c",
+      "function": "inflate",
+      "mechanism": "The window size declared in the stream header is now copied into state->wbits unconditionally and is no longer required to fit inside the window size the caller configured. That breaks the invariant that wbits is fixed for as long as a window allocation exists: a reset keeps the existing window buffer, and the window allocator only allocates when the pointer is null, so a later stream can declare a larger window, have wsize computed as one shifted by the new larger wbits, and have the window copy write far past the smaller buffer that is still in use.",
+      "attacker_control": "the four window-size bits of the stream header on a stream fed to a decoder that was configured with a smaller window and reuses its state",
+      "mechanism_all_of": [
+        [
+          "invariant",
+          "trusted",
+          "trusts",
+          "no longer",
+          "overrides",
+          "not validated",
+          "unchecked",
+          "exceed"
+        ],
+        [
+          "window",
+          "wbits",
+          "wsize",
+          "window size",
+          "header"
+        ],
+        [
+          "caller",
+          "configured",
+          "requested",
+          "allocation",
+          "allocated",
+          "reset",
+          "reuse",
+          "reused",
+          "larger"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "uncompress",
+          "to": "uncompress2"
+        },
+        {
+          "from": "uncompress2",
+          "to": "inflate"
+        }
+      ],
+      "anchor": [
+        "            len = BITS(4) + 8;",
+        "            if (state->wbits == 0)",
+        "                state->wbits = len;",
+        "            if (len > 15 || len > state->wbits) {"
+      ],
+      "replacement": [
+        "            len = BITS(4) + 8;",
+        "            state->wbits = len;",
+        "            if (len > 15) {"
+      ],
+      "site_marker": "            state->wbits = len;"
+    },
+    {
+      "id": "ZS-B14",
+      "bug_class": "double-free",
+      "difficulty": "HARD",
+      "file": "gzread.c",
+      "function": "gz_look",
+      "mechanism": "state->size is the flag that says the two i/o buffers are allocated, and it has already been set when the decoder-state allocation is attempted. On that allocation's failure path the buffers are freed but size is no longer reset to zero, so the handle is left claiming buffers that have been released: the close path sees a non-zero size and frees both pointers a second time, and the refill path reads and writes through them in the meantime.",
+      "attacker_control": "memory pressure at the moment the first gzip member is recognised, plus the file content that decides when the look-ahead path runs",
+      "mechanism_all_of": [
+        [
+          "double free",
+          "double-free",
+          "freed twice",
+          "second time",
+          "again"
+        ],
+        [
+          "state->size",
+          "size",
+          "flag",
+          "zero",
+          "reset",
+          "cleared"
+        ],
+        [
+          "error path",
+          "failure",
+          "fails",
+          "allocation",
+          "close",
+          "teardown",
+          "buffers"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "gzread",
+          "to": "gz_read"
+        },
+        {
+          "from": "gz_read",
+          "to": "gz_fetch"
+        },
+        {
+          "from": "gz_fetch",
+          "to": "gz_look"
+        }
+      ],
+      "anchor": [
+        "        if (inflateInit2(&(state->strm), 15 + 16) != Z_OK) {    /* gunzip */",
+        "            free(state->out);",
+        "            free(state->in);",
+        "            state->size = 0;",
+        "            gz_error(state, Z_MEM_ERROR, \"out of memory\");",
+        "            return -1;",
+        "        }"
+      ],
+      "replacement": [
+        "        if (inflateInit2(&(state->strm), 15 + 16) != Z_OK) {    /* gunzip */",
+        "            free(state->out);",
+        "            free(state->in);",
+        "            gz_error(state, Z_MEM_ERROR, \"out of memory\");",
+        "            return -1;",
+        "        }"
+      ],
+      "site_marker": "            free(state->in);"
+    },
+    {
+      "id": "ZS-B15",
+      "bug_class": "unbounded-copy",
+      "difficulty": "MEDIUM",
+      "file": "inflate.c",
+      "function": "inflate",
+      "mechanism": "The stored-block copy is still clamped to the bytes available on input but the clamp against the remaining output space is gone, so a block whose declared length exceeds the caller's output buffer is copied in full: an unbounded memcpy of attacker-chosen length and attacker-chosen content past the end of the output buffer, after which the remaining-output counter itself wraps and the following states keep writing.",
+      "attacker_control": "the stored-block length field and the raw bytes that follow it, up to 65535 bytes of chosen content per block",
+      "mechanism_all_of": [
+        [
+          "unbounded",
+          "not clamped",
+          "no clamp",
+          "not limited",
+          "unchecked",
+          "overflow",
+          "past the end",
+          "beyond"
+        ],
+        [
+          "output",
+          "avail_out",
+          "left",
+          "output buffer"
+        ],
+        [
+          "stored",
+          "copy",
+          "memcpy",
+          "length",
+          "block"
+        ]
+      ],
+      "call_path": [
+        {
+          "from": "uncompress",
+          "to": "uncompress2"
+        },
+        {
+          "from": "uncompress2",
+          "to": "inflate"
+        }
+      ],
+      "anchor": [
+        "            copy = state->length;",
+        "            if (copy) {",
+        "                if (copy > have) copy = have;",
+        "                if (copy > left) copy = left;",
+        "                if (copy == 0) goto inf_leave;",
+        "                zmemcpy(put, next, copy);"
+      ],
+      "replacement": [
+        "            copy = state->length;",
+        "            if (copy) {",
+        "                if (copy > have) copy = have;",
+        "                if (copy == 0) goto inf_leave;",
+        "                zmemcpy(put, next, copy);"
+      ],
+      "site_marker": "                zmemcpy(put, next, copy);"
+    }
+  ],
+  "decoys": [
+    {
+      "id": "ZS-D01",
+      "decoy_kind": "dead-branch",
+      "function": "(file-level)",
+      "file": "crc32.c",
+      "safe_because": "The added guard is defined(X) && !defined(X) for a single macro, which no preprocessor state can satisfy, so the include it guards is never expanded; the only other change is dropping a trailing comment, which the translation phase discards in any case.",
+      "anchor": [
+        "#include \"zutil.h\"      /* for Z_U4, Z_U8, z_crc_t, and FAR definitions */"
+      ],
+      "replacement": [
+        "#include \"zutil.h\"",
+        "#if defined(Z_CRC_SELFTEST) && !defined(Z_CRC_SELFTEST)",
+        "#  include \"crc_selftest.h\"",
+        "#endif"
+      ]
+    },
+    {
+      "id": "ZS-D02",
+      "decoy_kind": "dead-branch",
+      "function": "(file-level)",
+      "file": "crc32.c",
+      "safe_because": "The block already sits in the #else arm of the runtime-table conditional, which this build always defines, and the guard added inside it is defined(X) && !defined(X), so neither arm of the new branch can ever be compiled.",
+      "anchor": [
+        "#  include \"crc32.h\"",
+        "#endif"
+      ],
+      "replacement": [
+        "#  if defined(Z_TABLES_PREBUILT) && !defined(Z_TABLES_PREBUILT)",
+        "#    include \"tables_prebuilt.h\"",
+        "#  endif",
+        "#endif"
+      ]
+    },
+    {
+      "id": "ZS-D03",
+      "decoy_kind": "equivalent-expression",
+      "function": "adler32_z",
+      "file": "adler32.c",
+      "safe_because": "Bitwise OR is commutative and both operands are unsigned long values already reduced below the modulus, so no intermediate conversion or overflow is possible and the returned bit pattern is identical.",
+      "anchor": [
+        "        sum2 += adler;",
+        "        if (sum2 >= BASE)",
+        "            sum2 -= BASE;",
+        "        return adler | (sum2 << 16);"
+      ],
+      "replacement": [
+        "        sum2 += adler;",
+        "        if (sum2 >= BASE)",
+        "            sum2 -= BASE;",
+        "        return (sum2 << 16) | adler;"
+      ]
+    },
+    {
+      "id": "ZS-D04",
+      "decoy_kind": "extra-init",
+      "function": "compress2",
+      "file": "compress.c",
+      "safe_because": "left is unconditionally assigned from *destLen on the next statement, before any read, on the only path through the function, so the initialiser is dead and cannot change any value the function computes or returns.",
+      "anchor": [
+        "    uLong left;",
+        "",
+        "    left = *destLen;"
+      ],
+      "replacement": [
+        "    uLong left = 0;",
+        "",
+        "    left = *destLen;"
+      ]
+    },
+    {
+      "id": "ZS-D05",
+      "decoy_kind": "renamed-local",
+      "function": "putShortMSB",
+      "file": "deflate.c",
+      "safe_because": "The renamed name is a by-value parameter read only inside this two-statement function, no other declaration of that name is in scope, and neither macro it is passed to stringises or concatenates its argument, so every expression evaluates identically.",
+      "anchor": [
+        "local void putShortMSB(deflate_state *s, uInt b) {",
+        "    put_byte(s, (Byte)(b >> 8));",
+        "    put_byte(s, (Byte)(b & 0xff));",
+        "}"
+      ],
+      "replacement": [
+        "local void putShortMSB(deflate_state *s, uInt word) {",
+        "    put_byte(s, (Byte)(word >> 8));",
+        "    put_byte(s, (Byte)(word & 0xff));",
+        "}"
+      ]
+    },
+    {
+      "id": "ZS-D06",
+      "decoy_kind": "redundant-check",
+      "function": "gzclose",
+      "file": "gzclose.c",
+      "safe_because": "state is a plain cast of file and the dominating file == NULL test has already returned, so the added state == NULL condition is decided false by that check on every path that reaches it and the branch is never taken.",
+      "anchor": [
+        "    state = (gz_statep)file;",
+        "",
+        "    return state->mode == GZ_READ ? gzclose_r(file) : gzclose_w(file);"
+      ],
+      "replacement": [
+        "    state = (gz_statep)file;",
+        "    if (state == NULL)",
+        "        return Z_STREAM_ERROR;",
+        "",
+        "    return state->mode == GZ_READ ? gzclose_r(file) : gzclose_w(file);"
+      ]
+    },
+    {
+      "id": "ZS-D07",
+      "decoy_kind": "reordered-independent",
+      "function": "gz_zero",
+      "file": "gzwrite.c",
+      "safe_because": "The two statements assign different, non-overlapping members of the stream structure, neither reads what the other writes, and nothing between them observes either, so swapping their order cannot change any value or any call that follows.",
+      "anchor": [
+        "        strm->avail_in = n;",
+        "        strm->next_in = state->in;",
+        "        state->x.pos += n;"
+      ],
+      "replacement": [
+        "        strm->next_in = state->in;",
+        "        strm->avail_in = n;",
+        "        state->x.pos += n;"
+      ]
+    },
+    {
+      "id": "ZS-D08",
+      "decoy_kind": "strengthened-bound",
+      "function": "inflateBack",
+      "file": "infback.c",
+      "safe_because": "ncode is assigned four plus a four-bit field, so its range is 4 to 19 by construction and the added greater-than-19 disjunct can never be true; the guarded error branch is untouched.",
+      "anchor": [
+        "            if (state->nlen > 286 || state->ndist > 30) {",
+        "                strm->msg = (char *)\"too many length or distance symbols\";",
+        "                state->mode = BAD;",
+        "                break;",
+        "            }"
+      ],
+      "replacement": [
+        "            if (state->nlen > 286 || state->ndist > 30 ||",
+        "                state->ncode > 19) {",
+        "                strm->msg = (char *)\"too many length or distance symbols\";",
+        "                state->mode = BAD;",
+        "                break;",
+        "            }"
+      ]
+    },
+    {
+      "id": "ZS-D09",
+      "decoy_kind": "extra-assert",
+      "function": "inflate_table",
+      "file": "inftrees.c",
+      "safe_because": "The assertion macro expands to nothing unless the debug build flag is defined, which this build does not define, and the asserted relation holds on every path anyway: root is clamped down to max above and clamped up to min on the preceding line, and min is at most max.",
+      "anchor": [
+        "    for (min = 1; min < max; min++)",
+        "        if (count[min] != 0) break;",
+        "    if (root < min) root = min;"
+      ],
+      "replacement": [
+        "    for (min = 1; min < max; min++)",
+        "        if (count[min] != 0) break;",
+        "    if (root < min) root = min;",
+        "    Assert(root >= min && root <= max, \"root outside code length range\");"
+      ]
+    },
+    {
+      "id": "ZS-D10",
+      "decoy_kind": "widened-type",
+      "function": "bi_reverse",
+      "file": "trees.c",
+      "safe_because": "The accumulator takes at most fifteen shifted bits, so its value never exceeds 0x7fff; unsigned long is at least as wide as unsigned on every supported target, and the implicit narrowing at the return cannot lose a value in that range.",
+      "anchor": [
+        "local unsigned bi_reverse(unsigned code, int len) {",
+        "    register unsigned res = 0;"
+      ],
+      "replacement": [
+        "local unsigned bi_reverse(unsigned code, int len) {",
+        "    register unsigned long res = 0;"
+      ]
+    }
+  ]
+}

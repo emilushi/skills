@@ -85,16 +85,30 @@ Workflow({
 })
 ```
 
+Three further arguments are optional and default correctly; pass them only when the
+user asks or when running an evaluation:
+
+| Argument | Default | What it is for |
+|---|---|---|
+| `judgeMode` | `"batched"` | `"batched"` judges findings in groups that share a source file. `"per-finding"` is one agent per candidate — the older behaviour, kept so the two can be measured against each other |
+| `judgeBatchSize` | `5` | Cap on candidates per judge agent. Batches are balanced, so 12 findings in one file give 4+4+4, not 5+5+2 |
+| `injectFindings` | absent | **Eval-only.** An array of finding objects appended to the hunter output before dedup and judging. Anything passed here is reported as though a hunter found it, so it must never be used in a real review. It exists so `bench/judge_bench/` can benchmark the judge without paying for a hunter fan-out |
+
 The workflow validates its own arguments and throws with a named field if one is
 missing. It runs five phases:
 
 | Phase | Agents | What it does |
 |---|---|---|
 | Detect | 1 | Language and platform flags **from actual API usage**, plus purpose, entry points, trust boundaries and existing hardening |
-| Hunt | 13–18 | One agent per bug-class group, in parallel, returning structured findings and a coverage note |
-| Dedup | 0–N | Identical `(file, line, class)` merges happen in the script; an agent runs only for same-function collisions |
-| Judge | one per candidate | False-positive verdict, then severity for survivors |
+| Hunt | 13–18 | One agent per bug-class group, in parallel, returning structured findings, a coverage note, and a declaration of any external sources it consulted |
+| Dedup | 0–N | Identical `(file, line, class)` merges happen in the script; agents run only for same-function collisions, batched by file |
+| Judge | one per file-group | False-positive verdict, then severity for survivors. 13 candidates in two files is 4 agents, not 13 |
 | Persist | 1 | Writes `findings.json`, then runs the SARIF and report generators |
+
+Judge cost is driven by agent count, not by how much any one agent writes: a measured
+run held per-agent tokens flat while the agent count went 14 → 34, and one judge agent
+per finding was the largest single contributor. A judge holding several findings from
+one file reads that file once and has *more* context per verdict, not less.
 
 Group count depends on detection: **13** always-on groups, **+2** when C++ translation
 units are compiled, **+3** when Win32 APIs are actually used. `LOCAL_UNPRIVILEGED` adds no
@@ -153,6 +167,18 @@ Four defects from the measured evaluation are load-bearing here; do not undo the
   carries an explicit logic-and-protocol group, because the classes it omits — injection,
   protocol state machines, encoding invariants, authorization — are where the bugs no
   configuration found were hiding.
+- **A filed finding closes a finding, not a bug class.** Marking a class `reported` over
+  a countable population obliges the hunter to account for the whole population. One run
+  filed a single stack-exhaustion bug, wrote `reported` over "all recursive constructs",
+  and never enumerated the second recursion in the same file — which was a ground-truth
+  CVE the *previous* architecture had found.
+- **External sources are declared, not forbidden.** Consulting upstream is legitimate in
+  a real audit; it only invalidates a benchmark run against a public corpus. Hunters
+  declare it, the benchmark harness excludes any arm that used an oracle from its
+  comparison, and nothing in the review path penalises the declaration.
 
-The plugin is measured, not argued: `evals/` holds a seven-CVE ground-truth corpus, a
-grader, and the note that the full run costs roughly a million tokens.
+The plugin is measured, not argued: `bench/` holds three corpora whose bugs this
+repository injected itself (so no CVE database contains the answers), a grader that
+reports recall by bug class and difficulty tier alongside false positives and token
+cost, an oracle detector that invalidates rather than annotates, and a judge benchmark
+with seeded false positives.

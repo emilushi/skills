@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Detect', detail: 'language, platform and codebase context from actual API usage' },
     { title: 'Hunt', detail: 'one agent per bug-class group, in parallel' },
     { title: 'Dedup', detail: 'merge same-construct duplicates (only runs when candidates collide)' },
-    { title: 'Judge', detail: 'false-positive verdict and severity, one agent per candidate' },
+    { title: 'Judge', detail: 'false-positive verdict and severity, in batches that share a source file' },
     { title: 'Persist', detail: 'write findings.json, REPORT.md and REPORT.sarif' },
   ],
 }
@@ -39,6 +39,34 @@ if (!['REMOTE', 'LOCAL_UNPRIVILEGED', 'BOTH'].includes(THREAT_MODEL)) {
 if (!['all', 'medium', 'high'].includes(SEVERITY_FILTER)) {
   throw new Error('c-review: severityFilter must be all, medium or high')
 }
+
+// Judge cost is dominated by agent COUNT, not by how much any one agent says: a
+// measured run held per-agent tokens flat while agent count went 14 -> 34, and the
+// single largest contributor was one judge agent per finding. Batched judging puts
+// findings that share a source file in front of one agent, which reads that file
+// once and has more context per verdict, not less. 'per-finding' reproduces the
+// one-agent-per-candidate behaviour so the two can be measured against each other.
+const JUDGE_MODE = String(args.judgeMode || 'batched').toLowerCase()
+if (!['batched', 'per-finding'].includes(JUDGE_MODE)) {
+  throw new Error("c-review: judgeMode must be 'batched' or 'per-finding'")
+}
+const JUDGE_BATCH_MAX =
+  Number.isFinite(args.judgeBatchSize) && args.judgeBatchSize >= 1 ? Math.floor(args.judgeBatchSize) : 5
+
+// Cap on findings handed to one dedup agent. Dedup batches whole buckets, so this
+// is a soft cap: a single bucket larger than the cap still goes to one agent rather
+// than being split, because splitting a bucket would hide a duplicate pair.
+const DEDUP_BATCH_MAX = 12
+
+// EVAL-ONLY HOOK. `injectFindings` appends synthetic findings to the hunter output
+// before dedup and judging, so a judge benchmark can be scored without paying for a
+// hunter fan-out (resume a cached run and inject seeded false positives). It has no
+// place in a real audit: anything injected here is reported as if a hunter had found
+// it. See bench/judge_bench/ for the corpus of seeded findings this exists to carry.
+if (args.injectFindings !== undefined && !Array.isArray(args.injectFindings)) {
+  throw new Error('c-review: injectFindings must be an array of finding objects (eval-only hook)')
+}
+const INJECT_FINDINGS = Array.isArray(args.injectFindings) ? args.injectFindings : []
 
 function workerOpts(extra) {
   const opts = Object.assign({}, extra)
@@ -549,8 +577,17 @@ const FINDING_PROPERTIES = {
 const HUNT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['findings', 'coverage'],
+  required: ['findings', 'coverage', 'external_sources_consulted', 'external_sources_detail'],
   properties: {
+    external_sources_consulted: {
+      type: 'boolean',
+      description:
+        'true if you read anything outside this repository while working — upstream sources, a git history, a changelog, an advisory, a CVE record, a search result. Declaring it is expected and carries no penalty; it exists so benchmark runs can be scored honestly.',
+    },
+    external_sources_detail: {
+      type: 'string',
+      description: 'what you consulted and why, or the single word "none"',
+    },
     findings: {
       type: 'array',
       items: {
@@ -569,9 +606,14 @@ const HUNT_SCHEMA = {
         required: ['bug_class', 'outcome', 'population', 'evidence'],
         properties: {
           bug_class: { type: 'string' },
-          outcome: { type: 'string', enum: ['reported', 'nothing-survived-review', 'no-candidates-in-scope', 'not-searched'] },
+          outcome: {
+            type: 'string',
+            enum: ['reported', 'nothing-survived-review', 'no-candidates-in-scope', 'not-searched'],
+            description:
+              'reported means you filed at least one finding for this class. It does not mean the class is closed: a finding closes a finding, not a population.',
+          },
           population: { type: 'string', description: 'the concrete set you enumerated and its size, e.g. "31 memcpy/memmove call sites across 6 files"' },
-          evidence: { type: 'string', description: 'for anything other than not-searched: the path:line citations you actually opened, or the concrete reason the population is empty. An outcome with no citable evidence should be reported as not-searched.' },
+          evidence: { type: 'string', description: 'for anything other than not-searched: the path:line citations you actually opened, or the concrete reason the population is empty. An outcome with no citable evidence should be reported as not-searched. When the outcome is reported AND the population is countable, the evidence must account for the whole population — say what you found at the members you did not file, not only at the one you did.' },
         },
       },
     },
@@ -614,6 +656,30 @@ const VERDICT_SCHEMA = {
   },
 }
 
+// One entry per candidate in the batch. `id` is what maps a verdict back onto the
+// finding it belongs to; a batch that returns fewer entries than it was given leaves
+// the missing ones unjudged and labelled, never silently dropped.
+const BATCH_VERDICT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdicts'],
+  properties: {
+    verdicts: {
+      type: 'array',
+      description: 'exactly one entry for every candidate id you were given, in any order',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'fp_verdict', 'fp_rationale'],
+        properties: Object.assign(
+          { id: { type: 'string', description: 'the candidate id this verdict belongs to' } },
+          VERDICT_SCHEMA.properties
+        ),
+      },
+    },
+  },
+}
+
 const PERSIST_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -641,7 +707,25 @@ const EVIDENCE_RULE = [
   '',
   'If you claim a guard, a bounds check, a cast, or any other mitigation exists, cite the path:line',
   'where it is written, so a reader can open that line and see it. If you cannot cite it, it is not',
-  'there. Do not fetch, search for, or reason from anything outside this repository.',
+  'there. Nothing outside this repository substitutes for that citation: an upstream diff, a',
+  'changelog or an advisory may tell you where to look, but only the code in front of you can clear',
+  'a candidate.',
+].join('\n')
+
+const EXTERNAL_SOURCE_DECLARATION = [
+  'DECLARE EXTERNAL SOURCES.',
+  '',
+  'Set external_sources_consulted true if you read anything outside this repository while working —',
+  'an upstream release or tarball, a git history, a changelog, an advisory, a CVE record, a search',
+  'result, a vendored copy elsewhere on the machine. Otherwise set it false. Put what you used in',
+  'external_sources_detail, or the single word "none".',
+  '',
+  'Declaring true costs you nothing. Nothing is dropped, downgraded or re-reviewed because of it,',
+  'and in a real audit comparing against upstream is legitimate and often the fastest route to a',
+  'bug. The flag exists for one reason: this pipeline is also measured against corpora whose bugs',
+  'are already public, and a run where a reviewer read the answer off an upstream fix measures',
+  'diffing rather than review, so the score has to know which findings came from where. The only',
+  'thing that does damage is an undeclared consultation.',
 ].join('\n')
 
 const ESCAPE_HATCH = [
@@ -719,6 +803,8 @@ function huntPrompt(group, classIds, detect) {
     '',
     EVIDENCE_RULE,
     '',
+    EXTERNAL_SOURCE_DECLARATION,
+    '',
     ESCAPE_HATCH,
     '',
     '## Your classes',
@@ -744,6 +830,13 @@ function huntPrompt(group, classIds, detect) {
     'The coverage array is an audit note for a human, not a gate: nothing downstream validates it and',
     'nothing rejects your work for what it says. Write what actually happened. If you did not search a',
     'class, say not-searched.',
+    '',
+    'Filing a finding closes that finding, not the class it belongs to. When you mark a class reported',
+    'and its population is countable — the recursive call sites, the size computations, the call sites',
+    'of one macro — the evidence has to account for the whole population you declared, including the',
+    'members you looked at and did not file. Writing reported over an uncountable population ("all',
+    'constructs reachable from untrusted input") on the strength of one instance is how a second bug in',
+    'the same class goes unlooked-at.',
     '',
     scopeBlock(),
     '',
@@ -776,6 +869,40 @@ function dedupPrompt(bucket) {
   ].join('\n')
 }
 
+// Several collisions in one file go to one agent. The buckets stay separate in the
+// prompt and a merge that crosses two of them is discarded in code, so batching
+// cannot merge findings in different functions — it only saves the agent that would
+// otherwise re-read the same file for each bucket.
+function dedupBatchPrompt(bucketGroup) {
+  return [
+    'Independent reviewers landed on the same function in ' + bucketGroup.length + ' places in one',
+    'file. Decide, within each group separately, which findings describe the SAME source construct',
+    'and should be merged.',
+    '',
+    'Merge only when the findings point at one call expression, one statement, or one small block —',
+    'the same sink token, normally within about five lines. Different constructs in one function are',
+    'different bugs even when the impact overlaps, and even when one bug class is arguably a more',
+    'general name for the other. Two findings that would be fixed by the same edit are related, not',
+    'duplicate; leave them separate.',
+    '',
+    'Merging across bug classes is allowed here, and only here, when the disagreement is about what to',
+    'call one defect. You must be able to say in one phrase why both labels name the same bug.',
+    '',
+    'Never merge across two groups. They are in different functions, so they are different bugs by',
+    'construction, and any such merge is discarded.',
+    '',
+    'When in doubt, do not merge. A wrongly merged pair silently drops a real bug; a wrongly separate',
+    'pair costs one extra paragraph in the report.',
+    '',
+    'Groups (JSON, one array per colliding function):',
+    JSON.stringify(bucketGroup, null, 2),
+    '',
+    'Return every merge group you are confident in, across all groups, in one merges array. primary is',
+    'the id that survives; prefer the higher confidence, then the lexicographically smallest id.',
+    'Return an empty merges array if none apply.',
+  ].join('\n')
+}
+
 const SEVERITY_TABLES = [
   '### REMOTE',
   '',
@@ -803,6 +930,41 @@ const SEVERITY_TABLES = [
   '- Affects authentication or cryptography, or sits on a widely reachable entry point: raise one level.',
 ].join('\n')
 
+// Shared by the single-candidate judge and the batched judge so the two cannot drift
+// apart on what a verdict means. Spliced in as one array element, so lifting it out of
+// judgePrompt did not change a character of the text that prompt produces.
+const JUDGE_RULES = [
+  '## Verdict',
+  '',
+  '- TRUE_POSITIVE — a real, reachable vulnerability under this threat model',
+  '- LIKELY_TP — a real bug whose reachability you could not fully establish but which is plausible',
+  '- LIKELY_FP — the pattern is there but the defined attacker cannot reach it',
+  '- FALSE_POSITIVE — not a bug; the reporter misread the code',
+  '- OUT_OF_SCOPE — a real bug requiring attacker capabilities this threat model excludes',
+  '',
+  'Under REMOTE, a bug only triggerable through local configuration, CLI arguments, environment or',
+  'an existing shell is OUT_OF_SCOPE. Under LOCAL_UNPRIVILEGED, a bug that crosses no privilege',
+  'boundary is LIKELY_FP, and one requiring root is OUT_OF_SCOPE.',
+  '',
+  'A finding whose impact is hardening rather than exploitation — a banned API with no',
+  'attacker-controlled data reaching it, a missing compiler flag, a missing format attribute — is',
+  'yours to judge like any other. If it is a real gap that a reader should act on, TRUE_POSITIVE at',
+  'LOW is right. If the pattern is unreachable, or the guard the reporter says is missing is',
+  'actually present, reject it. You are not required to accept it.',
+  '',
+  'Between LIKELY_TP and LIKELY_FP, prefer LIKELY_TP: a wrong rejection is invisible and a wrong',
+  'acceptance is one paragraph a reader can dismiss.',
+  '',
+  'Cite the path:line that decided the verdict in fp_rationale.',
+  '',
+  '## Severity — survivors only (TRUE_POSITIVE and LIKELY_TP)',
+  '',
+  'Leave severity, attack_vector, exploitability and severity_rationale unset for every other',
+  'verdict. Severity is relative to the threat model, not absolute.',
+  '',
+  SEVERITY_TABLES,
+].join('\n')
+
 function judgePrompt(finding, detect, mergedGroup) {
   const alsoKnown =
     mergedGroup && mergedGroup.length
@@ -818,35 +980,7 @@ function judgePrompt(finding, detect, mergedGroup) {
     '',
     EVIDENCE_RULE,
     '',
-    '## Verdict',
-    '',
-    '- TRUE_POSITIVE — a real, reachable vulnerability under this threat model',
-    '- LIKELY_TP — a real bug whose reachability you could not fully establish but which is plausible',
-    '- LIKELY_FP — the pattern is there but the defined attacker cannot reach it',
-    '- FALSE_POSITIVE — not a bug; the reporter misread the code',
-    '- OUT_OF_SCOPE — a real bug requiring attacker capabilities this threat model excludes',
-    '',
-    'Under REMOTE, a bug only triggerable through local configuration, CLI arguments, environment or',
-    'an existing shell is OUT_OF_SCOPE. Under LOCAL_UNPRIVILEGED, a bug that crosses no privilege',
-    'boundary is LIKELY_FP, and one requiring root is OUT_OF_SCOPE.',
-    '',
-    'A finding whose impact is hardening rather than exploitation — a banned API with no',
-    'attacker-controlled data reaching it, a missing compiler flag, a missing format attribute — is',
-    'yours to judge like any other. If it is a real gap that a reader should act on, TRUE_POSITIVE at',
-    'LOW is right. If the pattern is unreachable, or the guard the reporter says is missing is',
-    'actually present, reject it. You are not required to accept it.',
-    '',
-    'Between LIKELY_TP and LIKELY_FP, prefer LIKELY_TP: a wrong rejection is invisible and a wrong',
-    'acceptance is one paragraph a reader can dismiss.',
-    '',
-    'Cite the path:line that decided the verdict in fp_rationale.',
-    '',
-    '## Severity — survivors only (TRUE_POSITIVE and LIKELY_TP)',
-    '',
-    'Leave severity, attack_vector, exploitability and severity_rationale unset for every other',
-    'verdict. Severity is relative to the threat model, not absolute.',
-    '',
-    SEVERITY_TABLES,
+    JUDGE_RULES,
     '',
     scopeBlock(),
     '',
@@ -855,6 +989,44 @@ function judgePrompt(finding, detect, mergedGroup) {
     'Candidate (JSON):',
     JSON.stringify(finding, null, 2),
     alsoKnown,
+  ].join('\n')
+}
+
+// One agent, several candidates from the same file. The candidates are independent
+// verdicts, not a set to rank against each other — the shared context is the file
+// they all sit in, which this agent opens once instead of N times.
+function judgeBatchPrompt(batch, detect, absorbedBy) {
+  const candidates = batch.map((f) => {
+    const absorbed = absorbedBy.get(f.id) || []
+    return absorbed.length ? Object.assign({}, f, { absorbed_reports: absorbed }) : f
+  })
+
+  return [
+    'You are a senior security auditor deciding whether each of ' + batch.length + ' candidate findings',
+    'is real and, if so, how bad it is. They were grouped because they sit in the same file, so you can',
+    'read it once. Open the code yourself. A reporter may have misread it, and a reporter may also have',
+    'understated it.',
+    '',
+    'Judge each candidate on its own merits. They are not competing and they are not a ranking: an',
+    'earlier rejection is no reason to reject the next one, and an earlier acceptance is no reason to',
+    'accept it. Return one verdict per candidate id — all of them, including any you find trivial.',
+    'A candidate you leave out is reported to the user as unjudged, which is worse than a verdict you',
+    'were unsure about.',
+    '',
+    'Some candidates carry absorbed_reports: other reports of the same construct, absorbed during',
+    'deduplication. They are the same defect described from different angles, so they get one verdict.',
+    'If the bug is real under ANY of the framings, it survives — name the framing that carries it.',
+    '',
+    EVIDENCE_RULE,
+    '',
+    JUDGE_RULES,
+    '',
+    scopeBlock(),
+    '',
+    contextBlock(detect),
+    '',
+    'Candidates (JSON):',
+    JSON.stringify(candidates, null, 2),
   ].join('\n')
 }
 
@@ -1003,6 +1175,66 @@ function sameFunctionBuckets(findings, mergedInto) {
   return [...buckets.values()].filter((b) => b.length > 1)
 }
 
+// Batch by source file, then split a file that has too many findings for one agent.
+// The file is the unit of shared context: one agent opens it once and judges every
+// candidate in it, which is why this is cheaper AND better informed than one agent
+// per finding. Splitting is balanced rather than greedy (12 findings at a cap of 5
+// gives 4+4+4, not 5+5+2) so no agent in the split carries an outlier share.
+//
+// `items` arrives sorted by file, so a batch is a contiguous run of one file's
+// candidates rather than an arbitrary sample of them.
+function batchByFile(items, maxPerBatch) {
+  const order = []
+  const byFile = new Map()
+  for (const f of items) {
+    if (!byFile.has(f.file)) {
+      byFile.set(f.file, [])
+      order.push(f.file)
+    }
+    byFile.get(f.file).push(f)
+  }
+  const batches = []
+  for (const file of order) {
+    const members = byFile.get(file)
+    const parts = Math.ceil(members.length / maxPerBatch)
+    const per = Math.ceil(members.length / parts)
+    for (let i = 0; i < members.length; i += per) batches.push(members.slice(i, i + per))
+  }
+  return batches
+}
+
+// Same idea for dedup, but the atom is a whole bucket: a bucket split across two
+// agents would hide the duplicate pair that put it there. A bucket bigger than the
+// cap therefore goes to one agent on its own.
+function batchBuckets(buckets, maxFindings) {
+  const order = []
+  const byFile = new Map()
+  for (const bucket of buckets) {
+    const file = bucket[0].file
+    if (!byFile.has(file)) {
+      byFile.set(file, [])
+      order.push(file)
+    }
+    byFile.get(file).push(bucket)
+  }
+  const batches = []
+  for (const file of order) {
+    let current = []
+    let size = 0
+    for (const bucket of byFile.get(file)) {
+      if (current.length && size + bucket.length > maxFindings) {
+        batches.push(current)
+        current = []
+        size = 0
+      }
+      current.push(bucket)
+      size += bucket.length
+    }
+    if (current.length) batches.push(current)
+  }
+  return batches
+}
+
 function severityRank(s) {
   return { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 }[String(s || '').toUpperCase()] || 0
 }
@@ -1045,6 +1277,7 @@ const rawFindings = []
 const coverage = []
 const hunterNotes = []
 const failedGroups = []
+const externalSources = []
 for (let i = 0; i < huntResults.length; i++) {
   const entry = huntResults[i]
   if (!entry || !entry.result) {
@@ -1054,9 +1287,37 @@ for (let i = 0; i < huntResults.length; i++) {
   for (const f of entry.result.findings || []) rawFindings.push(normalizeFinding(f, entry.groupId))
   for (const c of entry.result.coverage || []) coverage.push(Object.assign({ group: entry.groupId }, c))
   if (entry.result.notes) hunterNotes.push(entry.groupId + ': ' + entry.result.notes)
+  externalSources.push({
+    group: entry.groupId,
+    consulted: entry.result.external_sources_consulted === true,
+    detail: String(entry.result.external_sources_detail || ''),
+  })
 }
 if (failedGroups.length) {
   log('WARNING: ' + failedGroups.length + ' hunter group(s) returned nothing: ' + failedGroups.join(', '))
+}
+
+// Declared, not policed. Consulting upstream is legitimate in a real audit and
+// nothing here penalises it; the record exists so an eval run scored against a
+// public corpus can tell which findings came from reading and which from diffing.
+// findings carry found_by, so the declaration resolves per finding.
+const declaredExternal = externalSources.filter((e) => e.consulted).map((e) => e.group)
+if (declaredExternal.length) {
+  log('external sources declared by: ' + declaredExternal.join(', ') + ' (recorded, not penalised)')
+}
+
+// EVAL-ONLY. See the injectFindings comment at the top of the file.
+for (const raw of INJECT_FINDINGS) {
+  const injected = normalizeFinding(raw, String(raw.found_by || 'injected'))
+  injected.injected = true
+  if (raw.bench_id) injected.bench_id = String(raw.bench_id)
+  rawFindings.push(injected)
+}
+if (INJECT_FINDINGS.length) {
+  log(
+    'EVAL HOOK: ' + INJECT_FINDINGS.length + ' synthetic finding(s) injected before dedup/judge. ' +
+      'This run is a benchmark, not an audit.'
+  )
 }
 
 const findings = assignIds(rawFindings)
@@ -1066,10 +1327,29 @@ log(findings.length + ' raw findings from ' + (selected.length - failedGroups.le
 phase('Dedup')
 const mergedInto = tier1(findings)
 const buckets = sameFunctionBuckets(findings, mergedInto)
+// bucketOf is what keeps batching honest: a merge whose members are not all from
+// the same bucket is discarded, so one agent holding several buckets can never
+// merge two findings in different functions.
+const bucketOf = new Map()
+for (let b = 0; b < buckets.length; b++) {
+  for (const f of buckets[b]) bucketOf.set(f.id, b)
+}
+let dedupAgents = 0
 if (buckets.length) {
+  const dedupBatches = batchBuckets(buckets, DEDUP_BATCH_MAX)
+  dedupAgents = dedupBatches.length
+  log(buckets.length + ' same-function collision(s) in ' + dedupBatches.length + ' dedup agent(s)')
   const dedupResults = await parallel(
-    buckets.map((bucket, i) => () =>
-      agent(dedupPrompt(bucket), workerOpts({ label: 'dedup:' + bucket[0].file + '#' + i, phase: 'Dedup', schema: DEDUP_SCHEMA }))
+    dedupBatches.map((group, i) => () =>
+      group.length === 1
+        ? agent(
+            dedupPrompt(group[0]),
+            workerOpts({ label: 'dedup:' + group[0][0].file + '#' + i, phase: 'Dedup', schema: DEDUP_SCHEMA })
+          )
+        : agent(
+            dedupBatchPrompt(group),
+            workerOpts({ label: 'dedup:' + group[0][0].file + '#' + i + '+' + group.length, phase: 'Dedup', schema: DEDUP_SCHEMA })
+          )
     )
   )
   for (const res of dedupResults) {
@@ -1078,6 +1358,10 @@ if (buckets.length) {
       if (!byId.has(merge.primary) || mergedInto.has(merge.primary)) continue
       for (const dup of merge.duplicates || []) {
         if (dup === merge.primary || !byId.has(dup) || mergedInto.has(dup)) continue
+        if (bucketOf.get(dup) !== bucketOf.get(merge.primary)) {
+          log('rejected cross-function merge ' + dup + ' -> ' + merge.primary)
+          continue
+        }
         mergedInto.set(dup, merge.primary)
       }
     }
@@ -1095,37 +1379,77 @@ for (const [dup, primary] of mergedInto) {
 log(primaries.length + ' primaries after dedup (' + mergedInto.size + ' merged)')
 
 phase('Judge')
-const verdicts = await parallel(
-  primaries.map((f) => () =>
-    agent(
-      judgePrompt(f, detect, absorbedBy.get(f.id) || []),
-      workerOpts({ label: 'judge:' + f.id, phase: 'Judge', schema: VERDICT_SCHEMA, effort: 'high' })
-    ).then((v) => ({ id: f.id, verdict: v }))
-  )
+const judgeBatches = JUDGE_MODE === 'batched' ? batchByFile(primaries, JUDGE_BATCH_MAX) : primaries.map((f) => [f])
+log(
+  'judge mode ' + JUDGE_MODE + ': ' + primaries.length + ' candidate(s) in ' + judgeBatches.length + ' agent(s)'
 )
 
+// A one-candidate batch always takes the single-candidate prompt, in either mode:
+// it is the same work, and it keeps the cheaper, longer-standing prompt on the path
+// where batching buys nothing.
+const verdictLists = await parallel(
+  judgeBatches.map((batch) => () => {
+    if (batch.length === 1) {
+      const f = batch[0]
+      return agent(
+        judgePrompt(f, detect, absorbedBy.get(f.id) || []),
+        workerOpts({ label: 'judge:' + f.id, phase: 'Judge', schema: VERDICT_SCHEMA, effort: 'high' })
+      ).then((v) => (v ? [{ id: f.id, verdict: v }] : []))
+    }
+    const wanted = new Set(batch.map((f) => f.id))
+    return agent(
+      judgeBatchPrompt(batch, detect, absorbedBy),
+      workerOpts({
+        label: 'judge:' + batch[0].id + '+' + (batch.length - 1),
+        phase: 'Judge',
+        schema: BATCH_VERDICT_SCHEMA,
+        effort: 'high',
+      })
+    ).then((res) => {
+      if (!res) return []
+      const out = []
+      const seen = new Set()
+      for (const v of res.verdicts || []) {
+        // Ignore a verdict for a candidate this agent was not given, and keep the
+        // first verdict for an id it answered twice.
+        if (!v || !wanted.has(v.id) || seen.has(v.id)) continue
+        seen.add(v.id)
+        out.push({ id: v.id, verdict: v })
+      }
+      return out
+    })
+  })
+)
+
+const verdictById = new Map()
+for (const list of verdictLists) {
+  if (!list) continue
+  for (const entry of list) if (entry && entry.verdict) verdictById.set(entry.id, entry.verdict)
+}
+
+// Driven by primaries, not by what came back, so a batch that answered for four of
+// its five candidates leaves the fifth labelled unjudged instead of dropping it.
 const unjudged = []
-for (const entry of verdicts) {
-  if (!entry) continue
-  const f = byId.get(entry.id)
-  if (!entry.verdict) {
-    unjudged.push(entry.id)
+for (const f of primaries) {
+  const verdict = verdictById.get(f.id)
+  if (!verdict) {
+    unjudged.push(f.id)
     f.fp_verdict = 'LIKELY_TP'
     f.fp_rationale = 'JUDGE DID NOT RUN — verdict and severity are unvalidated'
     f.severity = 'MEDIUM'
     f.severity_validated = false
     continue
   }
-  f.fp_verdict = entry.verdict.fp_verdict
-  f.fp_rationale = entry.verdict.fp_rationale
+  f.fp_verdict = verdict.fp_verdict
+  f.fp_rationale = verdict.fp_rationale
   f.severity_validated = true
   const survivor = f.fp_verdict === 'TRUE_POSITIVE' || f.fp_verdict === 'LIKELY_TP'
   if (survivor) {
-    f.severity = entry.verdict.severity || 'MEDIUM'
-    f.attack_vector = entry.verdict.attack_vector || ''
-    f.exploitability = entry.verdict.exploitability || ''
-    f.severity_rationale = entry.verdict.severity_rationale || ''
-    if (!entry.verdict.severity) f.severity_validated = false
+    f.severity = verdict.severity || 'MEDIUM'
+    f.attack_vector = verdict.attack_vector || ''
+    f.exploitability = verdict.exploitability || ''
+    f.severity_rationale = verdict.severity_rationale || ''
+    if (!verdict.severity) f.severity_validated = false
   }
 }
 if (unjudged.length) {
@@ -1158,6 +1482,8 @@ const payload = {
     finding_scope_root: SCOPE,
     context_roots: CONTEXT_ROOTS,
     worker_model: WORKER_MODEL || 'inherit',
+    judge_mode: JUDGE_MODE,
+    judge_batch_size: JUDGE_BATCH_MAX,
     output_dir: OUTPUT_DIR,
     is_cpp: detect.is_cpp,
     is_posix: detect.is_posix,
@@ -1171,6 +1497,8 @@ const payload = {
     groups_failed: failedGroups,
     unjudged_findings: unjudged,
     hunter_notes: hunterNotes,
+    hunter_external_sources: externalSources,
+    injected_findings: INJECT_FINDINGS.length,
   },
   stats: {
     raw_findings: findings.length,
@@ -1178,6 +1506,8 @@ const payload = {
     primaries: primaries.length,
     survivors: survivors.length,
     reported: reported.length,
+    dedup_agents: dedupAgents,
+    judge_agents: judgeBatches.length,
     verdict_counts: verdictCounts,
     severity_counts: severityCounts,
   },

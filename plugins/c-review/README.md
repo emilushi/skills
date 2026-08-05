@@ -18,9 +18,9 @@ collection; agents return **structured data**, not files.
     └── workflows/c-review.js
         ├── Detect   1 agent    language/platform flags from real API usage + codebase context
         ├── Hunt     13-18      one agent per bug-class group, in parallel, structured findings
-        ├── Dedup    0-N        exact (file, line, class) merges in script; an agent only for
-        │                       same-function collisions
-        ├── Judge    1/candidate  false-positive verdict, then severity for survivors
+        ├── Dedup    0-N        exact (file, line, class) merges in script; agents only for
+        │                       same-function collisions, batched by file
+        ├── Judge    1/file-group  false-positive verdict, then severity for survivors
         └── Persist  1 agent    findings.json -> generate_sarif.py + render_report.py
 ```
 
@@ -30,6 +30,31 @@ collection; agents return **structured data**, not files.
 | `worker_model` | `haiku` / `sonnet` / `opus` / `inherit` | Model for every agent in the workflow |
 | `severity_filter` | `all` / `medium` / `high` | What reaches `REPORT.md` and `REPORT.sarif` |
 | `scope_subpath` | repo-relative dir, optional | Where findings may live. Context is read from the whole repo regardless |
+
+Three workflow arguments are optional and rarely set by hand:
+
+| Argument | Default | Effect |
+|---|---|---|
+| `judgeMode` | `batched` | `batched` groups candidates by source file; `per-finding` is one agent per candidate, retained so the two can be measured |
+| `judgeBatchSize` | `5` | Cap on candidates per judge agent; splits are balanced (12 findings → 4+4+4) |
+| `injectFindings` | absent | **Eval-only hook.** Appends synthetic findings before dedup and judging. Never use it in a real review — whatever is passed is reported as if a hunter found it |
+
+### Why the judge batches
+
+The 2026-08-04 libexpat run cost 2.66 M tokens across 34 agents. Per-agent cost was
+essentially unchanged from the previous architecture (76 K → 78 K, 1.03×) while agent
+count went 14 → 34 (2.43×): **cost is agent count, not per-agent verbosity.** One judge
+agent per finding was the single largest contributor, at 13 of those 34 agents.
+
+Batching by source file is not only cheaper. A judge holding four findings from one file
+opens it once and judges all four with the same context, which is strictly more than
+four separate agents each have. The size cap keeps any one agent from carrying an outlier
+share, splits are balanced rather than greedy, and a one-candidate batch takes the
+single-candidate prompt unchanged. Dedup batches the same way, and a merge whose members
+come from two different collision buckets is discarded in code — so batching cannot merge
+findings in different functions.
+
+Same run, batched: 4 judge agents and 1 dedup agent instead of 13 and 3.
 
 ### Output
 
@@ -79,10 +104,36 @@ Three grouping choices are deliberate, each answering something the evaluation m
 
 ## Evaluation
 
-`evals/` holds a ground-truth corpus (libexpat at `R_2_4_3`, seven CVEs), a grader, and
-deterministic tests for the grader. See `evals/README.md` for how to run a full eval and
-what it costs — roughly a million tokens, which is why it is not in `make check`. The
-grader refuses to score a run that produced no findings rather than reporting `0/7`.
+`bench/` holds the benchmark harness: three corpora whose bugs are **injected by us**, a
+grader, an oracle detector, a judge benchmark, and 130 deterministic tests that run in
+`make check`. See `bench/README.md`.
+
+The previous corpus — libexpat at a tag with seven public CVEs — has been retired. It
+measured whether a reviewer could look the answer up: three of sixteen hunters did,
+one identified the tree as byte-identical to a named release, and four of five
+ground-truth hits in the headline run came from the contaminated hunter. Every bug in
+the new corpora was injected at a site we chose, so no CVE record, commit log or
+advisory describes any of them, and the base code of the two real-C corpora is
+de-identified so it cannot be lined up against upstream.
+
+Three things the recall number alone cannot tell you, all of which the harness reports:
+
+- **Whether the arm used an oracle.** Transcripts are parsed and only real `tool_use`
+  blocks count — the string `WebFetch` appears in almost every transcript as a tool
+  *definition*, so a substring scan would flag every arm including the honest ones. An
+  arm with a violation is **excluded** from the comparison, not annotated. Consulting
+  upstream is still legitimate in a real review and nothing in the review path penalises
+  it; only a benchmark cares.
+- **What the bugs cost to find.** Tokens, agents and wall time per arm, with the
+  estimate printed before the run and the actual after it.
+- **Judgement.** Every run so far returned 100% `TRUE_POSITIVE` — 4/4 in v1, 13/13 in v2
+  — which cannot distinguish a good judge with nothing to reject from one that accepts
+  whatever it is handed. `bench/judge_bench/` seeds eight plausible-but-wrong findings
+  and scores retention and rejection separately.
+
+No scorer here will score nothing: each exits non-zero rather than reporting `0/N` or
+`0%` from an empty inspection, and the corpus gate fails any check that inspected zero
+items.
 
 ## Design decisions worth keeping
 
