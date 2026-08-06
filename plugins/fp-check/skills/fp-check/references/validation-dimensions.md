@@ -1,7 +1,7 @@
 # The 5 Dimensions of PoC Validity
 
 **Technical correctness alone does not prove exploitability.** Consumed by the
-threat-model agent (checkpoints 3.1–3.3) and by challenge 3.
+threat-model agent in Stage 1c and by Stage 3's challenge 3.
 
 Case study behind this file: 28 findings analyzed, 2 technically valid, 0
 high-confidence submissions. Technical analysis covered one of five dimensions.
@@ -16,7 +16,7 @@ high-confidence submissions. Technical analysis covered one of five dimensions.
 
 | # | Dimension | Question | Checkpoint |
 |---|-----------|----------|-----------|
-| 1 | Technical validity | Does the code actually have this flaw? | Phases 1–2 |
+| 1 | Technical validity | Does the code actually have this flaw? | Stages 1c-1e |
 | 2 | Scope alignment | Is this component within the analysis scope? | 3.1 |
 | 3 | Design intent | Is this a bug or intentional behavior? | 3.3 |
 | 4 | Root cause | Internal logic, integration, or an external dependency? | 2.4b |
@@ -98,7 +98,7 @@ state the external precondition.
 
 ---
 
-## Additional questions for Phase 5
+## Additional questions for the adversarial pass
 
 These extend the five challenges rather than replacing them:
 

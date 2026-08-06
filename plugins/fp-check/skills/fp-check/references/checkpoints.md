@@ -45,7 +45,7 @@ job, not a checklist item.
 
 ---
 
-## Phase 1: Vulnerability Intake (REQUIRED)
+## Stage 1a: Intake (REQUIRED)
 
 ### Checkpoint 1.1: Evidence Collection
 
@@ -89,7 +89,7 @@ and so on. Checkpoint 2.4 verifies or downgrades it.
 
 ---
 
-## Phase 2: Attack Path Verification (MANDATORY)
+## Stages 1c-1e: Attack Path Verification (MANDATORY)
 
 **THIS IS THE PRIMARY QUALITY GATE. DO NOT SKIP.**
 
@@ -135,8 +135,13 @@ attacker payload passes — with the code as evidence:
 - If any blocks: mark NOT_EXPLOITABLE
 - If all pass: document WHY, with code evidence
 
-**If it fails:** an UNCERTAIN layer requires a code trace and HALTS. Any layer
-that blocks means NOT_EXPLOITABLE.
+**What the code does with it:** a BLOCKS verdict returns `NOT_EXPLOITABLE`, and
+an UNCERTAIN one returns `NEEDS_MORE_INFO` — not the same thing, and not a bare
+halt. BLOCKED is reserved for "this analysis could not be run": a contract
+violation, or an agent that returned nothing. NEEDS_MORE_INFO means it ran and the
+evidence does not decide, which is what an unresolved layer is: the code was read
+and could not be traced. Reporting that as BLOCKED sends the reader to the harness
+instead of to the code, and rounding it to FALSE POSITIVE loses real findings.
 
 ### Checkpoint 2.3: Recovery Mechanism Check
 
@@ -190,7 +195,12 @@ What counts as evidence depends on the class of impact claimed:
 - An impact smaller than the one claimed is still VERIFIED; record the smaller
   one and let checkpoint 5.2 apply the severity cap
 
-**If it fails:** downgrade severity to match the verified impact only.
+**What the code does with it:** `DISPROVEN` returns `NOT_EXPLOITABLE` — positive
+evidence of no impact. `NOT_VERIFIED` returns `NEEDS_MORE_INFO`, because the
+absence of evidence is not evidence of absence, and treating the two alike is the
+conflation that killed a real finding. Neither branch "downgrades severity":
+a smaller-but-real impact is `VERIFIED` carrying the smaller impact, and the cap
+is applied afterwards by `capSeverity`.
 
 ### Checkpoint 2.4b: Root Cause Attribution
 
@@ -243,7 +253,7 @@ exploited; a hardening gap is medium priority, defense-in-depth.
 
 ---
 
-## Phase 3: Threat Model Alignment
+## Stage 1c: Threat Model Alignment
 
 ### Checkpoint 3.1: Scope Verification
 
@@ -302,9 +312,12 @@ coverage. If confirmed intentional → mark NOT_VULNERABLE and STOP.
 
 ---
 
-## Phase 4: PoC Development (ONLY After 1-3 Pass)
+## Stage 3: PoC Development (ONLY after Stage 1 returns TRUE_POSITIVE)
 
-**IF ANY PHASE 1-3 CHECKPOINT FAILED, DO NOT WRITE POC CODE.**
+**A finding that did not clear all six gates does not get a PoC.** `triage-poc`
+enforces it: `verification.status` must be `TRUE_POSITIVE`, and a failing Stage 1
+return carries a populated `impact` and `severity` too, so forwarding one
+verbatim would otherwise satisfy every other field.
 
 ### Checkpoint 4.1: PoC Type Selection
 
@@ -353,7 +366,7 @@ target commit or version, the exact command, and the full output.
 
 ---
 
-## Phase 5: Self-Critical Review (MANDATORY)
+## Stage 3: Self-Critical Review (MANDATORY)
 
 **THIS PHASE CANNOT BE SKIPPED.**
 
@@ -424,9 +437,17 @@ Justify it on both axes:
 - The rating is supported by evidence
 - Not speculative or inflated
 
+**The caps are arithmetic and are applied in code, not requested in a prompt** —
+which is the difference the head-to-head measured: 3/3 against 0/3 on the case
+built to test it. The two stages apply them differently, deliberately. Stage 1e
+`capSeverity` **corrects** an over-rated severity and reports the correction,
+because there is no artifact to correct and the caller is owed a verdict. Stage 3
+`severityCapViolation` **blocks**, because by then the number has been written into
+a report file and correcting the return value would leave that file wrong.
+
 ---
 
-## Phase 6: Documentation
+## Stage 3: Documentation
 
 ### Checkpoint 6.1: Report Completeness
 

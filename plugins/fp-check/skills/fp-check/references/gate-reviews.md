@@ -1,24 +1,61 @@
-# Gate Reviews and Verdicts
+# Gates and Verdicts
 
-Before reporting ANY bug as a vulnerability, all six gate reviews must pass. Evaluate these during the GATE REVIEW task after all phases are complete:
+**This file is for whoever relays the result.** The gate *criteria* are spelled
+out in the Stage 1 verdict prompt, in more detail than a table can carry, and
+`decideVerdict` is what applies them — so the criteria are deliberately not
+duplicated here. A second copy would drift, and the copy an agent reads would not
+be the copy that decides.
 
-| Gate | Criterion | Pass | Fail |
-|------|-----------|------|------|
-| **1. Process** | All phases completed with documented evidence | Evidence exists for every phase | Phases lack concrete evidence |
-| **2. Reachability** | Attacker can reach and control data at the vulnerability | Clear evidence of attacker-controlled path + PoC confirms | Cannot demonstrate attacker control or reachability |
-| **3. Real Impact** | Exploitation leads to RCE, privesc, or info disclosure | Direct impact with concrete scenarios | Only operational robustness issue |
-| **4. PoC Validation** | PoC (pseudocode, executable, or unit test) demonstrates the attack path | Shows attacker control, trigger, and impact | PoC fails to show attack path or impact |
-| **5. Math Bounds** | Mathematical analysis confirms vulnerable condition is possible | Algebraic proof shows condition is possible | Math proves validation prevents it |
-| **6. Environment** | No environmental protections entirely prevent exploitation | Protections do not eliminate vulnerability | Environmental protections block it entirely |
+## The six gates
 
-## Verdict Format
+| Gate | Passes when |
+|------|-------------|
+| 1 Process | every stage produced concrete evidence, not assertion |
+| 2 Reachability | attacker-controlled data reaches the sink **through a path a real caller can drive** |
+| 3 Real Impact | RCE, privilege escalation or information disclosure — not operational robustness, and not a defence-in-depth failure behind intact primary controls |
+| 4 PoC Validation | the attack path is demonstrated end to end |
+| 5 Math Bounds | the algebra permits the vulnerable condition. `N/A` when it is not a bounds or arithmetic finding |
+| 6 Environment | no compiler, runtime, OS or framework protection prevents exploitation **entirely**. Raising the bar is not preventing |
 
-- **TRUE POSITIVE**: All gate reviews pass → `BUG #N TRUE POSITIVE — [brief vulnerability description]`
-- **FALSE POSITIVE**: Any gate review fails → `BUG #N FALSE POSITIVE — [brief reason for rejection]`
+Gate 5 is the only one that may be `N/A`. Every other gate returning anything but
+`PASS` or `FAIL` is treated as an incomplete review, not as a pass — the affirmative
+value is read rather than inferred by exclusion.
 
-If any phase fails verification, document the failure with evidence and continue all remaining phases. Issue the FALSE POSITIVE verdict only after all phases are complete.
+**Gate 2 is where most false positives die, and the wording is load-bearing.** A
+proof of concept that calls the vulnerable function directly demonstrates attacker
+control *of the sink*; that is not control of any reachable entry point. Measured:
+on a case whose sink is genuinely injectable but unreachable, every no-plugin run
+wrote exactly that PoC, exfiltrated seeded credentials, and reported a confirmed
+SQL injection — while the guard at the entry point rejected the payload outright.
+Six of six runs across both arms *named* the blocking guard; one of six reached the
+right verdict. Naming the blocker is not the same as concluding.
 
-## Example Verdict
+## Verdicts
+
+Three, not two. The workflow returns a finer-grained status; these are what to
+report to a human.
+
+| Verdict | Reached when | Report as |
+|---|---|---|
+| **TRUE POSITIVE** | all six gates pass, with a stated reason | `BUG #N TRUE POSITIVE — <description>`, with the severity |
+| **FALSE POSITIVE** | any gate fails, a brocard dismisses it, a layer blocks it, or it is by design | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
+| **NEEDS MORE INFO** | the review ran and the evidence does not decide | `BUG #N NEEDS MORE INFO — <the missing fact>` |
+
+`ALREADY_FIXED` and `DUPLICATE` are reported as retractions with their reference,
+and `OUT_OF_SCOPE` as an answer about scope rather than a judgement on the bug.
+
+**NEEDS MORE INFO is not a hedge, and rounding it to FALSE POSITIVE is the most
+expensive mistake available here.** "The claim as stated is unproven" is not "no
+vulnerability exists". Conflating the two killed a real, demonstrable finding in
+this plugin's own history: the impact agent performed exactly the severity
+downgrade it had been asked for, then graded the *original claim* as unverified,
+and the run reported a working bug as not exploitable — scoring the case below the
+arm that had no plugin at all.
+
+Relay the `reason` the workflow returned, verbatim. It names the layer, clause,
+gate or commit that decided the outcome, and that specificity is the deliverable.
+
+## Example
 
 ```
 BUG #3 FALSE POSITIVE — Integer underflow in packet_handler.c:142

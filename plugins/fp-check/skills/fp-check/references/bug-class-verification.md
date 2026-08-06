@@ -1,18 +1,37 @@
 # Bug-Class-Specific Verification
 
-Different bug classes require different verification approaches. After classifying the bug in Step 0, apply the class-specific requirements below **in addition to** the generic verification phases.
+Different bug classes need different verification. Pass the class as
+`finding.bugClass` in Step 0 and apply the requirements below **in addition to**
+whatever the stage prompts ask for.
 
-Jump to the relevant class:
+**The class you pass also picks the route**, so use one of these names. Four of
+the nine escalate to the deep route, because for those the work the deep route
+adds — the API-contract and environment pass, the algebraic bounds proof, the race
+feasibility proof — *is* the verification, not an extra opinion on it.
 
-- [Memory Corruption](#memory-corruption) — overflows, UAF, double-free, type confusion
-- [Logic Bugs](#logic-bugs) — auth bypass, access control, state transitions, privilege escalation
-- [Race Conditions](#race-conditions) — TOCTOU, data races, signal handling
-- [Integer Issues](#integer-issues) — overflow, underflow, truncation, signedness
-- [Crypto Weaknesses](#crypto-weaknesses) — weak algorithms, nonce reuse, timing channels
-- [Injection](#injection) — SQL, XSS, command, template, path traversal
-- [Information Disclosure](#information-disclosure) — uninitialized memory, leaks, side channels
-- [Denial of Service](#denial-of-service) — algorithmic complexity, resource exhaustion, crashes
-- [Deserialization](#deserialization) — object injection, gadget chains
+| Class | Covers | Route |
+|---|---|---|
+| [Memory Corruption](#memory-corruption) | overflows, OOB, UAF, double-free, type confusion | **deep** |
+| [Logic Bugs](#logic-bugs) | auth bypass, access control, state transitions, privesc | standard |
+| [Race Conditions](#race-conditions) | TOCTOU, data races, signal handling | **deep** |
+| [Integer Issues](#integer-issues) | overflow, underflow, truncation, signedness | **deep** |
+| [Crypto Weaknesses](#crypto-weaknesses) | weak algorithms, nonce reuse, timing channels | standard |
+| [Injection](#injection) | SQL, XSS, command, template, path traversal | standard |
+| [Information Disclosure](#information-disclosure) | uninitialized memory, leaks, side channels | standard |
+| [Denial of Service](#denial-of-service) | algorithmic complexity, resource exhaustion, crashes | **deep** |
+| [Deserialization](#deserialization) | object injection, gadget chains | standard |
+
+The route column is not documentation of a preference — it is checked.
+`test_every_bug_class_has_a_routing_decision` fails the build if a class here has
+no routing decision, and `test_select_route_recognises_every_bug_class_name`
+extracts `selectRoute` and runs it against these exact strings. Adding a class
+below without routing it breaks the build, which is the point: it used to inherit
+`standard` in silence, and Memory Corruption spent a while taking the cheap path
+with no bounds proof.
+
+Passing a free-hand description instead of a name here still works — the matcher
+covers the obvious spellings (`buffer overflow`, `use-after-free`, `OOB write`,
+`algorithmic complexity`) — but a name is what the tests pin.
 
 ## Memory Corruption
 

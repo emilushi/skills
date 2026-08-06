@@ -1,6 +1,8 @@
 # Safety Guidelines
 
-Consumed during Phase 1, in the main conversation, to build the `envelope`
+**Read by you, not by an agent.** Nothing in the workflows hands this file to a
+subagent; it is consumed in Step 0, in the main conversation, to build the
+`envelope`
 argument. **Every decision here must be made before a workflow is dispatched** —
 a workflow cannot stop to ask, so an unresolved safety question becomes an agent
 improvising against a live target.

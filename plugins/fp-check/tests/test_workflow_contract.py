@@ -1358,3 +1358,97 @@ def test_skill_tells_the_orchestrator_to_wait_for_each_workflow():
         "SKILL.md's Completion Gate does not distinguish a workflow that was killed "
         "from one that returned a failing status"
     )
+
+
+# --------------------------------------------------------------------------
+# 12. Routing agrees with the bug-class reference the orchestrator reads.
+# --------------------------------------------------------------------------
+
+BUG_CLASS_REFERENCE = (
+    Path(__file__).resolve().parents[1]
+    / "skills"
+    / PLUGIN_NAME
+    / "references"
+    / "bug-class-verification.md"
+)
+
+# Every class the reference defines, and the route it must take. `deep` adds the
+# API-contract/environment pass, the algebraic bounds proof and the race
+# feasibility proof, so a class needs it when one of those three is the work.
+#
+# This table is the decision. Its purpose is that adding a class to the reference
+# FAILS the build until someone routes it, rather than silently inheriting
+# `standard` — which is what happened to Memory Corruption.
+EXPECTED_ROUTES = {
+    "Memory Corruption": "deep",
+    "Logic Bugs": "standard",
+    "Race Conditions": "deep",
+    "Integer Issues": "deep",
+    "Crypto Weaknesses": "standard",
+    "Injection": "standard",
+    "Information Disclosure": "standard",
+    "Denial of Service": "deep",
+    "Deserialization": "standard",
+}
+
+
+def reference_bug_classes() -> list[str]:
+    text = BUG_CLASS_REFERENCE.read_text()
+    return re.findall(r"^## (.+)$", text, re.M)
+
+
+def test_every_bug_class_has_a_routing_decision():
+    """SKILL.md sends the orchestrator to the reference for `finding.bugClass`.
+
+    So the strings that reference uses as headings are the strings that reach
+    `selectRoute`, and a heading it does not recognise takes the cheap path with
+    no algebraic proof. That was live: "Memory Corruption" routed `standard` while
+    "buffer overflow" — the same finding, written differently — routed `deep`.
+
+    Checked in both directions. A class in the reference with no entry in
+    EXPECTED_ROUTES fails, and an entry naming a class the reference dropped fails
+    too, so the table cannot rot into a description of a document that has moved.
+    """
+    classes = reference_bug_classes()
+    assert classes, (
+        f"no `## ` class headings found in {BUG_CLASS_REFERENCE.name}; either it was "
+        f"restructured or this scan is stale, and it is grading nothing"
+    )
+    assert set(classes) == set(EXPECTED_ROUTES), (
+        f"the reference defines {sorted(set(classes) - set(EXPECTED_ROUTES))} with no routing "
+        f"decision, and this table names {sorted(set(EXPECTED_ROUTES) - set(classes))} which it "
+        f"no longer defines. A class with no decision takes the cheap path by default."
+    )
+
+
+def test_select_route_recognises_every_bug_class_name():
+    """The keyword list must actually match the reference's own headings.
+
+    Extracted and run, not read: the list is inline in `selectRoute` (it has to
+    be — a module const cannot be extracted), so nothing but executing it proves
+    the strings agree.
+    """
+    node = shutil.which("node")
+    assert node, "node is required to evaluate selectRoute"
+    probe = json.dumps(list(EXPECTED_ROUTES))
+    script_body = (
+        "import('./extract.mjs').then(({loadFn, script}) => {"
+        "const f = loadFn(script('triage-static.js'), 'selectRoute');"
+        f"const out = {{}}; for (const c of {probe}) "
+        "out[c] = f({finding: {bugClass: c}, layers: [{}]});"
+        "console.log(JSON.stringify(out))})"
+    )
+    result = subprocess.run(
+        [node, "-e", script_body],
+        cwd=Path(__file__).resolve().parent,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    actual = json.loads(result.stdout)
+    wrong = {k: (v, EXPECTED_ROUTES[k]) for k, v in actual.items() if v != EXPECTED_ROUTES[k]}
+    assert not wrong, (
+        f"selectRoute routes these bug classes against the decision table "
+        f"(got, expected): {wrong}. The orchestrator reads these exact strings out of "
+        f"{BUG_CLASS_REFERENCE.name}, so a mismatch is a routing coin flip."
+    )

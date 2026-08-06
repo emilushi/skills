@@ -1,8 +1,8 @@
 # Test-Integrated PoCs
 
-Consumed by the Phase 4 builder at checkpoint 4.1. **Prefer this form.** The
+Consumed by the Stage 3 builder at checkpoint 4.1. **Prefer this form.** The
 project's own harness supplies the real-code invocation for free, which is what
-Principle 5 requires and what standalone scripts most often violate.
+the real-code rule requires and what standalone scripts most often violate.
 
 ## The convention
 

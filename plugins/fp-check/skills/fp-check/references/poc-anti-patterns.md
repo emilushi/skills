@@ -1,6 +1,6 @@
 # PoC Anti-Patterns
 
-Consumed by the Phase 4 builder. Everything here is a rule about how the PoC is
+Consumed by the Stage 3 builder. Everything here is a rule about how the PoC is
 *constructed*; the mechanical checks live in `scripts/poc-lint.sh` and are not
 repeated as prose.
 
@@ -15,7 +15,7 @@ repeated as prose.
 **A PoC that copies the vulnerable code and calls the copy only proves the copy
 is broken.** It says nothing about the application. The real code may have
 surrounding validation, different configuration, compiler flags, or recovery
-that changes the outcome — which is exactly what Phase 2 spent its effort
+that changes the outcome — which is exactly what Stage 1 spent its effort
 establishing.
 
 ### Copying the function

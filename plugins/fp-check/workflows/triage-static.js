@@ -274,7 +274,41 @@ function selectRoute(a) {
   // 3+ trust boundaries in the path. fp-check's first escalation checkpoint.
   if (layers.length >= 3) return 'deep'
   const bugClass = String(finding.bugClass || '').toLowerCase()
+  // Keyed on the CLASS NAMES in references/bug-class-verification.md first, then
+  // on the ways the same bug gets written by hand. Both halves are needed, and
+  // leaving one out was a live defect: SKILL.md sends the orchestrator to that
+  // reference for the bug class, so "Memory Corruption" — the heading it reads
+  // there — took the cheap route with no algebraic bounds proof, while "buffer
+  // overflow" took the deep one. Same finding, opposite route, decided by which
+  // words got typed.
+  //
+  // test_every_bug_class_has_a_routing_decision pins this against the reference's
+  // headings, so a class added there has to be routed rather than silently
+  // defaulting to standard.
   const escalates = [
+    // Memory corruption: the archetypal case for the algebraic bounds proof, and
+    // the allocator/API-contract question disposes of whole reports on its own.
+    'memory corruption',
+    'buffer overflow',
+    'heap overflow',
+    'stack overflow',
+    'out-of-bounds',
+    'out of bounds',
+    'oob',
+    'use-after-free',
+    'use after free',
+    'double-free',
+    'double free',
+    'type confusion',
+    // Integer arithmetic. Gate 5 wants algebra, which is a separate agent's job
+    // rather than a clause in the impact prompt.
+    'integer',
+    'overflow',
+    'underflow',
+    'off-by-one',
+    'truncation',
+    'signedness',
+    'bounds',
     // Concurrency in the trigger. A race that cannot be shown to BE a race is
     // the most common false positive in the class, and it needs its own proof.
     'race',
@@ -283,13 +317,13 @@ function selectRoute(a) {
     'concurren',
     'deadlock',
     'atomic',
-    // Bounds arithmetic. fp-check's Gate 5 wants algebra, which is a separate
-    // agent's job rather than a clause in the impact prompt.
-    'overflow',
-    'underflow',
-    'off-by-one',
-    'bounds',
-    'integer',
+    // Denial of service: the amplification ratio and the worst-case input are
+    // arithmetic, and "it is O(n^2)" asserted without them is the usual shape of
+    // a wrong DoS report.
+    'denial of service',
+    'dos',
+    'algorithmic complexity',
+    'resource exhaustion',
   ]
   if (escalates.some((k) => bugClass.includes(k))) return 'deep'
   if (a && a.crossComponent === true) return 'deep'
@@ -1048,8 +1082,9 @@ threat model for containerised services; "nobody uses that API" needs usage
 data, not an assumption; and inventing a mitigation you have not read in the
 source is the failure mode that loses real findings.
 
-Then apply the six gates from ${baseDir}/references/gate-reviews.md and report
-each as PASS or FAIL:
+Then apply the six gates and report each as PASS or FAIL. The criteria are here
+rather than in a reference file on purpose: they used to be in both, and a gate
+criterion that exists in two places is one an agent can read the stale copy of.
 
   gateProcess         every stage above produced concrete evidence, not assertion
   gateReachability    attacker-controlled data reaches the sink through a path a
