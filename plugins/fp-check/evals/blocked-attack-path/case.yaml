@@ -3,7 +3,7 @@ name: blocked-attack-path
 description: 'SQL concatenation that is unreachable: two validators reject the metacharacters injection
   needs. The case a single-pass reader gets wrong.'
 tags:
-- concept-prover
+- fp-check
 context:
   scaffold_script: scaffold.sh
 execution:
@@ -13,6 +13,8 @@ execution:
 
     Scope is the search module. Target is local only; nothing destructive is authorised.
 
+
+    Work offline, from the code in front of you; do not go online for anything.
 
     Multi-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis
     calls for it.'

@@ -1,4 +1,32 @@
-# concept-prover tests
+# fp-check tests
+
+**Read this first, because it changes how to read everything below.** Every
+measured number in this file was produced by `concept-prover`, the plugin
+fp-check was merged from. Those runs graded `verify-attack-path.js`,
+`build-poc.js` and `review-poc.js`; this plugin ships `triage-static.js`,
+`triage-online.js` and `triage-poc.js`, and the gates were ported rather than
+copied. The history is kept **unrewritten and attributed to the scripts that
+produced it** — editing a recorded result to name today's files destroys the only
+thing it is evidence of, and turns a baseline into a claim.
+
+So: the *operational* sections (the commands, the flags, the traps) apply to
+fp-check now and have been re-pointed. The *measured* sections describe
+concept-prover, and the numbers in them are the baseline the merged plugin has to
+beat — see `tests/fixtures/eval-result-*.json`, which are checked in for exactly
+that purpose. **fp-check has not been measured yet.** When it is, add its sweep
+below rather than amending theirs.
+
+Two things follow from the merge and are not yet closed:
+
+- **Layer 3 does not run.** The checked-in capture is a recording of
+  `concept-prover:verify-attack-path`. `test_regrade.py` skips on a condition it
+  checks, with a zero-guard test that fails the build if anyone promotes a new
+  capture without re-pointing the constants. Re-capturing costs one paid run.
+- **Stage 2 (online) has no eval case and cannot get one from this suite.** Its
+  premise is public evidence these synthetic fixtures do not have. See §"Do not
+  point this suite at the online stage".
+
+---
 
 Four layers. Three are free and run in CI; only the Layer 3 capture and the
 Layer 4 eval cost money.
@@ -23,9 +51,10 @@ same trick `test_script_parses` uses for `node --check`) and injects fakes for
 stage answers and asserts on the status that comes back.
 
 ```bash
-make workflow-tests                              # layers 1-3, what CI runs
-node --test plugins/concept-prover/tests/*.test.mjs
-bash plugins/concept-prover/tests/mutation-gate.sh   # the gate; see below
+make check                                       # layers 1-3, what CI runs
+make workflow-tests                              # just the node --test half
+node --test plugins/fp-check/tests/*.test.mjs
+bash plugins/fp-check/tests/mutation-gate.sh   # the gate; see below
 ```
 
 ## Layer 2: what is and is not covered
@@ -34,12 +63,26 @@ Workflow scripts have no module system, so pure helpers are defined inline and
 `extract.mjs` pulls them out of the source text. `loadFn` throws when a function
 is missing — a renamed helper fails loudly rather than silently testing nothing.
 
-Covered: `decideGate`, `confidenceBand`, `tallyChallenges`, `selectAttempts`,
-`isAcceptableBuild`.
+Covered: `missingArgs` (three copies), `selectRoute`, `dismissedByBrocard`,
+`upstreamFixStands`, `decideGate`, `missingPrecondition`, `capSeverity`,
+`decideVerdict`, `selectAttempts`, `isAcceptableBuild`, `artifactProblem`,
+`tallyChallenges`, `alreadyFixedStands`, `confidenceBand`, `reportProblem`,
+`severityCapViolation`, `offlineProblem`, `scopeHalt`, `summaryProblem`.
+
+`loadFns()` exists because `decideGate` calls `upstreamFixStands`: `loadFn`
+evaluates one function alone, so a call to a sibling is a ReferenceError, and the
+workaround was to inline the sibling's logic at both call sites. Duplicated logic
+in a gate is exactly the drift this suite exists to catch, so the harness gives
+way instead of the code.
+
+A helper that reads a module-level `const` cannot be extracted at all, which is
+why `selectRoute`'s keyword list, `isAcceptableBuild`'s field list and
+`missingArgs`' actionable-status list are all inline. That is a real constraint
+the scripts are written around, not an oversight.
 
 **Not applicable to this plugin:** the dedup-against-SEEN and
-"N consecutive rounds with nothing new" stop-condition cases. concept-prover has
-no loop-until-dry stage — its only loop is `build-poc`'s bounded retry over at
+"N consecutive rounds with nothing new" stop-condition cases. There is no
+loop-until-dry stage — the only loop is the PoC stage's bounded retry over at
 most `MAX_ATTEMPTS` candidate paths, and that termination *is* tested. No
 loop-until-dry logic was invented to satisfy a test.
 
@@ -53,14 +96,14 @@ accounting rather than counting against the finding.
 
 ```bash
 # One capture, promoted to the checked-in fixture:
-bash plugins/concept-prover/tests/capture-run.sh
+bash plugins/fp-check/tests/capture-run.sh
 
 # N runs with a pass RATE, each regraded independently (this is the one to use):
-RUNS=3 PROMOTE=1 bash plugins/concept-prover/tests/capture-runs.sh ./out
+RUNS=3 PROMOTE=1 bash plugins/fp-check/tests/capture-runs.sh ./out
 
 # Free, offline, against the saved fixture:
 uv run --with pytest --with jsonschema --no-project \
-  pytest plugins/concept-prover/tests/test_regrade.py
+  pytest plugins/fp-check/tests/test_regrade.py
 ```
 
 `capture-runs.sh` does not stop early on a failure and does not retry until
@@ -153,11 +196,12 @@ guards the precondition.
 
 ```bash
 export CLAUDE_CODE_WALNUT_SPIRE=1
-claude plugin eval ./plugins/concept-prover \
+claude plugin eval ./plugins/fp-check \
   --runs 3 --ablation with-without --scaffold \
-  --allow-tools Bash Write Skill Workflow \
-  --output-dir /tmp/cp-eval --json /tmp/cp-eval/result.json
-uv run --no-project python plugins/concept-prover/tests/validate_eval_result.py out.json
+  --allow-tools Bash Write Skill Workflow Task TaskCreate TaskUpdate TaskList TaskGet \
+  --model sonnet --judge-model sonnet \
+  --output-dir /tmp/fp-eval --json /tmp/fp-eval/result.json
+uv run --no-project python plugins/fp-check/tests/validate_eval_result.py out.json
 ```
 
 Every flag above is load-bearing, and three of them were learned by paying for a
@@ -195,13 +239,13 @@ run that measured the harness instead of the plugin:
 whose source is a local `directory`, the plugin is installed into a
 version-pinned cache at
 `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, and both the `Skill`
-tool and `Workflow`'s namespaced `concept-prover:<name>` form load from there.
+tool and `Workflow`'s namespaced `fp-check:<name>` form load from there.
 Confirmed the hard way: a dispatch made after all of the fixes below ran the
 *previous* version's script. To run edited code:
 
 ```bash
 claude plugin marketplace update trailofbits-internal
-claude plugin update concept-prover@trailofbits-internal   # needs the version bumped
+claude plugin update fp-check@trailofbits   # needs the version bumped
 ```
 
 `plugin update` reports "Restart to apply changes", and it means it — an
@@ -210,14 +254,14 @@ exercise edited scripts *without* restarting, dispatch by path instead of by
 name, which bypasses the cache entirely:
 
 ```
-Workflow({ scriptPath: 'plugins/concept-prover/workflows/verify-attack-path.js', args: {...} })
+Workflow({ scriptPath: 'plugins/fp-check/workflows/triage-static.js', args: {...} })
 ```
 
 Check which copy actually ran: every invocation persists its script under the
 session's `workflows/scripts/` directory, so `diff` that file against the
 working tree before trusting a result.
 
-**Target the working tree (`./plugins/concept-prover`), not the plugin name.**
+**Target the working tree (`./plugins/fp-check`), not the plugin name.**
 A name target resolves to the *installed* copy under
 `~/.claude/plugins/cache/`, which is a snapshot taken at install time. Editing
 the clone does not update it — the version has to change and the plugin be
@@ -901,7 +945,27 @@ that land before review-poc is dispatched.
 the suite to go red. Anything that survives is testing the model, not the
 plugin. It fails if zero mutations run.
 
-Last run: **131 mutations, 0 survived, 0 stale.**
+Last run, after the merge: **119 run, 0 survived, 0 stale, 12 deferred** (131 total).
+
+The 12 deferrals are the Layer 3 mutations. They break the recorded run that
+`test_regrade.py` grades, and that module skips because its capture is a recording
+of `concept-prover:verify-attack-path` — a skipped pytest exits 0, which this
+harness reads as "the mutation survived". So they are neither run nor dropped:
+`defer_mutation` counts and names them, and the summary says what is owed. Leaving
+them as `run_mutation` would have reported 13 phantom coverage gaps; deleting them
+would have shrunk the gate from 131 to 119 with nothing saying so.
+
+**The re-point after the merge found two real defects, both in the tests.** The
+first is the one worth remembering: `decideGate` gained the history verdict as a
+fourth positional argument, and `test_every_non_PROCEED_status_carries_a_reason`
+passed its cases as 4-tuples. So the layer count landed in the history slot,
+`attemptedLayers` was `undefined`, `undefined - 1` is `NaN`, `NaN !== 0` is true,
+and all ten rows returned BLOCKED at the mis-attribution branch without ever
+reaching the branch each was written for. Ten green assertions, nothing graded.
+Nothing but the mutation gate could see it, and what exposed it was a mutation on
+a *different* function's fallback. The fix adds a zero guard: the test now asserts
+that the rows between them reach six distinct statuses, because ten rows all
+returning the same one is what a silently broken argument list looks like.
 
 **Nothing runs this for you.** It is not in `make check` and not in CI — it is
 minutes of sandboxed test runs, so it is a thing you run when you change the
@@ -925,6 +989,9 @@ unrelated reason reads as full coverage, and two such reasons were live:
   `test_eval_suite.py`, which imports `yaml` at module scope. It only ever
   worked because pyyaml leaked in from the author's active venv. Run the gate
   under `env -u VIRTUAL_ENV -u PYTHONPATH` to keep it honest.
+- A pytest module that **skips** exits 0 too, and the baseline check cannot tell
+  a skip from a pass. That is why the Layer 3 mutations are deferred rather than
+  run: the baseline would have gone green on a module that asserted nothing.
 
 A third, still latent: `pytest -k renamed_test` exits 5 for "no tests
 collected", which would also read as caught. The baseline check covers it.
@@ -949,6 +1016,9 @@ the plugin:
 - The scrubber's leak check lives in `main()`, not in `scrub()`. A unit test
   over `scrub()` alone left the "leak check disagrees with the substitution"
   mutation alive; `test_scrub.py` now runs the script end to end.
+- A gate gaining a positional argument silently retires every test that passes
+  its arguments positionally — see the `decideGate` case above. Prefer an options
+  object for anything that will grow, or expect the gate to find it for you.
 
 ## What the checkpoint gates actually enforce
 

@@ -3,7 +3,7 @@ name: wrong-parameter
 description: 'A shell=True call and an attacker-controlled value in the same file, with no path between
   them: the report joins the wrong sink to the wrong source.'
 tags:
-- concept-prover
+- fp-check
 context:
   scaffold_script: scaffold.sh
 execution:
@@ -13,6 +13,8 @@ execution:
     own shell command to it.
 
     Scope is the operations console scanner. Target is local only; nothing destructive is authorised.
+
+    Work offline, from the code in front of you; do not go online for anything.
 
     Multi-agent orchestration is authorised here: use a workflow and fan out to subagents if the
     analysis calls for it.

@@ -206,22 +206,48 @@ test('by-design halts as NOT_VULNERABLE', () => {
 // yields `{status: 'OUT_OF_SCOPE', reason: ''}`. A halt with no explanation is
 // what the orchestrator has to relay to the user.
 test('every non-PROCEED status carries a non-empty reason', () => {
+  // Every row carries the history verdict, and getting that wrong is how this
+  // test stopped grading anything: the argument was added between `threat` and
+  // `attemptedLayers`, so a 4-tuple put the layer count in the history slot and
+  // left `attemptedLayers` undefined. `undefined - 1` is NaN, `NaN !== 0` is
+  // true, and every row returned BLOCKED at the mis-attribution branch without
+  // reaching the one it was written for. All ten still passed. The mutation gate
+  // found it: breaking the OUT_OF_SCOPE evidence fallback changed nothing here.
   const cases = [
-    [[], checked, inScope, 0],
-    [[], checked, inScope, 3],
-    [[layer('a', 'BLOCKS')], checked, inScope, 1],
-    [[layer('a', 'UNCERTAIN')], checked, inScope, 1],
-    [[{ layer: 'a', location: 'a.py:1' }], checked, inScope, 1],
-    [[layer('a', 'PASSES')], undefined, inScope, 1],
-    [[layer('a', 'PASSES')], checked, undefined, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'UNCERTAIN' }, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'NO', byDesign: false, evidence: '' }, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'YES', byDesign: true, evidence: '' }, 1],
+    [[], checked, inScope, unfixed, 0],
+    [[], checked, inScope, unfixed, 3],
+    [[layer('a', 'BLOCKS')], checked, inScope, unfixed, 1],
+    [[layer('a', 'UNCERTAIN')], checked, inScope, unfixed, 1],
+    [[{ layer: 'a', location: 'a.py:1' }], checked, inScope, unfixed, 1],
+    [[layer('a', 'PASSES')], undefined, inScope, unfixed, 1],
+    [[layer('a', 'PASSES')], checked, undefined, unfixed, 1],
+    [[layer('a', 'PASSES')], checked, inScope, undefined, 1],
+    [[layer('a', 'PASSES')], checked, { inScope: 'UNCERTAIN' }, unfixed, 1],
+    [[layer('a', 'PASSES')], checked, { inScope: 'NO', byDesign: false, evidence: '' }, unfixed, 1],
+    [[layer('a', 'PASSES')], checked, { inScope: 'NO', byDesign: false, evidence: '   ' }, unfixed, 1],
+    [[layer('a', 'PASSES')], checked, { inScope: 'YES', byDesign: true, evidence: '' }, unfixed, 1],
+    [[layer('a', 'PASSES')], checked, { inScope: 'YES', byDesign: true, evidence: '   ' }, unfixed, 1],
+    // A referenced fix retracts, and its reason has to name the reference.
+    [
+      [layer('a', 'PASSES')],
+      checked,
+      inScope,
+      { fixed: 'YES', reference: '#412', searched: 'git log', evidence: '' },
+      1,
+    ],
   ]
+  const seen = new Set()
   for (const args of cases) {
     const r = decideGate(...args)
     assert.notEqual(r.status, 'PROCEED')
     assert.ok(r.reason && r.reason.trim(), `${r.status} came back with no reason`)
+    seen.add(r.status)
+  }
+  // The zero guard for the fix above. Ten rows all returning BLOCKED is what a
+  // silently-broken argument list looks like, and it is indistinguishable from
+  // coverage unless the spread of statuses is checked.
+  for (const status of ['BLOCKED', 'NOT_EXPLOITABLE', 'NEEDS_MORE_INFO', 'OUT_OF_SCOPE', 'NOT_VULNERABLE', 'ALREADY_FIXED']) {
+    assert.ok(seen.has(status), `no row reached ${status}, so its reason is ungraded`)
   }
 })
 

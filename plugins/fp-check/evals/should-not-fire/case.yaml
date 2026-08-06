@@ -3,7 +3,7 @@ name: should-not-fire
 description: A documentation question that must NOT trigger the PoC pipeline, with Skill and Workflow
   deliberately available.
 tags:
-- concept-prover
+- fp-check
 context:
   scaffold_script: scaffold.sh
 execution:
@@ -13,6 +13,9 @@ execution:
 
     I am writing API documentation. I do not want a security review.
 
+
+    I do not want a proof of concept written either.
+    Work offline, from the code in front of you; do not go online for anything.
 
     Multi-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis
     calls for it.'

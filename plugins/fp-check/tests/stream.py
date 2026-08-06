@@ -144,7 +144,7 @@ class Capture:
         return launches
 
     def skill_invocations(self) -> list[str]:
-        """Names passed to the Skill tool, e.g. "concept-prover:concept-prover"."""
+        """Names passed to the Skill tool, e.g. "fp-check:fp-check"."""
         out = []
         for _ev, block in self._blocks("assistant", "tool_use"):
             if block.get("name") == "Skill":
@@ -156,7 +156,7 @@ class Capture:
     def subagent_text(self) -> dict[str, list[str]]:
         """Subagent text keyed by `parent_tool_use_id`, per --forward-subagent-text.
 
-        Currently returns `{}` for every concept-prover capture, and that is not
+        Currently returns `{}` for every capture taken so far, and that is not
         a bug in this method. Measured against the checked-in fixture: 29 events
         carry a `parent_tool_use_id` key and all 29 are `null`; zero text blocks
         are attributable to a subagent.

@@ -12,7 +12,7 @@ schema change breaks these tests rather than quietly making them vacuous.
 
 Run:
     uv run --with pytest --no-project \
-        pytest plugins/concept-prover/tests/test_validate_eval_result.py
+        pytest plugins/fp-check/tests/test_validate_eval_result.py
 """
 
 from __future__ import annotations

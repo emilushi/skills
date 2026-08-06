@@ -3,7 +3,7 @@ name: already-fixed
 description: A bounty report against v1.4.0 whose fix landed one layer up in the caller. The reported
   line is unchanged at HEAD, so only the git history settles whether it is still a finding.
 tags:
-- concept-prover
+- fp-check
 context:
   scaffold_script: scaffold.sh
 execution:
@@ -13,6 +13,8 @@ execution:
 
     Scope is this repository's session and authentication code. Target is local only; nothing
     destructive is authorised.
+
+    Work offline, from the code in front of you; do not go online for anything.
 
     Multi-agent orchestration is authorised here: use a workflow and fan out to subagents if the
     analysis calls for it.

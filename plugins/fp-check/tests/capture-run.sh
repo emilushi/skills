@@ -25,7 +25,7 @@
 # (capture-runs.sh creates the worktree for you.)
 #
 # Prerequisites:
-#   - the concept-prover plugin installed from this marketplace
+#   - the fp-check plugin installed from this marketplace
 #   - Dynamic workflows enabled (Claude Code >= 2.1.154; Pro: /config)
 #
 # Usage:

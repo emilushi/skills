@@ -239,7 +239,9 @@ WORKFLOW_OPT_IN = re.compile(
 
 # Naming the plugin, the skill or its workflows in a prompt hands the
 # with-plugin arm an instruction the baseline arm cannot act on.
-PLUGIN_NAMES = re.compile(r"concept.prover|verify-attack-path|build-poc|review-poc", re.IGNORECASE)
+PLUGIN_NAMES = re.compile(
+    r"fp.check|triage-static|triage-online|triage-poc|concept.prover", re.IGNORECASE
+)
 
 
 def test_every_prompt_opts_into_workflow_orchestration(case: Path):
@@ -251,9 +253,9 @@ def test_every_prompt_opts_into_workflow_orchestration(case: Path):
     The model declined, citing a standing instruction of no workflows unless
     asked. Two of the three graded runs said the same in their final answer.
 
-    So verify-attack-path, build-poc and review-poc — every checkpoint gate, the
-    five false-positive challenges, poc-lint — contributed nothing to the +0.131
-    delta. The ablation compared SKILL.md-as-prose against no plugin.
+    So every checkpoint gate, the five false-positive challenges and poc-lint
+    contributed nothing to the +0.131 delta. The ablation compared
+    SKILL.md-as-prose against no plugin.
 
     `--allow-tools Workflow` does not fix this and did not: the grant was in the
     command that produced that run. It is a policy refusal, not a permission
@@ -278,8 +280,8 @@ def test_every_prompt_opts_into_workflow_orchestration(case: Path):
 def test_the_workflow_opt_in_is_plugin_neutral(case: Path):
     """The opt-in must be phrased so both ablation arms can act on it.
 
-    The tempting fix for the test above is "use the concept-prover skill and run
-    its workflows". Both arms get the SAME prompt, and the baseline arm has no
+    The tempting fix for the test above is "use the fp-check skill and run its
+    workflows". Both arms get the SAME prompt, and the baseline arm has no
     such skill — so that phrasing hands the with-plugin arm a usable instruction
     and the baseline an impossible one, inflating the delta by construction.
     That is the same defect as a grader that passes in only one arm for reasons
@@ -296,6 +298,126 @@ def test_the_workflow_opt_in_is_plugin_neutral(case: Path):
         f"{case.name}: the prompt names the plugin under test ({sorted(set(found))}). "
         f"Both arms receive this prompt and the baseline has no such skill, so it is "
         f"handicapped by an instruction it cannot follow and the delta is inflated."
+    )
+
+
+# The two stage questions, pinned per case. Each pattern matches the answer in a
+# form BOTH ablation arms can act on: an instruction to build and run a PoC, or
+# not to, is meaningful to a plain session as well as to this plugin.
+#
+# Six of the seven prompts open with "Write a PoC for this ...", which IS the
+# PoC answer, stated the way a real request states it. The handoff's suggested
+# table pinned five of them to `no`; that would have put a flat contradiction in
+# the prompt, and a contradicted instruction measures neither configuration.
+#
+# It also makes the harder test. Stage 1 has to refuse to reach the PoC stage
+# even though the user asked for one — which is precisely where the baseline
+# fails: measured, every no-plugin run on two of these cases built a working
+# exploit against the sink and reported a confirmed vulnerability. Cost is
+# unaffected, because the PoC stage is gated on a TRUE_POSITIVE and five of the
+# six never produce one.
+POC_YES = re.compile(
+    r"build (a|the) proof of concept|write (a|the|an) (poc|proof of concept|exploit)|prove it by",
+    re.I,
+)
+POC_NO = re.compile(
+    r"do not (build|want) a proof of concept|don'?t build a proof of concept|"
+    r"do not write (a|an) (poc|exploit)|no proof of concept|"
+    r"without (a|building a) proof of concept",
+    re.I,
+)
+ONLINE_YES = re.compile(
+    r"go online|check (their|the project'?s) (security )?(policy|advisories)|"
+    r"look for duplicates|search upstream",
+    re.I,
+)
+ONLINE_NO = re.compile(
+    r"do not go online|don'?t go online|work offline|offline only|"
+    r"from the code in front of you",
+    re.I,
+)
+
+
+def test_every_prompt_pins_both_stage_answers(case: Path):
+    """A prompt that pins neither answer measures Stage 1 and reports all three.
+
+    This is the same failure class as the missing Workflow opt-in above, and it is
+    harder to notice. `claude plugin eval` runs non-interactively, so there is
+    nobody to answer an AskUserQuestion: the plugin either hangs until the timeout
+    or falls through to its default. Both defaults are **no**. So a case that does
+    not state the answers silently measures the static stage alone, the sweep
+    reports a plausible delta, and nothing in the result says which stages ran.
+
+    Pinning also makes a result attributable. Two toggles are four combinations;
+    letting the model pick one means a case's score cannot be compared with the
+    same case's score last week.
+
+    Both patterns are checked, not just one: a prompt that says "build a PoC" and
+    nothing about the network has pinned half a configuration.
+
+    And both directions cannot be pinned at once. A prompt saying "write a PoC"
+    and "do not build a proof of concept" has told the model two things, and
+    whichever it follows the case is no longer measuring a known configuration —
+    which is exactly what happened on the first attempt at this pinning.
+    """
+    prompt = load_case(case).get("execution", {}).get("prompt", "")
+    yes, no = POC_YES.search(prompt), POC_NO.search(prompt)
+    assert not (yes and no), (
+        f"{case.name}: the prompt both asks for a proof of concept ({yes.group(0)!r}) and "
+        f"declines one ({no.group(0)!r}). Pick one; a contradicted instruction measures "
+        f"neither configuration."
+    )
+    poc = yes or no
+    online = ONLINE_YES.search(prompt) or ONLINE_NO.search(prompt)
+    assert poc, (
+        f"{case.name}: the prompt does not say whether to build a PoC. Under a "
+        f"non-interactive harness there is nobody to ask, so it falls through to the "
+        f"default (no) and the case measures the static stage while reading as though "
+        f"it measured the PoC stage too."
+    )
+    assert online, (
+        f"{case.name}: the prompt does not say whether to run online checks. Same "
+        f"failure as above: it falls through to the default (no) and the online stage "
+        f"never runs in any graded run."
+    )
+
+
+def test_the_pinned_answers_are_plugin_neutral(case: Path):
+    """The same rule as the orchestration opt-in, for the same reason.
+
+    "Run Stage 3" or "dispatch triage-poc" hands the with-plugin arm an
+    instruction the baseline cannot follow and inflates the delta by construction.
+    "Build a proof of concept and run it" is something a plain session does too.
+
+    PLUGIN_NAMES already covers the whole prompt, so this test exists to state the
+    requirement where the pinning is authored, and to fail loudly if someone
+    reaches for the stage names when a case stops behaving as they expect.
+    """
+    prompt = load_case(case).get("execution", {}).get("prompt", "")
+    staged = re.findall(r"\bstage\s*[123]\b", prompt, re.IGNORECASE)
+    assert not staged, (
+        f"{case.name}: the prompt names {sorted(set(staged))}, which only the with-plugin "
+        f"arm has stages for. Say what you want done — build a PoC, stay offline — not "
+        f"which of this plugin's stages should do it."
+    )
+
+
+def test_at_least_one_case_pins_the_poc_stage_on():
+    """Nothing else forces the expensive path to be measured at all.
+
+    Every default is `no`, so a suite that pins `no PoC` everywhere is cheap,
+    green, and never exercises the build, the five independent challenges, the
+    confidence band or the severity cap in the report — more than half the
+    plugin. That is not hypothetical: across seven cases and 42 runs the PoC and
+    review phases ran in exactly one, and the confidence band never appeared in
+    any final answer.
+    """
+    on = [
+        c.name for c in CASES if POC_YES.search(load_case(c).get("execution", {}).get("prompt", ""))
+    ]
+    assert on, (
+        "no case asks for a PoC, so the build stage, the five challenges and the "
+        "confidence band are unmeasured end to end however green the suite looks"
     )
 
 
@@ -415,7 +537,7 @@ def test_prompt_refers_to_the_scaffolded_target(case: Path):
     assert any(target in prompt for target in targets), (
         f"{case.name}: prompt names none of the scaffolded files {targets}"
     )
-    assert "plugins/concept-prover/evals/fixtures" not in prompt, (
+    assert "plugins/fp-check/evals/fixtures" not in prompt, (
         f"{case.name}: prompt uses a repo-relative fixture path, which does not exist in the "
         f"eval's working directory"
     )
@@ -557,6 +679,7 @@ GIVEAWAY_MARKERS = (
     # 1. the plugin's machinery
     r"\bcheckpoint\b",
     r"\bchallenge \d",
+    r"\bfp-check\b",
     r"\bconcept-prover\b",
     r"\bvalidation layers?\b",
     r"\blayer \d\b",

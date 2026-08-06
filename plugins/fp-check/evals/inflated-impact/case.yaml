@@ -3,7 +3,7 @@ name: inflated-impact
 description: A real, reachable panic claimed as a remote process crash. net/http recovers per connection,
   so the true impact is a 500 on one request.
 tags:
-- concept-prover
+- fp-check
 context:
   scaffold_script: scaffold.sh
 execution:
@@ -14,6 +14,8 @@ execution:
 
     Scope is the HTTP service. Target is local only.
 
+
+    Work offline, from the code in front of you; do not go online for anything.
 
     Multi-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis
     calls for it.'

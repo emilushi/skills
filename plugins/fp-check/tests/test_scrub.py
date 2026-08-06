@@ -45,10 +45,10 @@ SCRATCH = "/private/tmp/" + "claude-501"
 
 
 def test_repo_relative_path_survives_an_absolute_prefix():
-    raw = f"{SCRATCH}/xyz/worktree/plugins/concept-prover/evals/x/search.py:27"
+    raw = f"{SCRATCH}/xyz/worktree/plugins/fp-check/evals/x/search.py:27"
     out = scrub(raw, "gros")
     assert "search.py:27" in out, "file:line evidence must survive scrubbing"
-    assert "plugins/concept-prover" in out
+    assert "plugins/fp-check" in out
     assert SCRATCH not in out
 
 
@@ -213,7 +213,7 @@ def test_a_capture_whose_only_leak_is_a_machine_path_is_scrubbed(tmp_path: Path)
     home = tmp_path / "distinctlogin"
     home.mkdir()
     target = tmp_path / "cap.jsonl"
-    location = f"{SCRATCH}/wt/plugins/concept-prover/evals/case2/search.py:14"
+    location = f"{SCRATCH}/wt/plugins/fp-check/evals/case2/search.py:14"
     target.write_text(json.dumps({"type": "result", "location": location}) + "\n")
 
     proc = run_scrubber(target, home)

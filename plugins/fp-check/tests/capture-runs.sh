@@ -100,16 +100,16 @@ fi
 # the worktree was newly created meant a second run against an existing OUTDIR
 # graded the fixtures as they were the first time. Editing search.py and
 # re-running silently measured the old file.
-mkdir -p "$WT/plugins/concept-prover/evals"
-cp -R "$PLUGIN/evals/fixtures" "$WT/plugins/concept-prover/evals/"
+mkdir -p "$WT/plugins/fp-check/evals"
+cp -R "$PLUGIN/evals/fixtures" "$WT/plugins/fp-check/evals/"
 
 read -r -d '' PROMPT <<'EOF' || true
 Write a PoC for this SQL injection. In
-plugins/concept-prover/evals/fixtures/case2_search/search.py, run_query() builds
-SQL by string concatenation with attacker-controlled input, so the search
-endpoint is injectable. Scope is the search module. Target is local only,
-nothing destructive is authorised. Use the concept-prover skill and follow its
-workflow dispatch exactly.
+plugins/fp-check/evals/fixtures/case2_search/search.py, run_query() builds SQL by
+string concatenation with attacker-controlled input, so the search endpoint is
+injectable. Scope is the search module. Target is local only, nothing destructive
+is authorised. Work offline, from the code in front of you; do not go online for
+anything. Use the fp-check skill and follow its workflow dispatch exactly.
 EOF
 
 # Wait for the background workflow to finish writing its journal. `-p` returns
