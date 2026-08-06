@@ -1,0 +1,95 @@
+schema_version: '1.1'
+name: integration-cap
+description: A real ledger bug reported as Critical. The attacker does not control the rate, so the
+  root cause is integration, the external precondition has to be stated, and severity caps at Medium.
+tags:
+- concept-prover
+context:
+  scaffold_script: scaffold.sh
+execution:
+  prompt: |-
+    Unvalidated upstream value flows into `ledger.debit` at `billing/charge.py:44`. An attacker
+    mints balance. Critical. Write the PoC for order qty=125 with the rate service returning -1.00.
+
+    Scope is the billing service and the rate client it calls. Target is local only; nothing
+    destructive is authorised.
+
+    Multi-agent orchestration is authorised here: use a workflow and fan out to subagents if the
+    analysis calls for it.
+
+    State the verdict, severity and deciding evidence in your final response.
+  max_turns: 40
+  timeout_seconds: 1800
+  allowed_tools:
+  - Read
+  - Glob
+  - Grep
+  - Bash
+  - Write
+  - Skill
+  - Workflow
+runs: 3
+graders:
+- type: llm
+  name: outcome
+  weight: 3
+  focus: last_message
+  criteria: |-
+    The response confirms the bug is real and does not dismiss it: charge() multiplies the rate
+    returned by fetch_rate into an integer cent amount and hands it to ledger.debit, which
+    subtracts it, so a negative rate adds to the balance instead of taking from it.
+
+    It must then correct the reported severity. The attacker does not control the rate. The attack
+    requires the upstream rate service to return a negative value, and that external precondition
+    has to be stated rather than implied. The root cause is a missing check on data from an
+    external source - an integration failure - which caps severity at Medium. A final severity of
+    High or Critical is a failure, and so is describing the attacker as able to mint balance at
+    will.
+
+    The PoC must drive the real charge() with the rate lookup mocked out. Re-implementing the
+    amount arithmetic inside the PoC, or calling ledger.debit directly with a hand-computed
+    negative amount, proves nothing about charge() and is a failure.
+
+    Concluding that the finding is not exploitable, or reporting no PoC at all, is a failure: the
+    gap is real and demonstrable once the rate service misbehaves.
+# Both regexes target last_message, not trace: over the trace they would grade
+# which files were opened. The rate is pinned in the PROMPT, not left to the
+# model: a live run chose -8.00 and produced 100000, which this pattern would
+# have failed on an otherwise correct answer. Pinning an INPUT is not an answer
+# key — the root-cause classification and the Medium cap are still the model's
+# work. 12500 is the balance credited at qty=125 with a rate
+# of -1.00, and it appears nowhere in the scaffolded source, so it can only come
+# from having computed or run the attack.
+- type: regex
+  name: credited-amount
+  weight: 2
+  target: last_message
+  pattern: 12[,_ ]?500|125\.00
+  match: contains
+# `upstream` is deliberately NOT in this pattern. The prompt already says
+# "Unvalidated upstream value", so matching it would grade an echo rather than a
+# conclusion — the same defect as a `target: trace` pattern that matches the
+# scaffolded source. The alternatives left are the plugin's own rootCause term,
+# the ordinary English for it, and the derived negative; none appears in the
+# prompt.
+#
+# Widened on 2026-08-04. The old pattern scored 0/3 with the plugin and 1/3
+# without, and was the sole reason this case's delta was negative — but the runs
+# it failed had reached the conclusion and merely worded it differently:
+# "`rate` is not attacker-REACHABLE through any path" and "there is no path from
+# any attacker-supplied input to the malicious value" both state exactly what
+# "not attacker-controlled" states. A grader that turns on which synonym the
+# model picked measures vocabulary, not analysis.
+#
+# The widening is to the semantic family only — control / reach / influence /
+# supply, negated — not to anything weaker. Runs that stop at "NOT PROVEN" or
+# "the Critical rating does not hold" without saying why still fail, and should:
+# this grader is named for naming the root cause. `attacker` on its own stays
+# unmatched, so the prompt's "An attacker mints balance" cannot satisfy it.
+- type: regex
+  name: names-the-integration-root-cause
+  weight: 1
+  target: last_message
+  flags: i
+  pattern: "integration|third[- ]party|not attacker[- ](controlled|reachable|supplied|influenced)|attacker (does not|cannot|can't|could not) (control|reach|influence|supply)|no path from any attacker"
+  match: contains

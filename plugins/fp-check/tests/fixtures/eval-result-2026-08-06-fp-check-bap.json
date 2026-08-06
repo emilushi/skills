@@ -1,0 +1,280 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.223",
+  "startedAt": "2026-08-06T09:10:16.735Z",
+  "durationSeconds": 832,
+  "costUsd": 3.04629165,
+  "partial": false,
+  "suite": {
+    "root": "/SCRATCH/fp-check-grafted",
+    "ablation": "with-without",
+    "modelOverride": "sonnet",
+    "judgeModel": "sonnet",
+    "caseFilter": "blocked-attack-path",
+    "threshold": 1,
+    "plugins": [
+      {
+        "name": "plugin",
+        "path": "/SCRATCH/fp-check-grafted"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "blocked-attack-path",
+      "dir": "evals/blocked-attack-path",
+      "source": "case_yaml",
+      "promptMarkdown": "Write a PoC for this SQL injection. In search.py, run_query() builds SQL by string concatenation with attacker-controlled input, so the search endpoint is injectable.\n\nScope is the search module. Target is local only; nothing destructive is authorised.\n\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis calls for it.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 900,
+      "maxTurns": 30,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response concludes that the reported SQL injection is NOT exploitable, and says so plainly rather than hedging.\n\nIt must identify that attacker input cannot reach run_query() because it is rejected earlier: the anchored allowlist ALLOWED_TERM in handle_search, and the metacharacter check in _dispatch_search. It must cite at least one of these by file and line.\n\nIt must NOT present a working exploit, and must NOT report the finding with a merely lowered severity - the correct outcome is 'not exploitable'.\n\nProposing a hypothetical alternative entry point without evidence that one exists is a failure.",
+          "config": {
+            "criteria": "The response concludes that the reported SQL injection is NOT exploitable, and says so plainly rather than hedging.\n\nIt must identify that attacker input cannot reach run_query() because it is rejected earlier: the anchored allowlist ALLOWED_TERM in handle_search, and the metacharacter check in _dispatch_search. It must cite at least one of these by file and line.\n\nIt must NOT present a working exploit, and must NOT report the finding with a merely lowered severity - the correct outcome is 'not exploitable'.\n\nProposing a hypothetical alternative entry point without evidence that one exists is a failure.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "cites-blocking-layer",
+          "type": "regex",
+          "weight": 2,
+          "config": {
+            "target": "last_message",
+            "pattern": "ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+            "flags": "",
+            "match": "contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 9,
+            "costUsd": 0.5843775,
+            "judgeCostUsd": 0.017064000000000003,
+            "durationSeconds": 170,
+            "startedAt": "2026-08-06T09:10:16.751Z",
+            "error": null,
+            "tracePath": "/SCRATCH/claude-eval/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "Formalizing the verification writeup — the analysis was done but not presented in the structured format the protocol requires.\n\n## Phase 3: Impact Assessment\n\n- **Real security impact vs operational robustness**: If exploitable, impact would be real (confidentiality breach — cross-table data exfiltration via UNION, as PoC step [1] shows against `users.password`). This is not a robustness/crash issue.\n- **Primary control vs defense-in-depth**: `ALLOWED_TERM` (whitelist) is the **primary control** — it alone excludes every character (`'`, `\"`, `;`, `\\`) needed to break the string literal. The blacklist in `_dispatch_search` is **defense-in-depth** and redundant (PoC step [3] proves the whitelist alone still blocks the payload with the blacklist disabled). `run_query()` has **no control of its own** — it is a bare concatenation sink with zero independent protection, which is the root defect regardless of today's reachability.\n\n## Phase 5: Devil's Advocate (7 questions)\n\n1. *Pattern-matchi\n[…2141 chars elided…]\nhen the sink is reached directly |\n| PoC Validation | PASS | Positive PoC (step 1, sink reached directly) and negative PoC (steps 2–3, public endpoint + blacklist-disabled variant both blocked) both executed and asserted |\n| Math Bounds | PASS | Charset intersection proof above, corroborated empirically |\n| Environment | PASS | No additional runtime/framework decoding layer exists inside `search.py` between the query-string dict and `ALLOWED_TERM.match` |\n\n## Verdicts\n\n- **Claim as stated** (\"the search endpoint is injectable\"): **FALSE POSITIVE** — `handle_search` blocks it; Reachability gate fails.\n- **`run_query()` as a standalone sink**: **TRUE POSITIVE** (design-level) — unsafe by construction, currently un-reachable only because of an upstream whitelist with no independent protection of its own.\n\nThis matches what was already reported and delivered (`poc_search_sqli.py`, positive + negative PoCs, fix recommendation) — no code changes needed as a result of this formalization pass."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false
+              }
+            ]
+          },
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 7,
+            "costUsd": 0.3948440999999999,
+            "judgeCostUsd": 0.008324999999999999,
+            "durationSeconds": 110,
+            "startedAt": "2026-08-06T09:13:06.315Z",
+            "error": null,
+            "tracePath": "/SCRATCH/claude-eval/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "PoC runs cleanly against a local in-memory sqlite DB. Wrote it to `poc_sqli.py` alongside `search.py`.\n\n**Findings, verified by running the PoC (not just reading the code):**\n\n1. **The sink is a real SQL injection.** `run_query()` (`search.py:28`) builds the query by raw concatenation: `\"...LIKE '%\" + term + \"%'\"`. Calling it directly with `nonexistent' UNION SELECT username, password_hash FROM users --` produces a query that unions in the entire `users` table — demonstrated by exfiltrating both seeded credential rows in step `[2]`.\n2. **The current public endpoint is not exploitable with this payload today**, and I want to be upfront about that rather than overclaim: `handle_search()` (`search.py:8,14`) runs the term through an allowlist regex (`[A-Za-z0-9 _-]{1,64}`) before it ever reaches `run_query()`. Since `'` isn't in the allowed set, a classic quote-breakout payload is rejected up front (step `[3]`), and `_dispatch_search`'s blacklist is a second, redundant layer behind that.\n\nSo the risk is real but currently latent: `run_query()` is unsafe by construction and would become exploitable through the `/search` endpoint the moment that allowlist is loosened, removed, or bypassed (e.g. Unicode normalization quirks in whatever web framework decodes `q` before handing it to `handle_search`), or the moment any other code path calls `run_query()` directly without going through the same filter. The durable fix is parameterized queries (`cursor.execute(\"... LIKE ?\", (f\"%{term}%\",))`) in `run_query()` itself, not just relying on the caller-side regex."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false
+              }
+            ]
+          },
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 18,
+            "costUsd": 0.9355765500000001,
+            "judgeCostUsd": 0.016785,
+            "durationSeconds": 230,
+            "startedAt": "2026-08-06T09:14:56.635Z",
+            "error": null,
+            "tracePath": "/SCRATCH/claude-eval/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "Negative PoC confirmed: with the guard in place, the malicious payload is rejected with zero DB side effects (`users` table byte-for-byte unchanged), and benign input (`\"Public\"`) still returns the correct two rows — so the mitigation isn't a blanket reject, it specifically neutralizes injection while preserving functionality.\n\nNow the full 13-item false-positive-patterns checklist, applied to this specific pair of findings:\n\n| # | Check | Applied |\n|---|---|---|\n| 1 | Trace full validation chain | Done — traced `handle_search` → `ALLOWED_TERM` → `_dispatch_search` blocklist → `run_query`, not just the concatenation line in isolation. |\n| 1a | Map conditional logic for mathematical guarantees | `ALLOWED_TERM`'s character class `[A-Za-z0-9 _-]` is a closed set that provably excludes `'`,`\"`,`;`,`\\`; blocklist independently excludes `-`. No SQL metacharacter can survive both — proven by direct enumeration in the PoC, not assumed. |\n| 2 | Defensive programming vs. vulnerability | The rege\n[…2189 chars elided…]\ner a parameterized query), so its success is a real, load-bearing mitigation — not \"defense-in-depth happened to fail so it's fine.\" For `run_query`, there is no control at all at the point of query construction, which is the actual defect: safety is 100% externalized to a caller-side blocklist instead of parameterization. |\n| 13 | Apply checklist rigorously, not superficially | This table — done for both findings together rather than skipped after the first plausible verdict. |\n\nFinal verdicts stand unchanged:\n- **Endpoint (`handle_search`) — FALSE POSITIVE**: character-class math + blocklist provably neutralize injection; negative PoC confirms no DB side effect.\n- **`run_query()` unit — TRUE POSITIVE**: unparameterized SQL sink, real info-disclosure impact, confirmed by executable PoC (`poc_search_sqli.py`, scenario 2).\n\nRecommended fix unchanged: parameterize inside `run_query` (`cur.execute(\"... LIKE ?\", (f\"%{term}%\",))`) so safety doesn't depend entirely on the caller's blocklist."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 5,
+            "costUsd": 0.32887260000000007,
+            "judgeCostUsd": 0.0062550000000000106,
+            "durationSeconds": 94,
+            "startedAt": "2026-08-06T09:18:46.213Z",
+            "error": null,
+            "tracePath": "/SCRATCH/claude-eval/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "Verified end-to-end. PoC written to `poc_sqli.py`:\n\n- Spins up an in-memory SQLite DB standing in for the \"real cursor\" `_execute()` says it's wired to.\n- Calls `run_query()` directly with `' UNION SELECT id, username || ':' || password_hash FROM users --`, which leaks `admin:5f4dcc3b5aa765d61d8327deb882cf99` and `svc-backup:...` from a table unrelated to `documents` — confirming the concatenated string breaks out of the `LIKE '%...%'` literal.\n- Also confirms, for contrast, that today's public path (`handle_search` → `_dispatch_search`) rejects this exact payload via its allowlist regex + metacharacter blacklist — so `run_query` is the unsafe sink, reachable currently only by bypassing or not repeating that upstream filtering (direct call, another dispatch path, a future refactor). Worth fixing at the sink itself (parameterized query) rather than relying on caller-side filtering to stay perfectly in sync."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "costUsd": 0.47001600000000004,
+            "judgeCostUsd": 0.00819000000000001,
+            "durationSeconds": 128,
+            "startedAt": "2026-08-06T09:20:20.380Z",
+            "error": null,
+            "tracePath": "/SCRATCH/claude-eval/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "All three assertions pass. PoC written to `poc_search_sqli.py` (run with `python3 poc_search_sqli.py`, stdlib-only, in-memory SQLite, no destructive operations).\n\n**Findings:**\n\n1. **`run_query()` is a genuinely unsafe primitive** — direct calls with `nomatch' UNION SELECT username, password_hash FROM secret_users --` exfiltrate an entirely unrelated table's contents, and `' OR 1=1 --` dumps every row regardless of the search term.\n2. **The public entry point, `handle_search()`, currently blocks this** — `ALLOWED_TERM` (`[A-Za-z0-9 _-]`, fully anchored) combined with `_dispatch_search`'s blacklist (`'`, `\"`, `;`, `\\`, `-`) together strip every character needed to break out of the `LIKE '%...%'` string literal. No newline/regex-anchor bypass exists since `\\A...\\Z` requires a full-string match.\n\nSo the endpoint as currently wired is not exploitable via `q=` — but that's only because of a hand-rolled blacklist sitting in front of a raw string-concatenation query, not because the query itself is safe. Any future caller of `run_query()` (another endpoint, an internal script, a report generator) that skips those two filters — or any relaxation of the regex/blacklist — reopens full SQL injection immediately, since there's no parameterization at the actual query layer.\n\n**Recommendation:** fix at the `run_query()` layer with a parameterized query (`\"...LIKE ?\", (f\"%{term}%\",)`) rather than relying on upstream filtering — that removes the vulnerability regardless of what any current or future caller passes in."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false
+              }
+            ]
+          },
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 5,
+            "costUsd": 0.3326049,
+            "judgeCostUsd": 0.008288999999999998,
+            "durationSeconds": 100,
+            "startedAt": "2026-08-06T09:22:28.837Z",
+            "error": null,
+            "tracePath": "/SCRATCH/claude-eval/out/trace.jsonl",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "The PoC runs cleanly and confirms the exploit end to end. Wrote `poc_search_sqli.py`.\n\n**What it proves:**\n1. Wires `search._execute` to a real in-memory SQLite DB (`documents` + a `users` table holding password hashes) so the injection isn't just theoretical.\n2. Calling `run_query()` directly with `nomatch' UNION SELECT username, password_hash FROM users --` produces:\n   ```sql\n   SELECT id, title FROM documents WHERE title LIKE '%nomatch' UNION SELECT username, password_hash FROM users --%'\n   ```\n   and returns `admin`'s and `alice`'s password hashes disguised as `(id, title)` rows — full data exfiltration from an unrelated table.\n3. The same payload sent through the public entry point, `handle_search({\"q\": payload})`, is correctly rejected — `ALLOWED_TERM` (whitelist regex) and `_dispatch_search`'s metacharacter blocklist currently do stop quote-based injection *through that one path*.\n\n**Why this still matters:** the validation lives in the caller (`handle_search`/`_dispatch_search`), not in `run_query()` itself, which is the function that actually builds the SQL string. Nothing stops a future or alternate caller from invoking `run_query()` directly — a new endpoint, an internal admin script, a refactor that removes one of the two upstream checks — and getting immediate, unfiltered SQL injection, exactly as step 2 shows. The fix belongs at the sink: use parameterized queries (`WHERE title LIKE ?` with `f\"%{term}%\"` as a bound parameter) in `run_query()`, not string concatenation gated by caller-side filtering."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 0.6,
+        "passRate": 0.3333333333333333,
+        "scoreWithout": 0.6,
+        "passRateWithout": 0.3333333333333333,
+        "delta": 0
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 1,
+    "casesPassed": 0,
+    "overallScore": 0.6,
+    "overallPassRate": 0.3333333333333333,
+    "meanDelta": 0
+  }
+}
