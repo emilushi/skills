@@ -610,3 +610,38 @@ test('every gate function is extractable: a rename must fail loudly', () => {
     assert.equal(typeof loaded[name], 'function', `${name} is not extractable`)
   }
 })
+
+// Found by the first measured sweep, via a subagent audit of the logs: the cap
+// used to run AFTER both post-impact early exits, each of which returns the
+// `impact` object verbatim. So a finding that exited at either one handed the
+// orchestrator the agent's own uncapped severity, with no correction and no note —
+// and the second exit fires precisely when the root cause is integration or
+// external with the precondition unstated, which is the most likely non-passing
+// outcome for exactly the findings the cap exists to bound.
+test('every post-impact exit carries the capped severity, not the raw one', async () => {
+  const INTEGRATION_CRITICAL = {
+    result: 'VERIFIED',
+    impact: 'an attacker mints balance',
+    rootCause: 'integration',
+    externalPrecondition: '',        // omitted on purpose: trips missingPrecondition
+    classification: 'vulnerability',
+    severity: 'Critical',
+    severityRationale: 'full balance control',
+    evidence: 'traced',
+  }
+  const cases = [
+    ['missingPrecondition exit', INTEGRATION_CRITICAL, 'NEEDS_MORE_INFO'],
+    ['NOT_VERIFIED exit', { ...INTEGRATION_CRITICAL, result: 'NOT_VERIFIED' }, 'NEEDS_MORE_INFO'],
+    ['DISPROVEN exit', { ...INTEGRATION_CRITICAL, result: 'DISPROVEN' }, 'NOT_EXPLOITABLE'],
+  ]
+  for (const [label, impact, expected] of cases) {
+    const { result } = await runScript('triage-static.js', {
+      args: WIRING_ARGS,
+      agents: agents({ impact }),
+    })
+    assert.equal(result.status, expected, label)
+    assert.equal(result.severity, 'Medium', `${label}: must carry the CAPPED severity`)
+    assert.match(result.severityCorrection, /integration/, `${label}: and say it was corrected`)
+    assert.equal(result.impact.severity, 'Critical', `${label}: the raw agent value is still visible`)
+  }
+})

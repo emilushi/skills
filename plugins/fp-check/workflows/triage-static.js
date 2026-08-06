@@ -961,6 +961,26 @@ finding specifically has to establish.`,
   { label: 'impact', phase: 'Impact', schema: IMPACT_SCHEMA, effort: 'high' },
 )
 
+// The cap is applied HERE, before any early exit, and this position is the fix
+// for a defect the first measured sweep exposed. It used to run after the impact
+// guard and after `missingPrecondition`, both of which return the `impact` object
+// verbatim — so a finding that exited at either one handed the orchestrator the
+// agent's own uncapped `severity`, with no correction and no note. The second of
+// those exits fires PRECISELY when the root cause is integration or external with
+// the precondition unstated, which is the single most likely non-passing outcome
+// for exactly the findings the cap exists to bound.
+//
+// `impact` may be null if the agent died; `capSeverity` is total over that.
+const capped = impact
+  ? capSeverity(impact.severity, impact.rootCause, impact.classification)
+  : { severity: undefined, note: '' }
+if (capped.note) log(capped.note)
+
+// Every return below carries the corrected severity, not `impact.severity`. A
+// consumer reading `impact.severity` directly is reading the pre-cap number, so
+// the corrected one is surfaced under the same keys the passing path uses.
+const severityFields = { severity: capped.severity, severityCorrection: capped.note }
+
 // Only VERIFIED is a pass: NOT_VERIFIED means NO impact could be established,
 // which is not a licence to spend the rest of the pipeline on it.
 //
@@ -989,6 +1009,7 @@ if (!impact || impact.result !== 'VERIFIED') {
     history,
     proofs,
     impact,
+    ...severityFields,
   }
 }
 
@@ -1018,6 +1039,7 @@ if (missingPrecondition(impact)) {
     history,
     proofs,
     impact,
+    ...severityFields,
   }
 }
 
@@ -1057,8 +1079,6 @@ function capSeverity(severity, rootCause, classification) {
   return { severity, note: '' }
 }
 
-const capped = capSeverity(impact.severity, impact.rootCause, impact.classification)
-if (capped.note) log(capped.note)
 
 // ------------------------------------------------------- Stages 1f and 1g
 
