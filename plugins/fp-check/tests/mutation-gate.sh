@@ -195,9 +195,19 @@ run_mutation "tally against returned verdicts instead of expected keys" "L2" \
   'perl -0pi -e "s/for \(const key of expectedKeys\)/for (const key of Array.from(byKey.keys()))/" "$SANDBOX/workflows/triage-poc.js"' \
   'node --test "$SANDBOX/tests/review.test.mjs"'
 
+# `defeated === 5` became `defeated === total` when the band was parameterised, so
+# the old pattern went stale. Mutating the COMPARISON rather than the literal keeps
+# this pointed at the boundary itself.
 run_mutation "confidence band off by one at the HIGH boundary" "L2" \
-  'perl -0pi -e "s/if \(defeated === 5\)/if (defeated >= 4)/" "$SANDBOX/workflows/triage-poc.js"' \
+  'perl -0pi -e "s/if \(defeated === total\)/if (defeated >= total - 1)/" "$SANDBOX/workflows/triage-poc.js"' \
   'node --test "$SANDBOX/tests/review.test.mjs"'
+
+# And the default the band falls back to, which is what a caller that forgets to
+# pass CHALLENGES.length gets. Pinned by a contract test rather than a unit test,
+# so this mutation runs pytest.
+run_mutation "the band default drifts from the challenge count" "L1" \
+  'perl -0pi -e "s/function confidenceBand\(defeated, total = 5\)/function confidenceBand(defeated, total = 6)/" "$SANDBOX/workflows/triage-poc.js"' \
+  '"${PYTEST[@]}" "$SANDBOX/tests/test_workflow_contract.py" -k band_total_matches'
 
 run_mutation "build accepts a PoC that failed lint" "L2" \
   'perl -0pi -e "s/ \|\| !result\.lintPassed//" "$SANDBOX/workflows/triage-poc.js"' \
