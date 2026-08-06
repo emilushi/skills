@@ -41,7 +41,7 @@ const BROCARD_SCHEMA = {
     // On NEEDS_MORE_INFO this names the fact that would decide it. The whole
     // point of the third state is that it is actionable rather than a hedge.
     // Required rather than optional, and empty for a PASS or a DISMISS.
-    // `dismissedByBrocard` branches on it, and `required` is the only thing the
+    // `triageBrocards` branches on it, and `required` is the only thing the
     // runtime validator enforces — a prompt asking for it is a request the model
     // may decline, and a NEEDS_MORE_INFO that does not name the missing fact is
     // the hedge this state exists to replace.
@@ -384,7 +384,18 @@ the misuse? If so, DISMISS the report against THIS project.
 The nuance is a redirection rather than a dismissal: downstream usage that
 violates documented guidance is a valid finding against the DOWNSTREAM project.
 If that is the situation, say which project it is a bug in — the answer is "not
-a bug here", not "not a bug".`,
+a bug here", not "not a bug".
+
+**If the document that would settle this is not in this repository, answer PASS
+and say which document you would need.** That is not a hedge and it is not
+NEEDS_MORE_INFO: this test is only about what THIS project documents, and a
+governing spec, an upstream service contract or a downstream consumer's guidance
+are all outside its reach. Answering NEEDS_MORE_INFO on an external document makes
+this test structurally unanswerable for every finding whose root cause is an
+integration — which is measured, not hypothetical: it aborted the whole static
+stage on two graded runs, and the finding those runs were meant to cap came back
+uncapped because the analysis never ran. The online stage exists for exactly that
+question and will pick it up when the user asks for it.`,
   },
   {
     key: 'cure-worse',
@@ -440,55 +451,78 @@ const brocardVerdicts = brocardRaw.filter(Boolean)
 // the first in canonical order is what that means. All four still run — four
 // low-effort agents cost less than the wall-clock of sequencing them — so a
 // DISMISS reported here does not hide the others' verdicts.
-function dismissedByBrocard(verdicts, expectedKeys) {
+function triageBrocards(verdicts, expectedKeys) {
   const byKey = new Map((verdicts || []).filter(Boolean).map((v) => [v.key, v]))
 
-  // A DISMISS is read BEFORE the "did every agent answer" check, and the order is
-  // load-bearing — it is the same rule `decideGate` applies when a blocking layer
-  // outranks a dead recovery agent, and this function originally got it wrong.
-  //
-  // Each brocard is an independent falsifiable test and any ONE of them dismissing
-  // is sufficient, so a fourth agent dying cannot change an answer another agent
-  // has already reached. Checking liveness first threw that answer away: measured,
-  // a graded run had brocard 5 return a clean DISMISS, lost one of the other three
-  // to a connection error, and returned NEEDS_MORE_INFO about a finding that was
-  // already disposed of.
+  // A DISMISS is the ONLY terminal outcome, and it is read before anything else.
+  // Each brocard is an independent falsifiable test and any one dismissing is
+  // sufficient, so no later evidence can unmake it and no sibling's silence
+  // matters — the same rule `decideGate` applies when a blocking layer outranks a
+  // dead recovery agent.
   for (const key of expectedKeys) {
     const v = byKey.get(key)
     if (v && v.verdict === 'DISMISS') {
       return {
-        status: 'DISMISSED',
-        reason: `${v.title}: ${String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence'}`,
+        dismissal: {
+          status: 'DISMISSED',
+          reason: `${v.title}: ${String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence'}`,
+        },
+        unresolved: [],
       }
     }
   }
 
-  // Only now does a missing verdict matter: nothing has dismissed the finding, so
-  // an unevaluated test is a test whose answer could still have.
-  const unevaluated = expectedKeys.filter((k) => !byKey.has(k))
-  if (unevaluated.length > 0) {
-    return {
-      status: 'NEEDS_MORE_INFO',
-      reason: `brocard agent(s) returned nothing for ${unevaluated.join(', ')}; an unevaluated test is not a passed one`,
-    }
-  }
+  // Everything else is CARRIED, not terminal. This is the fix for the most
+  // expensive structural defect the first measured sweep found.
+  //
+  // "This test dismisses the finding" and "this test cannot decide" had the same
+  // power to end the stage, and they are not the same statement: the second is
+  // precisely what the expensive stages downstream exist to resolve. Worse,
+  // aborting did not produce a safe non-answer — it produced an UNGUARDED one. The
+  // pre-gate stopped, Stage 3 then refused for want of a TRUE_POSITIVE, and the
+  // orchestrator — still holding a user request for a PoC — built one by hand,
+  // outside every gate, and reported an uncapped Critical. Fail-closed at the gate
+  // became fail-open one level up, at 4-5x the baseline cost for an identical
+  // score. Measured on 3 of 18 runs; the DISMISS path was right on 8 of 8.
+  //
+  // The finding now gets the full analysis — reachability verified, severity
+  // capped — and an unresolved brocard is surfaced to the later prompts and
+  // blocks a TRUE_POSITIVE in code at the verdict, where the decision is made by
+  // the agent holding all the evidence rather than by the cheapest one to raise a
+  // hand.
+  const unresolved = []
   for (const key of expectedKeys) {
     const v = byKey.get(key)
-    if (v.verdict === 'NEEDS_MORE_INFO') {
+    if (!v) {
+      // A dead agent is unknown, not passed. It is carried rather than fatal so
+      // one flaky agent degrades the verdict instead of destroying the run.
+      unresolved.push({ key, title: key, what: 'the agent returned nothing, so this test never ran' })
+    } else if (v.verdict === 'NEEDS_MORE_INFO') {
       const what = String(v.missingFact || '').trim() || String(v.evidence || '').trim()
-      return {
-        status: 'NEEDS_MORE_INFO',
-        reason: `${v.title}: ${what || 'agent reported NEEDS_MORE_INFO without naming the missing fact'}`,
-      }
+      unresolved.push({
+        key,
+        title: v.title,
+        what: what || 'agent reported NEEDS_MORE_INFO without naming the missing fact',
+      })
     }
   }
-  return null
+  return { dismissal: null, unresolved }
 }
 
-const brocardGate = dismissedByBrocard(brocardVerdicts, BROCARDS.map((b) => b.key))
-if (brocardGate) {
-  log(`${brocardGate.status}: ${brocardGate.reason}`)
-  return { status: brocardGate.status, reason: brocardGate.reason, brocards: brocardVerdicts }
+const brocardTriage = triageBrocards(brocardVerdicts, BROCARDS.map((b) => b.key))
+if (brocardTriage.dismissal) {
+  log(`DISMISSED: ${brocardTriage.dismissal.reason}`)
+  return {
+    status: brocardTriage.dismissal.status,
+    reason: brocardTriage.dismissal.reason,
+    brocards: brocardVerdicts,
+  }
+}
+
+// Carried to the impact and verdict prompts, and enforced at the verdict.
+const openQuestions = brocardTriage.unresolved
+if (openQuestions.length > 0) {
+  log(`${openQuestions.length} brocard question(s) unresolved and carried: ${openQuestions.map((q) => q.key).join(', ')}`)
 }
 
 // Brocard 6 may survive as a severity input rather than a dismissal. Carried
@@ -927,6 +961,7 @@ All ${layerVerdicts.length} validation layers were independently verified as pas
 ${history.fixed === 'UNCERTAIN' ? `History search was inconclusive: ${history.searched}` : ''}
 ${upstreamFixStands(history) ? `A PARTIAL fix exists (${upstreamFixStands(history).reference}); report what remains, not the original claim.` : ''}
 ${remediationCost.length ? `Remediation cost raised at the pre-gate:\n  ${remediationCost.join('\n  ')}` : ''}
+${openQuestions.length ? `Unresolved at the cheap pre-gate, carried rather than fatal — resolve what you can from the code:\n  ${openQuestions.map((q) => `${q.title}: ${q.what}`).join('\n  ')}` : ''}
 
 Verify the claimed impact against evidence. If recovery downgrades it, the
 verified impact is the downgraded one, not the original claim.
@@ -1101,7 +1136,7 @@ Validation layers, all independently verified as passable:
 Already-fixed search: ${history.fixed} — ${history.searched}
 ${proofs.length ? `Deep-route proofs:\n  ${proofs.map((p) => `${p.key}: ${p.verdict ? `${p.verdict.verdict} — ${p.verdict.evidence}` : 'agent returned nothing'}`).join('\n  ')}` : ''}
 Route: ${route}
-
+${openQuestions.length ? `\nUnresolved at the cheap pre-gate and still open. Resolve each from the code if you\ncan, and put whatever remains into unresolvedUncertainty — an unresolved one blocks\na TRUE POSITIVE whatever the six gates say:\n  ${openQuestions.map((q) => `${q.title}: ${q.what}`).join('\n  ')}\n` : ''}
 First, argue against the finding, then for it. Work through
 ${baseDir}/references/false-positive-patterns.md — the 13-item checklist and the
 four red-flag lists. ${route === 'deep' ? 'All 13 devil\'s-advocate questions.' : 'The 7 spot-check questions of the standard route.'}
@@ -1152,7 +1187,8 @@ No speculative language in verdictReason: "probably", "likely", "might", "would"
 //
 // A missing verdict counts AGAINST the finding, and unresolved uncertainty is
 // its own outcome rather than being resolved in either direction.
-function decideVerdict(result) {
+function decideVerdict(result, carried) {
+  const open = (carried || []).filter(Boolean)
   if (!result) {
     return { status: 'NEEDS_MORE_INFO', reason: 'the gate-review agent returned nothing; no gate was evaluated' }
   }
@@ -1200,14 +1236,30 @@ function decideVerdict(result) {
       reason: 'all six gates passed but the agent gave no reason; a verdict with nothing behind it is not evidence',
     }
   }
+
+  // An unresolved brocard blocks a TRUE POSITIVE, in code. The pre-gate no longer
+  // aborts the stage on one — so the finding has been fully analysed by now and the
+  // report is useful — but "brocard 4 never answered" is a real gap that nothing
+  // downstream tests, and carrying it as prose for an agent to honour is the
+  // self-report this whole port exists to remove. Reported with the missing fact,
+  // so it is actionable rather than a shrug.
+  if (open.length > 0) {
+    return {
+      status: 'NEEDS_MORE_INFO',
+      reason: `all six gates passed, but ${open.length} cheap-pre-gate question(s) remain unresolved: ${open
+        .map((q) => `${q.title} — ${q.what}`)
+        .join('; ')}`,
+    }
+  }
   return { status: 'TRUE_POSITIVE', reason: why }
 }
 
-const verdict = decideVerdict(verdictAgent)
+const verdict = decideVerdict(verdictAgent, openQuestions)
 
 const payload = {
   route,
   brocards: brocardVerdicts,
+  openQuestions,
   layers: layerVerdicts,
   recovery,
   threat,

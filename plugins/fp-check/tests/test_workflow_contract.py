@@ -549,7 +549,7 @@ GATE_FIELD_CONTRACTS = [
     # BROCARDS list, for the same reason as `layer` above.
     (
         "triage-static.js",
-        "dismissedByBrocard",
+        "triageBrocards",
         "BROCARD_SCHEMA",
         ("v",),
         {"key", "title"},

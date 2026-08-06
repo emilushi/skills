@@ -63,7 +63,7 @@ Workflow scripts have no module system, so pure helpers are defined inline and
 `extract.mjs` pulls them out of the source text. `loadFn` throws when a function
 is missing — a renamed helper fails loudly rather than silently testing nothing.
 
-Covered: `missingArgs` (three copies), `selectRoute`, `dismissedByBrocard`,
+Covered: `missingArgs` (three copies), `selectRoute`, `triageBrocards`,
 `upstreamFixStands`, `decideGate`, `missingPrecondition`, `capSeverity`,
 `decideVerdict`, `selectAttempts`, `isAcceptableBuild`, `artifactProblem`,
 `tallyChallenges`, `alreadyFixedStands`, `confidenceBand`, `reportProblem`,

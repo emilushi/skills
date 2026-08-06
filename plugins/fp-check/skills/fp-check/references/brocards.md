@@ -18,6 +18,25 @@ examples and edge cases; this file carries what Stage 1 enforces.
 | **DISMISS** | the finding fails this test; the reason is the finding's epitaph |
 | **NEEDS-MORE-INFO** | the evidence available cannot decide it; name the missing fact |
 
+**A NEEDS-MORE-INFO does not end the analysis.** Only a DISMISS is terminal here.
+An unresolved question is carried into the impact and verdict stages, surfaced to
+both, and blocks a TRUE POSITIVE at the verdict — where the call is made by the
+agent holding all the evidence rather than by the cheapest one to raise a hand.
+
+That is a correction, and the sweep that forced it is worth knowing about. When a
+NEEDS-MORE-INFO could end the stage, aborting did not produce a safe non-answer: it
+produced an *unguarded* one. The pre-gate stopped, the PoC stage then refused for
+want of a TRUE_POSITIVE, and the orchestrator — still holding a user request for a
+PoC — built one outside every gate and reported an uncapped Critical. Fail-closed
+at the gate became fail-open one level up, at 4-5x the cost for an identical score.
+
+**The corollary for brocard 5, and the reason it was the one that fired:** if the
+document that would settle a test is not in this repository, answer **PASS** and
+name the document. A governing spec, an upstream service contract and a downstream
+consumer's guidance are all outside the reach of a test about what *this* project
+documents. Answering NEEDS-MORE-INFO on an external document makes the test
+structurally unanswerable for every finding whose root cause is an integration.
+
 **NEEDS-MORE-INFO is not a soft DISMISS and must never be collapsed into one.**
 The most expensive gate bug in this plugin's history was exactly that
 conflation: an impact checkpoint read "the claim as stated is unproven" as "no

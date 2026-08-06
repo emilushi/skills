@@ -16,7 +16,11 @@ import { loadFn, loadFns, runScript, script } from './extract.mjs'
 
 const STATIC = script('triage-static.js')
 const selectRoute = loadFn(STATIC, 'selectRoute')
-const dismissedByBrocard = loadFn(STATIC, 'dismissedByBrocard')
+const triageBrocards = loadFn(STATIC, 'triageBrocards')
+// Only a DISMISS is terminal now; everything else is carried. These two shims keep
+// the existing assertions readable against the new two-field return.
+const dismissalOf = (v, k) => triageBrocards(v, k).dismissal
+const unresolvedOf = (v, k) => triageBrocards(v, k).unresolved
 const upstreamFixStands = loadFn(STATIC, 'upstreamFixStands')
 const capSeverity = loadFn(STATIC, 'capSeverity')
 const decideVerdict = loadFn(STATIC, 'decideVerdict')
@@ -82,14 +86,14 @@ test('selectRoute never throws on a missing or empty dispatch', () => {
 // ------------------------------------------------------ dismissedByBrocard
 
 test('all four passing returns null so the analysis continues', () => {
-  assert.equal(dismissedByBrocard(allPass(), KEYS), null)
+  assert.equal(dismissalOf(allPass(), KEYS), null)
 })
 
 test('a DISMISS ends the stage and quotes the brocard that did it', () => {
   const verdicts = allPass().map((v) =>
     v.key === 'standard-behavior' ? { ...v, verdict: 'DISMISS', evidence: 'RFC 7230 requires it' } : v,
   )
-  const r = dismissedByBrocard(verdicts, KEYS)
+  const r = dismissalOf(verdicts, KEYS)
   assert.equal(r.status, 'DISMISSED')
   assert.match(r.reason, /standard-behavior/)
   assert.match(r.reason, /RFC 7230/)
@@ -103,7 +107,7 @@ test('the reported DISMISS is the first in declaration order, not in return orde
   const verdicts = allPass()
     .map((v) => ({ ...v, verdict: 'DISMISS', evidence: `because ${v.key}` }))
     .reverse()
-  assert.match(dismissedByBrocard(verdicts, KEYS).reason, /from-the-heavens/)
+  assert.match(dismissalOf(verdicts, KEYS).reason, /from-the-heavens/)
 })
 
 // A DISMISS is terminal and a NEEDS_MORE_INFO is not, so when both are present
@@ -116,28 +120,35 @@ test('a DISMISS outranks a NEEDS_MORE_INFO', () => {
     if (v.key === 'cure-worse') return { ...v, verdict: 'DISMISS', evidence: 'the fix breaks every consumer' }
     return v
   })
-  assert.equal(dismissedByBrocard(verdicts, KEYS).status, 'DISMISSED')
+  assert.equal(dismissalOf(verdicts, KEYS).status, 'DISMISSED')
 })
 
-test('NEEDS_MORE_INFO names the missing fact rather than hedging', () => {
+// Carried, not terminal — this is the change the first sweep forced. A cheap test
+// that cannot decide must not end the analysis, because "the cheapest test could
+// not tell" is precisely what the expensive stages exist to resolve. It still has
+// to name the missing fact, because an unactionable open question is the hedge the
+// third verdict was introduced to replace.
+test('NEEDS_MORE_INFO is carried with its missing fact, not made terminal', () => {
   const verdicts = allPass().map((v) =>
     v.key === 'documented-behavior'
       ? { ...v, verdict: 'NEEDS_MORE_INFO', missingFact: 'whether the docs warn about this' }
       : v,
   )
-  const r = dismissedByBrocard(verdicts, KEYS)
-  assert.equal(r.status, 'NEEDS_MORE_INFO')
-  assert.match(r.reason, /whether the docs warn/)
+  assert.equal(dismissalOf(verdicts, KEYS), null, 'must not end the stage')
+  const open = unresolvedOf(verdicts, KEYS)
+  assert.equal(open.length, 1)
+  assert.equal(open[0].key, 'documented-behavior')
+  assert.match(open[0].what, /whether the docs warn/)
 })
 
-test('a NEEDS_MORE_INFO with no missing fact still explains itself', () => {
+test('a carried NEEDS_MORE_INFO with no missing fact still explains itself', () => {
   for (const missingFact of [undefined, '', '   ']) {
     const verdicts = allPass().map((v) =>
       v.key === 'cure-worse' ? { ...v, verdict: 'NEEDS_MORE_INFO', missingFact, evidence: '' } : v,
     )
-    const r = dismissedByBrocard(verdicts, KEYS)
-    assert.equal(r.status, 'NEEDS_MORE_INFO')
-    assert.ok(r.reason && r.reason.trim(), `missingFact ${JSON.stringify(missingFact)} gave an empty reason`)
+    const open = unresolvedOf(verdicts, KEYS)
+    assert.equal(open.length, 1)
+    assert.ok(open[0].what && open[0].what.trim(), `missingFact ${JSON.stringify(missingFact)} gave nothing`)
   }
 })
 
@@ -145,19 +156,22 @@ test('a NEEDS_MORE_INFO with no missing fact still explains itself', () => {
 // returned array instead lets a dead agent shrink the denominator: three passes
 // out of three returned verdicts clears a gate that was supposed to apply four
 // tests, and nothing in the result says a test never ran.
-test('an unevaluated brocard is not a passed one', () => {
+// Tallied against the EXPECTED key list, not against what came back: reading the
+// returned array lets a dead agent shrink the denominator, so three passes out of
+// three RETURNED verdicts would clear a gate meant to apply four tests.
+test('an unevaluated brocard is carried as unknown, never as passed', () => {
   for (const drop of KEYS) {
     const verdicts = allPass().filter((v) => v.key !== drop)
-    const r = dismissedByBrocard(verdicts, KEYS)
-    assert.equal(r.status, 'NEEDS_MORE_INFO', `a missing ${drop} verdict must not clear the gate`)
-    assert.match(r.reason, new RegExp(drop))
+    assert.equal(dismissalOf(verdicts, KEYS), null, 'a dead agent is not a dismissal')
+    const open = unresolvedOf(verdicts, KEYS)
+    assert.deepEqual(open.map((q) => q.key), [drop], `a missing ${drop} verdict must be carried`)
+    assert.match(open[0].what, /never ran|returned nothing/)
   }
 })
 
 test('a dead agent yields null and is counted as unevaluated, not skipped', () => {
-  const r = dismissedByBrocard([null, ...allPass().slice(1)], KEYS)
-  assert.equal(r.status, 'NEEDS_MORE_INFO')
-  assert.match(r.reason, /from-the-heavens/)
+  const open = unresolvedOf([null, ...allPass().slice(1)], KEYS)
+  assert.deepEqual(open.map((q) => q.key), ['from-the-heavens'])
 })
 
 // Found by a graded run, not by this suite. Each brocard is an independent
@@ -176,7 +190,7 @@ test('a DISMISS outranks a dead sibling agent, whichever order they land in', ()
       const verdicts = allPass()
         .filter((v) => v.key !== deadKey)
         .map((v) => (v.key === dismissKey ? { ...v, verdict: 'DISMISS', evidence: 'the spec requires it' } : v))
-      const r = dismissedByBrocard(verdicts, KEYS)
+      const r = dismissalOf(verdicts, KEYS)
       assert.equal(
         r.status,
         'DISMISSED',
@@ -187,18 +201,47 @@ test('a DISMISS outranks a dead sibling agent, whichever order they land in', ()
   }
 })
 
-test('but a dead agent still blocks when nothing dismissed the finding', () => {
-  // The inverse, so the fix above cannot be over-applied into a fail-open: three
-  // PASSes and a corpse is not four PASSes.
-  const r = dismissedByBrocard(allPass().slice(1), KEYS)
+test('but a dead agent is still carried when nothing dismissed the finding', () => {
+  // The inverse, so the fix cannot be over-applied into a fail-open: three PASSes
+  // and a corpse is not four PASSes. It no longer ends the stage, but it does reach
+  // decideVerdict, which blocks a TRUE POSITIVE on it.
+  assert.equal(dismissalOf(allPass().slice(1), KEYS), null)
+  assert.equal(unresolvedOf(allPass().slice(1), KEYS).length, 1)
+})
+
+test('all four passing carries nothing', () => {
+  assert.deepEqual(unresolvedOf(allPass(), KEYS), [])
+})
+
+// The enforcement half. The pre-gate no longer vetoes, so this is what stops an
+// unresolved cheap test from being lost: six passing gates plus one carried
+// question is NEEDS MORE INFO, in code, not a TRUE POSITIVE with a footnote.
+test('an unresolved brocard blocks a TRUE POSITIVE at the verdict', () => {
+  const carried = [{ key: 'documented-behavior', title: 'Brocard 5', what: 'the upstream contract' }]
+  assert.equal(decideVerdict(GATES, []).status, 'TRUE_POSITIVE')
+  const r = decideVerdict(GATES, carried)
   assert.equal(r.status, 'NEEDS_MORE_INFO')
+  assert.match(r.reason, /Brocard 5/)
+  assert.match(r.reason, /upstream contract/)
+})
+
+test('a FAIL still outranks a carried question: the specific answer wins', () => {
+  const carried = [{ key: 'cure-worse', title: 'Brocard 6', what: 'the fix cost' }]
+  const r = decideVerdict({ ...GATES, gateReachability: 'FAIL' }, carried)
+  assert.equal(r.status, 'FALSE_POSITIVE')
+})
+
+test('decideVerdict tolerates a missing or ragged carried list', () => {
+  for (const c of [undefined, null, [], [null]]) {
+    assert.equal(decideVerdict(GATES, c).status, 'TRUE_POSITIVE', JSON.stringify(c))
+  }
 })
 
 test('a DISMISS with no evidence still carries a reason', () => {
   const verdicts = allPass().map((v) =>
     v.key === 'cure-worse' ? { ...v, verdict: 'DISMISS', evidence: '   ' } : v,
   )
-  const r = dismissedByBrocard(verdicts, KEYS)
+  const r = dismissalOf(verdicts, KEYS)
   assert.equal(r.status, 'DISMISSED')
   assert.ok(r.reason.trim().length > 'Brocard cure-worse: '.length)
 })
@@ -598,7 +641,7 @@ test('every gate function is extractable: a rename must fail loudly', () => {
   const names = [
     'missingArgs',
     'selectRoute',
-    'dismissedByBrocard',
+    'triageBrocards',
     'upstreamFixStands',
     'decideGate',
     'missingPrecondition',

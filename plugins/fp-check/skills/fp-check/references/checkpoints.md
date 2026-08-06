@@ -13,7 +13,7 @@ the crosswalk between them, the stages in `SKILL.md`, and the six gates in
 | Stage | Checkpoints | fp-check gate it feeds | Enforced in code by |
 |---|---|---|---|
 | 1a Intake | 1.1, 1.2, 1.3 | 1 Process | `missingArgs` |
-| 1b Cheap pre-gate | brocards 2, 4, 5, 6 — see [brocards.md](brocards.md) | — | `dismissedByBrocard` |
+| 1b Cheap pre-gate | brocards 2, 4, 5, 6 — see [brocards.md](brocards.md) | — | `triageBrocards` |
 | 1c Reachability | 2.1, 2.2 | 2 Reachability | `decideGate`, `alreadyFixedStands` |
 | 1d Recovery | 2.3 | 3 Real Impact | `decideGate(!recovery)` |
 | 1e Impact + severity | 2.4, 2.4b, 2.5, 5.2 | 3 Real Impact, 5 Math Bounds | `missingPrecondition`, `capSeverity` |
