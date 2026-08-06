@@ -160,6 +160,40 @@ test('a dead agent yields null and is counted as unevaluated, not skipped', () =
   assert.match(r.reason, /from-the-heavens/)
 })
 
+// Found by a graded run, not by this suite. Each brocard is an independent
+// falsifiable test and any ONE dismissing is sufficient, so a fourth agent dying
+// cannot unmake an answer another agent already reached. The gate checked
+// liveness first and threw it away: brocard 5 returned a clean DISMISS, one of
+// the other three hit a connection error, and the run reported NEEDS_MORE_INFO
+// about a finding that was already disposed of — then burned the case's whole
+// 1800s budget getting there.
+//
+// Same rule as `decideGate`'s blocking layer outranking a dead recovery agent.
+test('a DISMISS outranks a dead sibling agent, whichever order they land in', () => {
+  for (const deadKey of KEYS) {
+    for (const dismissKey of KEYS) {
+      if (deadKey === dismissKey) continue
+      const verdicts = allPass()
+        .filter((v) => v.key !== deadKey)
+        .map((v) => (v.key === dismissKey ? { ...v, verdict: 'DISMISS', evidence: 'the spec requires it' } : v))
+      const r = dismissedByBrocard(verdicts, KEYS)
+      assert.equal(
+        r.status,
+        'DISMISSED',
+        `${dismissKey} dismissed and ${deadKey} died: the dismissal must stand`,
+      )
+      assert.match(r.reason, new RegExp(dismissKey))
+    }
+  }
+})
+
+test('but a dead agent still blocks when nothing dismissed the finding', () => {
+  // The inverse, so the fix above cannot be over-applied into a fail-open: three
+  // PASSes and a corpse is not four PASSes.
+  const r = dismissedByBrocard(allPass().slice(1), KEYS)
+  assert.equal(r.status, 'NEEDS_MORE_INFO')
+})
+
 test('a DISMISS with no evidence still carries a reason', () => {
   const verdicts = allPass().map((v) =>
     v.key === 'cure-worse' ? { ...v, verdict: 'DISMISS', evidence: '   ' } : v,

@@ -442,20 +442,34 @@ const brocardVerdicts = brocardRaw.filter(Boolean)
 // DISMISS reported here does not hide the others' verdicts.
 function dismissedByBrocard(verdicts, expectedKeys) {
   const byKey = new Map((verdicts || []).filter(Boolean).map((v) => [v.key, v]))
+
+  // A DISMISS is read BEFORE the "did every agent answer" check, and the order is
+  // load-bearing — it is the same rule `decideGate` applies when a blocking layer
+  // outranks a dead recovery agent, and this function originally got it wrong.
+  //
+  // Each brocard is an independent falsifiable test and any ONE of them dismissing
+  // is sufficient, so a fourth agent dying cannot change an answer another agent
+  // has already reached. Checking liveness first threw that answer away: measured,
+  // a graded run had brocard 5 return a clean DISMISS, lost one of the other three
+  // to a connection error, and returned NEEDS_MORE_INFO about a finding that was
+  // already disposed of.
+  for (const key of expectedKeys) {
+    const v = byKey.get(key)
+    if (v && v.verdict === 'DISMISS') {
+      return {
+        status: 'DISMISSED',
+        reason: `${v.title}: ${String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence'}`,
+      }
+    }
+  }
+
+  // Only now does a missing verdict matter: nothing has dismissed the finding, so
+  // an unevaluated test is a test whose answer could still have.
   const unevaluated = expectedKeys.filter((k) => !byKey.has(k))
   if (unevaluated.length > 0) {
     return {
       status: 'NEEDS_MORE_INFO',
       reason: `brocard agent(s) returned nothing for ${unevaluated.join(', ')}; an unevaluated test is not a passed one`,
-    }
-  }
-  for (const key of expectedKeys) {
-    const v = byKey.get(key)
-    if (v.verdict === 'DISMISS') {
-      return {
-        status: 'DISMISSED',
-        reason: `${v.title}: ${String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence'}`,
-      }
     }
   }
   for (const key of expectedKeys) {
