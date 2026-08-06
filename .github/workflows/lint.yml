@@ -84,8 +84,14 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install pytest
-        # The rust-review / c-review test files are pytest-based
-        run: python3 -m pip install pytest
+        # The rust-review / c-review test files are pytest-based.
+        #
+        # pyyaml and jsonschema are required, not nice-to-have: fp-check's suite
+        # imports `yaml` at module scope to read its eval cases and `jsonschema`
+        # to validate the schemas its workflow scripts declare. Without them
+        # those files raise during collection rather than failing informatively.
+        # Keep in step with the Makefile's python-tests target.
+        run: python3 -m pip install pytest pyyaml jsonschema
       - name: Install toolchain dependencies
         # constant-time-analysis tests cross-compile C to aarch64 via
         # `clang --target=aarch64-unknown-linux-gnu`. Without the cross
@@ -142,3 +148,25 @@ jobs:
           done
           echo "Ran ${#dirs[@]} test directory/ies"
           exit "$failed"
+
+  workflow-tests:
+    name: Workflow logic tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "22"
+      - name: Run workflow logic tests
+        # Mirrors the Makefile's workflow-tests target; keep the two in step. The
+        # Python contract layer runs in the python-tests job above — this job
+        # exists for the *.test.mjs logic/wiring layer, which nothing else runs,
+        # and for the guard that a plugin shipping workflows/ has tests at all.
+        #
+        # `node --test` exits 0 on a file with no test() calls and reports it as
+        # one passing test named after its path, so the TAP output is parsed
+        # rather than trusted: a file surfacing as its own top-level entry
+        # asserted nothing and fails the build by name.
+        run: make workflow-tests
