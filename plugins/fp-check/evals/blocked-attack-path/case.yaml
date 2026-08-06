@@ -19,7 +19,7 @@ execution:
     Multi-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis
     calls for it.'
   max_turns: 30
-  timeout_seconds: 900
+  timeout_seconds: 1800
   allowed_tools:
   - Read
   - Glob

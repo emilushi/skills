@@ -1,6 +1,6 @@
 ---
 name: fp-check
-description: "Verifies whether a suspected security bug is real, returning TRUE POSITIVE, FALSE POSITIVE or NEEDS MORE INFO with the evidence behind it. Runs a static verification stage always, and adds online policy checks or a built-and-executed PoC on request. Use when asked whether a finding is real, exploitable, in scope, already fixed, or a false positive, or to triage findings from a scanner or an agentic discovery run — not for hunting new bugs."
+description: "Verifies whether a suspected security bug is real before writing anything up, returning TRUE POSITIVE, FALSE POSITIVE or NEEDS MORE INFO with the evidence behind it. Runs a static verification stage always, and adds online policy checks or a built-and-executed proof-of-concept exploit on request. Use when asked whether a finding is real, exploitable, in scope, already fixed or a false positive; to triage findings from a scanner, a bug bounty submission or an agentic discovery run; and when asked to write a PoC, prove a vulnerability, demonstrate an attack or exploit a bug — those all need the attack path verified first, which is what this does. Not for hunting new bugs."
 allowed-tools: Read Grep Glob LSP Bash Write Edit Workflow AskUserQuestion Task TaskCreate TaskUpdate TaskList TaskGet
 ---
 

@@ -21,7 +21,7 @@ execution:
 
     State the verdict and the deciding evidence in your final response.
   max_turns: 30
-  timeout_seconds: 900
+  timeout_seconds: 1800
   allowed_tools:
   - Read
   - Glob
