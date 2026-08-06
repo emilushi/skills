@@ -554,16 +554,13 @@ GATE_FIELD_CONTRACTS = [
         ("v",),
         {"key", "title"},
     ),
-    # `complete` is read as `=== false`, so an omitted field is `undefined` and the
-    # fix is treated as complete — which is the safe direction here: a partial fix
-    # asserted by omission would retract a finding that is still live.
-    (
-        "triage-static.js",
-        "upstreamFixStands",
-        "HISTORY_SCHEMA",
-        ("historyVerdict",),
-        {"complete"},
-    ),
+    # `complete` was exempt here, on the reasoning that an omitted field reads as
+    # `undefined` and "the fix is treated as complete, which is the safe direction".
+    # That has the direction backwards: treating it as complete is exactly what
+    # RETRACTS the finding, so a partial fix whose agent never set the flag was
+    # discarded whole. It is pinned rather than exempt now, and HISTORY_SCHEMA
+    # requires it.
+    ("triage-static.js", "upstreamFixStands", "HISTORY_SCHEMA", ("historyVerdict",), set()),
     ("triage-static.js", "decideVerdict", "VERDICT_SCHEMA", ("result",), set()),
     # lintOutput decorates a message that already carries its own fallback
     # ('no output captured', pinned in review.test.mjs). Its absence does not
@@ -1451,4 +1448,32 @@ def test_select_route_recognises_every_bug_class_name():
         f"selectRoute routes these bug classes against the decision table "
         f"(got, expected): {wrong}. The orchestrator reads these exact strings out of "
         f"{BUG_CLASS_REFERENCE.name}, so a mismatch is a routing coin flip."
+    )
+
+
+def test_the_band_total_matches_the_challenge_count():
+    """`confidenceBand(defeated, total = N)` must not drift from CHALLENGES.length.
+
+    The total is a defaulted parameter rather than a reference to the array because
+    the unit tests extract this function and evaluate it in isolation, where a free
+    variable is a ReferenceError. That independence is exactly what lets the two
+    numbers drift, so it is pinned here — the same treatment MAX_LAYERS gets.
+
+    It used to be the literal `5` in a `defeated === 5` comparison. A sixth
+    challenge would have made HIGH unreachable and reported every perfect review as
+    MEDIUM, with nothing failing.
+    """
+    src = strip_strings_and_comments((WORKFLOW_DIR / "triage-poc.js").read_text())
+    default = re.search(r"function\s+confidenceBand\(\s*defeated\s*,\s*total\s*=\s*(\d+)\s*\)", src)
+    assert default, "confidenceBand does not take a defaulted `total` parameter"
+    listing = re.search(r"const\s+CHALLENGES\s*=\s*\[", src)
+    assert listing, "CHALLENGES array not found"
+    # Count the `key:` entries in the comment-stripped source, where the strings live.
+    raw = strip_comments((WORKFLOW_DIR / "triage-poc.js").read_text())
+    block = raw[raw.index("const CHALLENGES = [") :]
+    keys = re.findall(r"^\s{4}key: '", block[: block.index("\n]")], re.M)
+    assert keys, "no challenge keys found; this check is grading nothing"
+    assert int(default.group(1)) == len(keys), (
+        f"confidenceBand defaults total to {default.group(1)} but CHALLENGES has {len(keys)} "
+        f"entries; HIGH becomes unreachable when they disagree"
     )

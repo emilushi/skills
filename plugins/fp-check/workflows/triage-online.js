@@ -59,7 +59,7 @@ const SCOPE_SCHEMA = {
 const PAST_BUGS_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['result', 'coverage', 'evidence'],
+  required: ['result', 'coverage', 'duplicate', 'evidence'],
   properties: {
     result: { enum: ['nothing', 'similar-bugs-found'] },
     coverage: {
@@ -70,6 +70,10 @@ const PAST_BUGS_SCHEMA = {
     similarity: { type: 'string', description: 'trigger, actor, impact, component and policy match' },
     historicalSeverity: { type: 'string' },
     recommendedSeverity: { enum: ['Critical', 'High', 'Medium', 'Low', 'Informational', 'Unknown'] },
+    // Required, because the terminal DUPLICATE outcome branches on it and
+    // `required` is the only thing the runtime validator enforces. Omitted, it
+    // reads as `undefined` — falsy — so a genuine duplicate the agent found but
+    // did not flag is reported as a live finding.
     duplicate: { type: 'boolean', description: 'this exact bug is already publicly reported' },
     evidence: { type: 'string' },
   },
@@ -117,15 +121,24 @@ function missingArgs(a) {
 
   // Statuses from triage-static that Stage 2 can still act on. A finding already
   // dismissed on the code does not need a policy check, and running one anyway
-  // invites the online evidence to argue a dead finding back to life; OUT_OF_SCOPE
-  // is here because a DECLARED scope is exactly what a published policy can
-  // overturn.
+  // invites the online evidence to argue a dead finding back to life.
+  //
+  // OUT_OF_SCOPE was on this list, because a DECLARED scope is exactly what a
+  // published policy can overturn. It cannot be honoured: triage-static decides
+  // OUT_OF_SCOPE inside `decideGate`, BEFORE the impact agent is dispatched, so the
+  // payload it returns carries no `impact` and no `severity` — and the two `need`
+  // calls below require both, because all three prompts here interpolate them and a
+  // Stage 2 run on an unverified impact would tell its agents "Stage 1 already
+  // traced the path in the code" when it did not. So every dispatch the entry
+  // invited was refused four lines later by a rejection that named OUT_OF_SCOPE as
+  // acceptable. Overturning a declared scope means re-running Stage 1 with the
+  // corrected `scope` arg, which is where that input lives.
   //
   // Inline rather than a module const: the tests extract this function and
   // evaluate it alone, where a free variable is a ReferenceError. The alternative
   // — the test carrying its own copy of the list — lets the two disagree silently
   // about which findings Stage 2 will touch.
-  const actionable = ['TRUE_POSITIVE', 'NEEDS_MORE_INFO', 'OUT_OF_SCOPE']
+  const actionable = ['TRUE_POSITIVE', 'NEEDS_MORE_INFO']
   const status = (a && a.verification && a.verification.status) || ''
   if (!actionable.includes(status)) {
     missing.push(
@@ -256,6 +269,20 @@ Cite a link for every material claim.`,
   { label: 'reachability', phase: 'Scope', schema: SCOPE_SCHEMA, effort: 'medium' },
 )
 
+// The only agent result here that was read without a guard, and the reason it needs
+// one is not symmetry: `reachability.evidence` is interpolated into the two prompts
+// below and into the summary, so a dead agent threw a TypeError out of the workflow
+// instead of returning a status. That is not a fail-closed outcome — the
+// orchestrator is left holding a user request for a triage with no verdict to
+// relay, and this plugin's worst measured failure is exactly that shape: the gate
+// stops, and the analysis happens by hand outside it. BLOCKED, matching scopeHalt's
+// answer to a dead scope agent: nothing was read, so nothing can be claimed.
+if (!reachability) {
+  const why = 'the reachability agent returned nothing; public call sites, actors and preconditions are unverified'
+  log(`BLOCKED: ${why}`)
+  return { status: 'BLOCKED', reason: why, policy }
+}
+
 const scope = await agent(
   `Does this finding fit the project's published threat model?
 
@@ -265,6 +292,12 @@ Component: ${finding.component}
 Claimed impact: ${finding.claimedImpact}
 Impact established offline: ${verification.impact.impact}
 Severity so far: ${verification.severity}
+
+Read ${baseDir}/references/validation-dimensions.md before you decide. Its scope
+red flags are the ones that matter here — infrastructure outside the stated focus,
+a shared library spanning several systems, a component that does not match the
+declared objectives — and its rule that an ambiguous scope is UNCERTAIN rather
+than YES is the same asymmetry this verdict is built on.
 
 The policy, as read in the previous step:
   in scope: ${policy.inScopeClasses}
@@ -357,8 +390,19 @@ the link.`,
 const searched = pastBugs.filter(Boolean)
 
 const attempted = Math.min(sources.length, MAX_SOURCES)
-if (sources.length > MAX_SOURCES) {
-  log(`${sources.length - MAX_SOURCES} source(s) beyond the cap of ${MAX_SOURCES} were NOT searched.`)
+
+// The venues the cap dropped, by name and carried rather than logged. A log is not
+// something any consumer reads: the summary prompt below is built from `attempted`,
+// so a 9-source dispatch told the summary agent about 6 venues and said nothing
+// about the other 3, and the agent has no way to tell a venue that was never
+// dispatched from one that came back clean. That is the same "an absent duplicate
+// check becomes a clean bill of health" that `unsearched` exists to stop, arriving
+// by the other route. Kept separate from `unsearched` because they are different
+// facts — never dispatched, versus dispatched and dead — and the summary is told
+// both.
+const beyondCap = sources.slice(MAX_SOURCES).map((s) => s.label)
+if (beyondCap.length > 0) {
+  log(`${beyondCap.length} source(s) beyond the cap of ${MAX_SOURCES} were NOT searched: ${beyondCap.join(', ')}`)
 }
 
 // A source whose agent died was not searched, and "not searched" must never be
@@ -379,6 +423,13 @@ phase('Summary')
 
 const duplicates = searched.filter((r) => r.duplicate)
 
+// What a duplicate is relayed with, in the summary prompt and in the DUPLICATE
+// return. Trimmed and in one place: `links` is optional and `required` checks
+// presence rather than content, so `links: '   '` is schema-valid AND truthy — it
+// displaced the `evidence` it was meant to fall back to, and the retraction went out
+// citing blank space. DUPLICATE is terminal, so that citation is the deliverable.
+const dupCite = (r) => String(r.links || '').trim() || String(r.evidence || '').trim() || 'no link or evidence given'
+
 const summary = await agent(
   `Write the online triage summary. Everything below was gathered by agents that
 each saw one narrow question.
@@ -395,10 +446,11 @@ Policy sources: ${policy.sourcesRead}
 Public reachability: ${reachability.evidence}
 Unknowns that would change it: ${reachability.eligibilityCaveats || 'none recorded'}
 
-Past-bug searches, ${searched.length} of ${attempted} source(s) returned a result:
+Past-bug searches, ${searched.length} of ${attempted} dispatched source(s) returned a result:
   ${searched.map((r) => `${r.source}: ${r.result}${r.recommendedSeverity && r.recommendedSeverity !== 'Unknown' ? ` → ${r.recommendedSeverity}` : ''} — ${r.similarity || r.evidence} [coverage: ${r.coverage}]`).join('\n  ')}
 ${unsearched.length ? `NOT searched, because those agents returned nothing — treat these venues as unchecked, not as clear:\n  ${unsearched.join('\n  ')}` : ''}
-${duplicates.length ? `Reported as an existing public duplicate:\n  ${duplicates.map((r) => `${r.source}: ${r.links || r.evidence}`).join('\n  ')}` : 'No source reported this as an existing duplicate.'}
+${beyondCap.length ? `NOT searched, because they were beyond the cap of ${MAX_SOURCES} and no agent was dispatched — unchecked, not clear:\n  ${beyondCap.join('\n  ')}` : ''}
+${duplicates.length ? `Reported as an existing public duplicate:\n  ${duplicates.map((r) => `${r.source}: ${dupCite(r)}`).join('\n  ')}` : 'No source reported this as an existing duplicate.'}
 
 Give the final severity recommendation and the reasoning that gets you there,
 mapping the reachability facts onto the policy clauses. Where the online evidence
@@ -423,14 +475,18 @@ function summaryProblem(result) {
   return null
 }
 
-const summaryIssue = summaryProblem(summary)
-if (summaryIssue) {
-  log(`NEEDS_MORE_INFO: ${summaryIssue}`)
-  return { status: 'NEEDS_MORE_INFO', reason: summaryIssue, policy, reachability, scope, pastBugs: searched, unsearched }
-}
-
+// BEFORE the summary's own gate, and the order is load-bearing. A duplicate is a
+// fact a past-bug agent established with a link; the summary agent's job is to write
+// it up, and its failure to do so cannot unmake it. The other way round, the single
+// most likely summary defect — an empty `openQuestions`, which is why that gate
+// exists at all — downgraded "already publicly reported at GHSA-x" to
+// NEEDS_MORE_INFO, discarding a terminal answer the stage had already paid for and
+// sending the next reader to buy it again.
+//
+// `summary` is still returned, and may be null or incomplete: the duplicate finding
+// does not depend on it.
 if (duplicates.length > 0) {
-  const where = duplicates.map((r) => `${r.source}: ${r.links || r.evidence}`).join('; ')
+  const where = duplicates.map((r) => `${r.source}: ${dupCite(r)}`).join('; ')
   log(`DUPLICATE: already publicly reported — ${where}`)
   return {
     status: 'DUPLICATE',
@@ -440,7 +496,23 @@ if (duplicates.length > 0) {
     scope,
     pastBugs: searched,
     unsearched,
+    beyondCap,
     summary,
+  }
+}
+
+const summaryIssue = summaryProblem(summary)
+if (summaryIssue) {
+  log(`NEEDS_MORE_INFO: ${summaryIssue}`)
+  return {
+    status: 'NEEDS_MORE_INFO',
+    reason: summaryIssue,
+    policy,
+    reachability,
+    scope,
+    pastBugs: searched,
+    unsearched,
+    beyondCap,
   }
 }
 
@@ -453,5 +525,6 @@ return {
   scope,
   pastBugs: searched,
   unsearched,
+  beyondCap,
   summary,
 }

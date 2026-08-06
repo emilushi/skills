@@ -10,7 +10,7 @@ Three stages in a fixed order, behind two questions asked once up front.
 | Stage | When | What it does |
 |---|---|---|
 | **1 Static** | always | brocard pre-gate → one agent per validation layer → recovery → already-fixed search → impact and severity → adversarial pass → the six gates |
-| **2 Online** | on request | the project's published policy, bounty scope, past reports and downstream users. Fails closed when offline |
+| **2 Online** | on request | the project's published policy, how the bug is reached in the published project, bounty scope, and one agent per named venue searching for past reports and duplicates. Fails closed when offline |
 | **3 PoC** | on request | build the exploit against the real code in an isolated worktree, execute it, then five agents that did not build it try to reject it |
 
 **Stage 1 alone reaches a verdict.** Stages 2 and 3 can only narrow or correct
@@ -106,8 +106,11 @@ less cost.
 **Deep** adds three proofs — API contracts and environmental protections, the
 algebraic bounds proof, and race feasibility — and runs the full 13
 devil's-advocate questions instead of the 7-question spot check. It fires
-automatically on 3+ validation layers, on a concurrency or bounds bug class, and
-on an explicitly cross-component or ambiguous claim.
+automatically on 3+ validation layers, on a memory-safety, arithmetic,
+concurrency or availability bug class (the Route column of
+[bug-class-verification.md](skills/fp-check/references/bug-class-verification.md)
+is the authoritative list, and the tests pin `selectRoute` against it), and on an
+explicitly cross-component or ambiguous claim.
 
 ## Testing
 

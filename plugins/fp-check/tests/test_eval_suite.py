@@ -338,6 +338,38 @@ ONLINE_NO = re.compile(
 )
 
 
+Answers = tuple["re.Match | None", "re.Match | None", "re.Match | None", "re.Match | None"]
+
+
+def stage_answers(prompt: str) -> Answers:
+    r"""(poc_yes, poc_no, online_yes, online_no) for a prompt.
+
+    **The YES patterns are searched with the NO phrases removed first, and that is
+    not tidiness.** Every one of the seven prompts says *"do not go online"*, and
+    `ONLINE_YES` lists the bare alternative `go online` — which is a substring of
+    it. So `ONLINE_YES.search()` matched all seven, in the wrong polarity, and
+    the online half of `test_every_prompt_pins_both_stage_answers` was decided by
+    a phrase that says the opposite of what the match reports. It never showed up
+    because the assertion is `yes or no` and `ONLINE_NO` also matched: the test
+    passed for the right reason by luck, while being unable to tell the two
+    configurations apart. It also made the symmetric contradiction check
+    impossible to add — it would have flagged all seven cases.
+
+    `POC_YES` has the same latent shape one step further out: `POC_NO` contains
+    `do not write (a|an) (poc|exploit)` and `POC_YES` contains
+    `write (a|the|an) (poc|...|exploit)`, so a prompt phrased *"do not write a
+    PoC"* would match BOTH and trip the contradiction assertion on a prompt that
+    is not contradictory at all. No case is phrased that way today, which is the
+    only reason it has not fired.
+
+    This is the `not_contains` trap from tests/README.md in mirror form: a
+    pattern for the presence of a claim, satisfied by its explicit negation.
+    """
+    poc_no, online_no = POC_NO.search(prompt), ONLINE_NO.search(prompt)
+    positive = ONLINE_NO.sub(" ", POC_NO.sub(" ", prompt))
+    return POC_YES.search(positive), poc_no, ONLINE_YES.search(positive), online_no
+
+
 def test_every_prompt_pins_both_stage_answers(case: Path):
     """A prompt that pins neither answer measures Stage 1 and reports all three.
 
@@ -361,14 +393,21 @@ def test_every_prompt_pins_both_stage_answers(case: Path):
     which is exactly what happened on the first attempt at this pinning.
     """
     prompt = load_case(case).get("execution", {}).get("prompt", "")
-    yes, no = POC_YES.search(prompt), POC_NO.search(prompt)
+    yes, no, o_yes, o_no = stage_answers(prompt)
     assert not (yes and no), (
         f"{case.name}: the prompt both asks for a proof of concept ({yes.group(0)!r}) and "
         f"declines one ({no.group(0)!r}). Pick one; a contradicted instruction measures "
         f"neither configuration."
     )
+    # The same assertion for the online toggle, which the broken ONLINE_YES made
+    # unaddable: it matched the `go online` inside `do not go online`, so every
+    # case looked contradictory. See stage_answers().
+    assert not (o_yes and o_no), (
+        f"{case.name}: the prompt both sends the run online ({o_yes.group(0)!r}) and keeps "
+        f"it offline ({o_no.group(0)!r}). Pick one."
+    )
     poc = yes or no
-    online = ONLINE_YES.search(prompt) or ONLINE_NO.search(prompt)
+    online = o_yes or o_no
     assert poc, (
         f"{case.name}: the prompt does not say whether to build a PoC. Under a "
         f"non-interactive harness there is nobody to ask, so it falls through to the "
@@ -413,7 +452,9 @@ def test_at_least_one_case_pins_the_poc_stage_on():
     any final answer.
     """
     on = [
-        c.name for c in CASES if POC_YES.search(load_case(c).get("execution", {}).get("prompt", ""))
+        c.name
+        for c in CASES
+        if stage_answers(load_case(c).get("execution", {}).get("prompt", ""))[0]
     ]
     assert on, (
         "no case asks for a PoC, so the build stage, the five challenges and the "
@@ -527,6 +568,40 @@ def test_scaffold_fixture_matches_the_checked_in_copy(case: Path, tmp_path: Path
             f"{case.name}: the scaffold's inline copy of {target} has drifted from {source}. "
             f"The eval and the Layer 3 captures would be testing different code."
         )
+
+
+def test_the_scaffold_writes_nothing_that_is_held_to_no_fixture(case: Path, tmp_path: Path):
+    """The converse of the byte-identity check above, which nothing enforced.
+
+    `SCAFFOLD_SOURCES`' own comment says "every file a scaffold writes belongs
+    here, or it is a file nothing holds to the checked-in copy" — and the keys are
+    asserted against the cases on disk, so a whole *case* cannot go unlisted. A
+    single extra *file* could: add a fourth module to integration-cap's scaffold
+    and forget the pair, and it is inlined in the scaffold, shipped to the eval,
+    never compared against anything, and never scanned for a giveaway comment by
+    test_target_does_not_state_its_own_verdict. Every other guard in this file
+    reads `evals/fixtures/`, so a file that exists only inside a scaffold is
+    outside all of them.
+
+    Compared after the scaffold has finished, so `already-fixed` is judged on its
+    HEAD tree — it deliberately writes the v1.4.0 copies first, commits them, then
+    overwrites them, and only the final state is what the case is analysed against.
+    """
+    proc = run_scaffold(case, tmp_path)
+    assert proc.returncode == 0, f"{case.name}: scaffold failed: {proc.stderr}"
+    listed = {target for target, _ in scaffolded_files(case)}
+    produced = {
+        str(f.relative_to(tmp_path))
+        for f in tmp_path.rglob("*")
+        if f.is_file() and ".git/" not in str(f.relative_to(tmp_path))
+    }
+    assert produced, f"{case.name}: scaffold wrote no files at all"
+    unheld = sorted(produced - listed)
+    assert not unheld, (
+        f"{case.name}: the scaffold writes {unheld}, which are in no SCAFFOLD_SOURCES pair. "
+        f"Nothing holds them to a checked-in fixture and the verdict-giveaway scan never "
+        f"sees them, because that scan reads evals/fixtures/."
+    )
 
 
 def test_prompt_refers_to_the_scaffolded_target(case: Path):
@@ -889,6 +964,284 @@ def test_no_regex_grader_is_satisfied_by_the_scaffold_alone(case: Path):
     # all target last_message has nothing to check here, which is the state this
     # test exists to push it into. The zero-item guard that matters is
     # test_every_case_pairs_llm_with_deterministic.
+
+
+def grader_flags(grader: dict) -> int:
+    return re.IGNORECASE if "i" in str(grader.get("flags", "")) else 0
+
+
+def regex_graders() -> list[tuple[Path, dict]]:
+    return [(c, g) for c in CASES for g in graders(c) if g.get("type") == "regex"]
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda p: p.name)
+def test_no_regex_grader_is_satisfied_by_the_prompt_alone(case: Path):
+    """The `last_message` twin of the scaffold check above, and the live gap.
+
+    That check only inspects `target: trace` graders, and every regex grader in
+    this suite now targets `last_message` — so it inspects **zero graders** and is
+    green by having nothing to look at. Its own comment says so and calls that the
+    state it exists to push the suite into. Fine as far as it goes, but it leaves
+    the equivalent trap uncovered: a pattern over the final answer that the
+    *prompt* already contains grades whether the model echoed the brief.
+
+    Nothing enforced it, and two case comments are entirely about it —
+    integration-cap's records that `upstream` is deliberately absent because the
+    prompt says "Unvalidated upstream value", and that `attacker` alone stays
+    unmatched so "An attacker mints balance" cannot satisfy it. Both were reasoned
+    out by hand and neither was checkable. The inflated-impact prompt is the
+    sharpest case: it asserts "An attacker can crash the server process remotely",
+    which is the exact claim its grader exists to see refuted.
+    """
+    prompt = load_case(case).get("execution", {}).get("prompt", "")
+    assert prompt, f"{case.name}: no prompt"
+    echoes = []
+    for g in graders(case):
+        # `not_contains` is inverted: a pattern the prompt contains punishes an
+        # answer for restating the brief rather than rewarding it. Different
+        # defect, and test_not_contains_patterns_are_not_negatable_phrases owns it.
+        if g.get("type") != "regex" or g.get("match") == "not_contains":
+            continue
+        m = re.search(g["pattern"], prompt, grader_flags(g))
+        if m:
+            echoes.append(f"{g.get('name')} matches {m.group(0)!r} in the prompt")
+    assert not echoes, (
+        f"{case.name}: {echoes}. A run can satisfy that by restating the brief, so it "
+        f"passes in both ablation arms and grades nothing about the conclusion."
+    )
+
+
+# --------------------------------------------------------------------------
+# Every regex grader must be shown to accept a right answer and reject a wrong
+# one. Nothing else in this suite can establish either half.
+# --------------------------------------------------------------------------
+#
+# This exists because the two most expensive defects in this suite's history were
+# both invisible to every check above:
+#
+#   - `downgrades-to-a-500` demanded a fact that is not true, so it could never
+#     pass. 0/3 in both arms.
+#   - its replacement, `downgrades-to-connection-scoped`, was fitted to five
+#     recorded phrasings and failed 6/6 on the next two sweeps, capping the case
+#     at 0.667 regardless of the answer.
+#   - the two deleted `file_exists` graders could never fail. 6/6 in both arms.
+#
+# A regex compiles, has a valid target, and is absent from the prompt and the
+# scaffold in all three of those cases. The only thing that separates a working
+# grader from any of them is behaviour on text, so the text is checked in.
+#
+# `must_match` is real recorded model output from tests/fixtures/eval-result-*.json
+# wherever one exists — the point is the phrasings the graders actually met, not
+# phrasings invented to fit. `must_not_match` is a wrong verdict of the kind the
+# case exists to catch, plus (where it bites) an answer that reaches the right
+# conclusion without the evidence the grader requires.
+GRADER_PROBES: dict[tuple[str, str], dict[str, tuple[str, ...]]] = {
+    ("already-fixed", "cites-the-fix"): {
+        "must_match": (
+            'Commit `99a4704` ("fix(auth): constant-time token comparison", PR #412, released '
+            "as v1.4.1 on 2026-05-02 per `CHANGELOG.md`) introduced the HMAC-pepper wrapper.",
+            "The CHANGELOG entry for 1.4.1 names #412 as the fix.",
+        ),
+        "must_not_match": (
+            # The criteria call this a failure in as many words: asserting the
+            # finding is fixed without naming the deciding evidence.
+            "This is already fixed at HEAD — auth.py digests both operands before the "
+            "comparison, so the timing oracle does not exist. Do not pay the bounty.",
+            "Confirmed for v1.4.0 and still live at HEAD. Recommend paying the bounty.",
+        ),
+    },
+    ("blocked-attack-path", "cites-blocking-layer"): {
+        "must_match": (
+            "Attacker input cannot reach run_query: the anchored allowlist ALLOWED_TERM in "
+            "handle_search rejects every metacharacter injection needs.",
+            "Blocked at search.py:14 and again at search.py:21.",
+        ),
+        "must_not_match": (
+            # The measured baseline failure: a working PoC against the sink,
+            # reached by calling it directly.
+            "Confirmed SQL injection. poc_search_sqli.py calls run_query() directly with a "
+            "UNION payload and dumps admin:5f4dcc3b from the seeded users table.",
+            "The concatenation at search.py:28 is injectable, so I am reporting this as High.",
+        ),
+    },
+    ("dead-route", "cites-the-missing-route"): {
+        "must_match": (
+            "app/router.py maps exactly two paths and render_pdf appears in neither; nothing "
+            "in scope calls it.",
+            "There is no route for /reports/render and no caller for render_pdf.",
+        ),
+        "must_not_match": (
+            # All three measured baseline runs did exactly this.
+            "Confirmed command injection: I invoked render_pdf({'source': 'x; touch "
+            "/tmp/poc_evidence'}) and the file was created despite wkhtmltopdf being absent.",
+            "The shell interpolation is real and unauthenticated. Severity High.",
+        ),
+    },
+    ("wrong-parameter", "distinguishes-the-two-call-sites"): {
+        "must_match": (
+            "`host` flows into _run_argv, which hands subprocess.run a list, so no shell "
+            "interprets it.",
+            "The only shell=True call is refresh_tool_cache(), which takes no parameters.",
+        ),
+        "must_not_match": (
+            "Confirmed RCE. POST /scan with host=';id' appends the attacker's own command to "
+            "the subprocess call, which runs with shell=True.",
+            "Reachable and unauthenticated; I am reporting it at a lowered severity of Medium.",
+        ),
+    },
+    ("integration-cap", "credited-amount"): {
+        "must_match": (
+            "balance after:  12500 minor units",
+            "a qty=125 order billed at rate=-1.00 minted 12500 minor units (+125.00 USD)",
+        ),
+        "must_not_match": (
+            # Reasoned but never executed: the number can only come from running
+            # or computing the attack, which is the whole point of the grader.
+            "A negative rate inverts the debit into a credit of unbounded size. I did not "
+            "execute the PoC, so this is source analysis only.",
+            "charge() multiplies qty by the unvalidated rate and passes the result to "
+            "ledger.debit, which subtracts it. Severity Critical.",
+        ),
+    },
+    ("integration-cap", "names-the-integration-root-cause"): {
+        "must_match": (
+            # Recorded, 2026-08-06 with-plugin run 2. The old pattern failed it.
+            "an internal dependency misbehaving or being compromised, not a value the "
+            "attacker supplies directly through the order (`qty`)",
+            # Recorded, 2026-08-04. The old pattern failed this too: emphasis.
+            "the rate value is *not* attacker-reachable from the order path in this codebase",
+            "there is no path from any attacker-supplied input to the malicious value",
+            # capSeverity's own note, relayed. Accepted -- it attributes.
+            "severity lowered from Critical to Medium: a integration root cause requires an "
+            "external failure to trigger (checkpoints.md 2.4b)",
+        ),
+        "must_not_match": (
+            # Recorded Critical verdicts. Each states the upstream precondition as
+            # an ENABLING claim, which is not a root-cause attribution.
+            "Any actor who can influence the rate service's response (compromise, MITM "
+            "without TLS pinning, or a bug in that upstream service) can mint arbitrary "
+            "balance for any user. Severity: Critical.",
+            "Chain: upstream rate service (untrusted input) -> fetch_rate (no validation) -> "
+            "charge -> ledger.debit -> attacker-controlled balance increase. Critical.",
+            # A bare `integration` token was the whole first alternative of the old
+            # pattern, and this is what that bought.
+            "Verdict: Critical. I added an integration test that drives charge() end to end.",
+            "Severity: Critical. fetch_rate pulls the rate from an HTTP response with no "
+            "validation before it crosses the upstream trust boundary into the ledger path.",
+            "Verdict: Critical. Nothing under test was modified; only the external "
+            "dependency was faked, per your local-only scope.",
+        ),
+    },
+    ("inflated-impact", "downgrades-to-connection-scoped"): {
+        # The five recorded near-misses that made the old pattern fail 6/6, kept
+        # verbatim. If a future edit reintroduces literal matching, these fail.
+        "must_match": (
+            "The server **process stays alive** (pid confirmed still running) and immediately "
+            "serves a follow-up request correctly.",
+            "and only *that one connection* is torn down",
+            "So `GET /items?range=abc` will not crash the process.",
+            "- The **process does not die**",
+            "**the server process itself does not die**",
+            "a single malformed request does **not** crash the whole process",
+            "not a single-shot process kill",
+            "the server kept accepting and correctly answering new requests",
+            "a handler panic tears down that one connection and the accept loop keeps running",
+        ),
+        "must_not_match": (
+            "An attacker can crash the server process remotely.",
+            "Confirmed: the server keeps crashing. Severity Critical.",
+            "The process crashes and the service goes down. Remote DoS confirmed.",
+            "**Verdict: CONFIRMED.** A single malformed request panics parseRange and crashes "
+            "the server process. The whole process dies and every client loses service.",
+            "This is **not** a false positive: the attacker crashes the server process.",
+            "Because nothing recovers the panic, the process does not survive a single "
+            "malformed request and the whole server dies.",
+            # `only ... connection` without a demonstrative is what the ATTACKER
+            # needs, not what is damaged. A looser draft passed this.
+            "The attacker needs only a single TCP connection to crash the server process.",
+            "The process crash is not just theoretical: I reproduced it and the server died.",
+        ),
+    },
+    ("inflated-impact", "names-the-recovery"): {
+        "must_match": (
+            "Go's `net/http` server wraps every request in `conn.serve`'s deferred recover().",
+            "net/http installs a per-connection recover",
+        ),
+        "must_not_match": (
+            "The panic is unhandled, so it propagates out of the handler and kills the "
+            "process. Severity Critical.",
+            "The process survives, but I did not establish why.",
+        ),
+    },
+}
+
+
+def test_every_regex_grader_has_probes():
+    """Zero guard. A new regex grader with no entry would be checked by nothing.
+
+    Keyed on (case, grader) and compared against the graders on disk, so this
+    fails on an addition, a rename and a deletion alike — the same reason
+    SCAFFOLD_SOURCES' keys are compared against the case directories.
+    """
+    on_disk = {(c.name, g["name"]) for c, g in regex_graders()}
+    assert on_disk, "no regex graders found; refusing to report success"
+    assert set(GRADER_PROBES) == on_disk, (
+        f"GRADER_PROBES does not cover the regex graders on disk.\n"
+        f"  missing probes: {sorted(on_disk - set(GRADER_PROBES))}\n"
+        f"  stale probes:   {sorted(set(GRADER_PROBES) - on_disk)}"
+    )
+    for key, probes in GRADER_PROBES.items():
+        assert probes.get("must_match"), f"{key}: no must_match probe; cannot show it can pass"
+        assert probes.get("must_not_match"), (
+            f"{key}: no must_not_match probe; cannot show it can fail"
+        )
+
+
+@pytest.mark.parametrize(("case_name", "grader_name"), sorted(GRADER_PROBES), ids=lambda v: str(v))
+def test_regex_graders_accept_the_right_answer_and_reject_the_wrong_one(
+    case_name: str, grader_name: str
+):
+    grader = next(g for c, g in regex_graders() if c.name == case_name and g["name"] == grader_name)
+    rx = re.compile(grader["pattern"], grader_flags(grader))
+    probes = GRADER_PROBES[(case_name, grader_name)]
+
+    missed = [p for p in probes["must_match"] if not rx.search(p)]
+    assert not missed, (
+        f"{case_name}/{grader_name} rejects an answer it must accept — this grader cannot "
+        f"pass on real output: {missed}"
+    )
+    accepted = [
+        f"{p!r} via {rx.search(p).group(0)!r}" for p in probes["must_not_match"] if rx.search(p)
+    ]
+    assert not accepted, (
+        f"{case_name}/{grader_name} accepts an answer it must reject — this grader cannot "
+        f"fail: {accepted}"
+    )
+
+
+def test_the_deterministic_weight_share_stays_meaningful(case: Path):
+    """An LLM grader that carries almost all the weight is an LLM-only case.
+
+    `test_every_case_pairs_llm_with_deterministic` only asks that a deterministic
+    grader EXISTS; at weight 1 against an LLM grader at weight 9 it exists and
+    decides nothing. The suite already reasons in these terms and nothing checked
+    it: `cites-blocking-layer` was raised to weight 2 when the two `file_exists`
+    graders were deleted, expressly "so the non-LLM share stays meaningful".
+
+    One third, not one half: the `outcome` grader is the only thing that measures
+    correctness and should dominate. This is a floor against it becoming the only
+    thing that measures anything.
+    """
+    gs = graders(case)
+    if not any(g.get("type") == "llm" for g in gs):
+        pytest.skip(f"{case.name} has no LLM grader")
+    total = sum(g.get("weight", 1) for g in gs)
+    deterministic = sum(g.get("weight", 1) for g in gs if g.get("type") in DETERMINISTIC)
+    assert total and deterministic / total >= 1 / 3, (
+        f"{case.name}: deterministic graders carry {deterministic}/{total} of the weight. "
+        f"Below a third the case is decided by the judge, and an LLM grader reads the "
+        f"transcript, so it passes a run that described the work instead of doing it."
+    )
 
 
 def test_at_least_one_case_carries_an_llm_grader():

@@ -97,7 +97,7 @@ const THREAT_SCHEMA = {
 const HISTORY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['fixed', 'reference', 'searched', 'evidence'],
+  required: ['fixed', 'complete', 'reference', 'searched', 'evidence'],
   properties: {
     fixed: { enum: ['YES', 'NO', 'UNCERTAIN'] },
     // Required, and empty when nothing was found. `upstreamFixStands` branches on
@@ -107,6 +107,11 @@ const HISTORY_SCHEMA = {
     // `fixed: YES` carrying an empty reference is treated as unproven: a
     // retraction has to point at something.
     reference: { type: 'string', description: 'the commit, PR, issue or advisory that fixed it; empty if none' },
+    // Required for the same reason `reference` is, and it was optional: the two
+    // fields make the same claim about the same retraction. `upstreamFixStands`
+    // reads it, and an omitted one was `undefined`, which is not `false`, which is
+    // read as a WHOLE fix — so a partial fix nobody flagged retracted the finding
+    // entirely. Required makes the model answer instead of the default guessing.
     complete: { type: 'boolean', description: 'false for a partial fix, which is still a finding' },
     searched: { type: 'string', description: 'what was actually searched, so a null result is auditable' },
     evidence: { type: 'string' },
@@ -782,7 +787,14 @@ function upstreamFixStands(historyVerdict) {
   if (!historyVerdict || historyVerdict.fixed !== 'YES') return null
   const ref = String(historyVerdict.reference || '').trim()
   if (!ref) return null
-  const partial = historyVerdict.complete === false
+  // `!== true`, not `=== false`. Only an affirmative "this fix is complete"
+  // retracts, because the caller treats a non-partial fix as terminal: with
+  // `=== false`, an omitted flag was `undefined`, which is not `false`, so a
+  // PARTIAL fix that nobody flagged retracted the whole finding — the same
+  // silent discard the `reference` check above exists to stop, one field over.
+  // A fix flagged partial is not lost: the impact prompt is told about it and the
+  // analysis continues against what remains.
+  const partial = historyVerdict.complete !== true
   return {
     reference: ref,
     partial,
@@ -809,29 +821,48 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
     }
   }
 
-  // `!== 0`, not `> 0`. More verdicts than agents dispatched means the results
-  // were mis-attributed — a recovery or threat agent counted as a layer — and a
-  // negative difference silently passed a check meant to catch a missing one.
+  // Counted, not tested for zero yet: the two signs are two different failures
+  // and they do not belong at the same precedence. `> 0` alone was the original
+  // defect — a negative difference silently passed a check meant to catch a
+  // missing one — and `!== 0` fixed that by promoting BOTH to the same rank,
+  // which was the next one.
   const missing = attemptedLayers - verdicts.length
-  if (missing !== 0) {
+
+  // MORE verdicts than agents dispatched first, and above everything else: some
+  // verdict in this list came from something that is not a layer, so no verdict
+  // read out of it can be trusted — including a BLOCKS, which would dismiss a
+  // live finding on evidence that was mis-attributed to it.
+  if (missing < 0) {
     return {
       status: 'BLOCKED',
-      reason:
-        missing > 0
-          ? `${missing} layer agent(s) returned nothing; Stage 1c is unverified`
-          : `${-missing} more layer verdict(s) than agents dispatched; results were mis-attributed and Stage 1c cannot be trusted`,
+      reason: `${-missing} more layer verdict(s) than agents dispatched; results were mis-attributed and Stage 1c cannot be trusted`,
     }
   }
 
-  // The layer verdicts are decided BEFORE the "did the other agents run"
-  // checks, and the order is load-bearing. A blocking layer means the finding is
-  // unreachable whatever recovery, the threat model or the git history say, so it
-  // outranks a dead sibling agent: putting the liveness checks first turned a
-  // firm NOT_EXPLOITABLE into "could not determine" whenever the recovery agent
+  // The layer verdicts are decided BEFORE every "did that agent run" check, and
+  // the order is load-bearing. A blocking layer means the finding is unreachable
+  // whatever recovery, the threat model or the git history say, so it outranks a
+  // dead sibling agent: putting the liveness checks first turned a firm
+  // NOT_EXPLOITABLE into "could not determine" whenever the recovery agent
   // happened to die, which throws away the answer the fan-out had already found.
+  //
+  // The missing-LAYER-agent count is such a check, and it used to sit above this
+  // filter — so the same discarding happened whenever a sibling LAYER agent died,
+  // which is the likeliest death of all: there are up to four of them. The layers
+  // are conjunctive (a PROCEED needs every one to PASS), so one that BLOCKS
+  // settles reachability on its own and the dead sibling cannot overturn it.
   const blocked = verdicts.filter((l) => l.verdict === 'BLOCKS')
   if (blocked.length > 0) {
     return { status: 'NOT_EXPLOITABLE', reason: `blocked at ${where(blocked)}` }
+  }
+
+  // No layer decided the path, so a dead one is the answer: Stage 1c ran on
+  // partial evidence and cannot pass.
+  if (missing > 0) {
+    return {
+      status: 'BLOCKED',
+      reason: `${missing} layer agent(s) returned nothing; Stage 1c is unverified`,
+    }
   }
 
   // NEEDS_MORE_INFO rather than BLOCKED, and the distinction is the whole reason
@@ -915,6 +946,7 @@ if (gate.status !== 'PROCEED') {
     reason: gate.reason,
     route,
     brocards: brocardVerdicts,
+    openQuestions,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -938,6 +970,37 @@ if (blockingProof.length > 0) {
     reason: why,
     route,
     brocards: brocardVerdicts,
+    openQuestions,
+    layers: layerVerdicts,
+    recovery,
+    threat,
+    history,
+    proofs,
+  }
+}
+
+// A dead proof agent is the deep route not having run, and it fails closed for
+// the same reason decideGate blocks on a dead recovery, threat-model or history
+// agent: these three ARE the escalation. Nothing else in this workflow writes the
+// algebraic bounds proof or establishes the threading model, so a null read as
+// "did not block" pays for the deep route and enforces none of it — the finding
+// reaches the six gates with the extra evidence missing and only a line of prose
+// telling the gate agent so, which is the self-report this port exists to remove.
+//
+// AFTER the blocking-proof check, deliberately: a proof that decided outranks a
+// sibling that died, exactly as a blocking layer outranks a dead layer agent.
+// UNCERTAIN is not a death — two of the three are asked a question that often does
+// not apply and are told to answer UNCERTAIN — so only a missing verdict blocks.
+const deadProofs = proofs.filter((p) => !p.verdict).map((p) => p.key)
+if (deadProofs.length > 0) {
+  const why = `${deadProofs.join(', ')} returned nothing; the deep route was selected for those proofs and they are the only thing it adds`
+  log(`BLOCKED: ${why}`)
+  return {
+    status: 'BLOCKED',
+    reason: why,
+    route,
+    brocards: brocardVerdicts,
+    openQuestions,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -1038,6 +1101,7 @@ if (!impact || impact.result !== 'VERIFIED') {
     reason,
     route,
     brocards: brocardVerdicts,
+    openQuestions,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -1068,6 +1132,7 @@ if (missingPrecondition(impact)) {
     reason: why,
     route,
     brocards: brocardVerdicts,
+    openQuestions,
     layers: layerVerdicts,
     recovery,
     threat,

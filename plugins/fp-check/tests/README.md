@@ -276,7 +276,7 @@ case directory — passing the script body fails with `ENAMETOOLONG`.
 | Case | Deterministic pairing |
 |------|----------------------|
 | `blocked-attack-path` | `regex` (weight 2) requiring the blocking validator be named **in the final answer**. The two `file_exists` graders were removed on 2026-08-04 — see below |
-| `inflated-impact` | `regex` requiring the impact be scoped to one connection with the process surviving, `regex` requiring the recovery mechanism be named — both **in the final answer**. Was "the 500 downgrade" until 2026-08-04; net/http returns no 500, so that grader demanded a falsehood |
+| `inflated-impact` | `regex` requiring the impact be scoped to one connection with the process surviving, `regex` requiring the recovery mechanism be named — both **in the final answer**. Was "the 500 downgrade" until 2026-08-04; net/http returns no 500, so that grader demanded a falsehood. Its replacement then failed 6/6 twice for a *different* reason and was rewritten on 2026-08-06 — see §"The same grader, wrong three times" |
 | `should-not-fire` | `tool_used` with `min: 0, max: 0` on Workflow |
 | `integration-cap` | `regex` for the balance credited at qty=125, `regex` for the integration root cause — both **in the final answer** |
 | `already-fixed` | `regex` for `#412`, plus `tool_used` Bash `min: 1` |
@@ -406,8 +406,20 @@ grader for a related reason, recorded above.
 `test_eval_suite.py` enforces the invariants statically — runs >= 3, an outcome
 grader per case rather than only `tool_used`, an LLM grader paired with a
 deterministic one, a should-NOT-fire case whose `allowed_tools` still let the
-plugin fire, no target that states its own verdict — plus the two grader traps
+plugin fire, no target that states its own verdict — plus the grader traps
 below, each of which cost a full run.
+
+Four were added on 2026-08-06, each of them closing a rule this file already
+states in prose and nothing checked. All four were proven to fire by breaking the
+input first; the mutations are listed at the end of §"The gate" for whoever
+re-points `mutation-gate.sh`.
+
+| test | what it stops |
+|---|---|
+| `test_no_regex_grader_is_satisfied_by_the_prompt_alone` | The `last_message` twin of the scaffold-echo check. That one inspects only `target: trace` graders, and every regex grader now targets `last_message`, so it inspects **zero graders** and is green by having nothing to look at. Two case comments reason about the prompt-echo trap by hand; this makes it checkable. |
+| `test_regex_graders_accept_the_right_answer_and_reject_the_wrong_one` | A grader that can never pass, or never fail. Nothing else in the free suite can establish either half — a pattern that demands a falsehood compiles, has a valid target, and is absent from the prompt and the scaffold. `GRADER_PROBES` keys are compared against the graders on disk, so a new or renamed grader cannot skip it. |
+| `test_the_scaffold_writes_nothing_that_is_held_to_no_fixture` | The converse of the byte-identity check. The keys catch an unlisted *case*; a single unlisted *file* was invisible — inlined in the scaffold, shipped to the eval, compared against nothing, and never scanned for a giveaway comment, because that scan reads `evals/fixtures/`. |
+| `test_the_deterministic_weight_share_stays_meaningful` | An LLM grader that carries almost all the weight. The pairing invariant only asks that a deterministic grader *exists*; at weight 1 against 9 it exists and decides nothing. `cites-blocking-layer` was raised to weight 2 expressly "so the non-LLM share stays meaningful" — this is that rule as arithmetic. Floor is one third. |
 
 `SCAFFOLD_SOURCES` maps a case to a **list** of (scaffolded path, checked-in
 fixture) pairs, and every file a scaffold writes is held byte-identical to its
@@ -416,7 +428,8 @@ rather than one file — a caller, a sink, a dependency — because a single-fil
 target cannot pose the question of whether the PoC drove the real caller or a
 copy of it. The keys are also asserted to match the case directories on disk: a
 case with no entry would have its targets held to nothing, and the verdict scan
-would quietly stop covering it.
+would quietly stop covering it. As of 2026-08-06 all seven scaffolds write
+exactly the files they declare, and that is now asserted rather than observed.
 
 ### Grader traps
 
@@ -428,6 +441,175 @@ both arms, for exactly the behaviour the case rewards.
 **`not_contains` on a phrase the right answer must name always fails.** "This is
 NOT a process crash" contains "process crash". Assert the positive outcome (the
 500) instead of the absence of the wrong one.
+
+**A pattern for the presence of a claim is satisfied by its explicit negation,
+and that trap is not confined to graders.** `ONLINE_YES` in `test_eval_suite.py`
+listed the bare alternative `go online`, and all seven prompts say *"do not go
+online"* — so it matched every case, in the wrong polarity. The assertion is
+`yes or no` and `ONLINE_NO` matched too, so the test passed for the right reason
+by luck while being unable to tell the two configurations apart; and the
+contradiction check that exists for the PoC toggle could not be added for the
+online one, because it would have flagged all seven cases. `POC_YES` has the same
+latent shape one step out: `POC_NO` contains `do not write (a|an) (poc|exploit)`
+and `POC_YES` contains `write (a|the|an) (poc|…|exploit)`, so a prompt phrased
+*"do not write a PoC"* would match both and trip a contradiction assertion on a
+prompt that is not contradictory at all. No case is phrased that way, which is
+the only reason it has not fired. `stage_answers()` now strips the NO phrases
+before searching for the YES ones, and the online contradiction check is in.
+
+**A grader keyed on the plugin's own vocabulary measures plumbing, not
+reasoning.** `names-the-integration-root-cause` had the bare token `integration`
+as its first alternative. That is this plugin's private `rootCause` enum value,
+and `capSeverity` emits *"severity lowered from Critical to Medium: a integration
+root cause requires an external failure to trigger"* — so relaying that note
+passes the grader having reasoned about nothing, while the baseline arm has no
+such word to say. Measured across six sweeps: **0 of 18 no-plugin runs ever
+emitted it**, and every with-plugin pass sits on a sweep where the pipeline
+dispatched. That is the prompt-neutrality rule
+(`test_the_workflow_opt_in_is_plugin_neutral`) applied to graders, and nothing
+enforced it. Supported rather than proven, because the CLI elides the middle of
+each `evidence` string and the deciding text is in there. The token is now
+accepted only where it *attributes* — `integration root cause`, `integration
+failure`, `integration precondition` — which the cap note still satisfies while a
+stray "integration test" does not.
+
+### The same grader, wrong three times (2026-08-06)
+
+`inflated-impact`'s weight-2 deterministic grader has now been wrong in three
+different ways, and the third is the instructive one because it looked like the
+fix for the second.
+
+| | | measured |
+|---|---|---|
+| `downgrades-to-a-500` | demanded a fact that is not true | 0/3 both arms — **could never pass** |
+| `downgrades-to-connection-scoped` v1 | literal phrasings fitted to 5 recorded runs | 0/3 both arms on the next two sweeps |
+| v2 | five semantic branches, emphasis-tolerant seams | 3/3 both arms on the last two sweeps |
+
+v1's own comment claimed it was *"validated against the five clean recorded runs
+(5/5 match)"*. It was — and that is not validation, it is memorisation of a
+sample. Every subsequent miss was mechanical:
+
+| a later run wrote | v1 wanted |
+|---|---|
+| the server **process stays alive** | `process (survives\|survived\|is unaffected\|keeps running)` |
+| only *that one* connection is torn down | `only (that\|its own\|…) connection` |
+| does **not** crash the whole process | `does not crash` |
+| the **process does not die** | no branch at all |
+| not a full **process kill** | no branch at all |
+
+Two of the five are markdown emphasis landing in the seam between words. **A
+literal multi-word phrase is not a safe grader over model prose**: every
+inter-word position is a place the model may put `**`, `*`, a backtick or a
+hyphen. Both rewritten patterns admit `[-\s*_`]+` at every seam.
+
+Two mistakes made while widening, each caught by regrading rather than by
+reading:
+
+- **A bare `only … connection` passes a wrong answer.** "The attacker needs only
+  a single TCP connection to crash the server process" is what the *attacker*
+  needs, not what is damaged. The branch now requires a demonstrative or
+  possessive — `that`, `this`, `their own`, `the attacker's own`.
+- **An unbounded filler after a negation inverts the grader.** `not[^.]{0,40}crash`
+  passes "this is **not** a false positive: the attacker crashes the server
+  process". Filler is capped at three word-only tokens so it cannot cross
+  punctuation.
+
+**The discipline, stated as a procedure.** Widen to the semantic family, then
+(1) regrade against every recorded answer in `tests/fixtures/`, (2) confirm it
+still rejects a set of *wrong* verdicts, and (3) check the prompt and the
+scaffold do not satisfy it. Steps 2 and 3 are the ones that catch a widening that
+has been fitted to the desired result. The probe corpus from all three is now
+checked in as `GRADER_PROBES`, so a future edit that reintroduces literal
+matching, or that widens until nothing fails, breaks the free suite instead of a
+$30 sweep.
+
+**The regrade is a lower bound and always will be.** The CLI writes each grader's
+`evidence` with the middle elided (`[…892 chars elided…]`), so a claim in the
+elided span reads as a miss. Three of the four remaining `inflated-impact` misses
+are runs that produced no answer at all (`timed out after 900s`, last message
+"review-poc is running now — waiting"); the fourth has its survival sentence
+inside an elision. For `integration-cap` the elision is load-bearing in the other
+direction: the 2026-08-05 with-plugin arm was recorded 3/3 and regrades to 0/3
+under *either* pattern, so which alternative fired there cannot be read off the
+fixture.
+
+### What this audit found about discrimination (2026-08-06)
+
+Three 2026-08-06 sweeps are checked in and were previously undocumented:
+
+| fixture | CLI | cases x runs | cost | overallScore | meanDelta |
+|---|---|---|---|---:|---:|
+| `eval-result-2026-08-06-fp-check.json` | 2.1.222 | 7 x 3 x 2 | $21.49 | 0.598 | **+0.008** |
+| `eval-result-2026-08-06-fp-check-bap.json` | 2.1.223 | 1 x 3 x 2 | $3.05 | 0.600 | +0.000 |
+| `eval-result-2026-08-06-fp-check-v2-7case.json` | 2.1.223 | 7 x 3 x 2 | $31.71 | 0.781 | **+0.170** |
+
+Per-case delta over the three most recent 7-case sweeps (v2 08-06, 08-06, 08-05),
+with the count of runs that produced **no answer** in each arm:
+
+| Case | v2 08-06 | 08-06 | 08-05 | mean Δ | no-answer w/wo |
+|---|---:|---:|---:|---:|---:|
+| already-fixed | +0.72 | +0.28 | +0.50 | **+0.500** | 0 / 4 |
+| dead-route | +0.40 | +0.40 | +0.07 | **+0.289** | 0 / 0 |
+| integration-cap | +0.00 | +0.00 | +0.67 | +0.222 | 0 / 0 |
+| blocked-attack-path | +0.07 | −0.40 | +0.60 | +0.089 | **4 / 0** |
+| should-not-fire | +0.00 | +0.00 | +0.00 | **+0.000** | 0 / 0 |
+| wrong-parameter | +0.00 | +0.00 | −0.20 | −0.067 | 0 / 0 |
+| inflated-impact | +0.00 | −0.22 | −0.44 | −0.222 | 2 / 0 |
+
+**Two cases genuinely discriminate at n=9: `already-fixed` and `dead-route`.**
+Both separate on the `outcome` grader in every sweep, in the same direction.
+
+**`should-not-fire` and `wrong-parameter` do not, and neither does
+`inflated-impact` after the grader fix.** Per the standard this file already
+applies — *a case that cannot separate the arms cannot justify the plugin* — each
+is a candidate for the treatment `coerced-to-int` got, and the reasoning differs
+per case:
+
+- **`wrong-parameter`**: both graders 9/9 in both arms on the last three sweeps,
+  every run in both arms. Nothing about it is broken; the judgement "a list argv
+  is not a shell" is simply one a plain session makes. This is the same finding
+  the 2026-08-05 sweep recorded as a hypothesis, now confirmed at n=18.
+- **`should-not-fire`**: 1.00 vs 1.00 on all three sweeps, both graders 9/9 in
+  both arms. It is the cheapest case in the suite (300s, 10 turns) and it is the
+  only guard against a plugin that fires on everything, so the argument for
+  keeping it is insurance rather than measurement. It should not be counted in a
+  mean delta.
+- **`inflated-impact`**: before the fix it was capped at 0.667 in both arms; after
+  it, `outcome` is 3/3 and the regex is 3/3 in both arms, so it becomes 1.00 vs
+  1.00. **The fix raises both arms equally and the delta stays +0.00** — which is
+  a finding about the case, not a success. It is kept for now because it holds the
+  floor under the impact-downgrade behaviour and because the 0.667 cap was
+  corrupting `validate_eval_result.py`'s absolute gate, but it is not evidence
+  about the plugin.
+
+**Graders that have never failed, and therefore carry constant weight.** The
+README already condemns this for the deleted `file_exists` pair — *"3 of 7 units
+scored identically in both arms no matter what happened"* — and three more are in
+the same state over the last three sweeps:
+
+| grader | case | weight | last 3 sweeps |
+|---|---|---:|---|
+| `credited-amount` | integration-cap | 2 of 6 | 9/9 vs 9/9 |
+| `distinguishes-the-two-call-sites` | wrong-parameter | 2 of 5 | 9/9 vs 9/9 |
+| `no-workflow-launched` | should-not-fire | 2 of 5 | 9/9 vs 9/9 |
+| `searched-the-history` | already-fixed | 1 of 6 | 9/9 vs 8/9 |
+| `cites-the-missing-route` | dead-route | 2 of 5 | 8/9 vs 9/9 |
+
+None of them is *vacuous* in the `file_exists` sense — each is shown by
+`GRADER_PROBES` to reject a wrong answer — so unlike that pair they are a real
+floor against regression. But none contributes to a delta either, and
+`credited-amount` at weight 2 of 6 dilutes `integration-cap`'s by a third. Left
+as measured rather than changed: dropping a grader that can fail is a decision
+about what the case asserts, not a defect fix.
+
+**`blocked-attack-path` has a with-plugin reliability problem.** 4 of 9
+with-plugin runs on the last three sweeps produced no answer — three 900s
+timeouts on the 08-06 sweep and one at the raised 1800s on v2 — against 0 of 9
+baseline runs. Its `cites-blocking-layer` grader reads 5/9 with against 9/9
+without for that reason alone, not because the baseline names the layer better.
+Raising the timeout further is not obviously the fix; the 19% no-answer rate the
+2026-08-05 sweep recorded is still live and is a property of fanning out under
+`-p`.
 
 ### The first run, which measured the harness (CLI 2.1.220)
 
@@ -1020,6 +1202,33 @@ the plugin:
   its arguments positionally — see the `decideGate` case above. Prefer an options
   object for anything that will grow, or expect the gate to find it for you.
 
+### Ten Layer 4 mutations owed to this file (2026-08-06)
+
+The eval-suite audit of 2026-08-06 changed two graders and added four invariants,
+and proved each one fires by breaking the input in a sandbox copy — **10
+mutations run, 0 survived**, each failing on the specific assertion intended
+rather than on a bare non-zero exit. They are not yet in `mutation-gate.sh`, so
+the count in §"The gate" is unchanged and this is the outstanding work:
+
+| mutation | must turn red |
+|---|---|
+| `stage_answers`: search `ONLINE_YES` over the raw prompt instead of the NO-stripped one | `-k pins_both_stage_answers` |
+| a case prompt that says both "work offline" and "go online and check their security advisories" | `-k pins_both_stage_answers` |
+| append an extra `cat > extra_helper.py` to any scaffold | `-k held_to_no_fixture` |
+| prepend `upstream\|` to `names-the-integration-root-cause` | `-k satisfied_by_the_prompt_alone` |
+| restore `downgrades-to-connection-scoped` to the literal pattern that failed 6/6 | `-k accept_the_right_answer` |
+| restore the bare `integration\|third[- ]party\|` prefix on `names-the-integration-root-cause` | `-k accept_the_right_answer` |
+| set `cites-the-fix`'s pattern to `"a\|e\|i\|o\|u\| "` (a grader that cannot fail) | `-k accept_the_right_answer` |
+| append a new regex grader to any case without a `GRADER_PROBES` entry | `-k test_every_regex_grader_has_probes` |
+| delete one `GRADER_PROBES` entry | `-k test_every_regex_grader_has_probes` |
+| `blocked-attack-path`: `outcome` to weight 9, `cites-blocking-layer` to weight 1 | `-k deterministic_weight_share` |
+
+Note for whoever ports these: a stale mutation must read as **survived**, not as
+caught. Two of the ten were written with `perl -0pi` patterns that silently
+matched nothing on the first attempt, and `perl -pi` exits 0 either way — the
+existing `run_mutation` checksums the sandbox for exactly this reason, so port
+them into it rather than into a fresh harness.
+
 ## What the checkpoint gates actually enforce
 
 Layer 2 covers the decisions, not the prose. Each of these was a checkpoint
@@ -1052,7 +1261,7 @@ re-run until green.
 | Mutation gate | 131 mutations, 0 survived, 0 stale, each test command baseline-verified |
 | Layer 3 live capture | 3 runs, CLI 2.1.220, `blocked-attack-path` |
 | Layer 3 pass rate | **3/3** — all blocked at search.py:20 and :27, no PoC written |
-| Layer 4 eval | 5 sweeps. 2026-07-30 $6.23 delta −0.056 **invalid** (tools denied). 2026-08-04 $17.90 delta +0.131 — measured the skill's **prose**, `Workflow` never dispatched. 2026-08-04 $16.48 **void**, 22/30 runs lost to a usage limit. 2026-08-04 sonnet $28.79 5 cases, delta **+0.102**, 28/30 clean — first to measure the pipeline. 2026-08-05 sonnet $39.96 **7 cases, delta +0.170** (+0.295 over gradeable runs), 40/42 clean — three cases at 3/3 vs 0/3. See Layer 4. |
+| Layer 4 eval | 8 sweeps. 2026-07-30 $6.23 delta −0.056 **invalid** (tools denied). 2026-08-04 $17.90 delta +0.131 — measured the skill's **prose**, `Workflow` never dispatched. 2026-08-04 $16.48 **void**, 22/30 runs lost to a usage limit. 2026-08-04 sonnet $28.79 5 cases, delta **+0.102**, 28/30 clean — first to measure the pipeline. 2026-08-05 sonnet $39.96 **7 cases, delta +0.170** (+0.295 over gradeable runs), 40/42 clean — three cases at 3/3 vs 0/3. 2026-08-06 CLI 2.1.222 $21.49 7 cases, delta **+0.008** — three `blocked-attack-path` with-plugin runs and three `already-fixed` baseline runs produced no answer. 2026-08-06 CLI 2.1.223 $3.05 `blocked-attack-path` alone, delta +0.000. 2026-08-06 CLI 2.1.223 $31.71 7 cases, delta **+0.170**, `overallScore` 0.781, 41/42 clean — the sweep the 2026-08-06 grader audit was regraded against. See Layer 4. |
 
 The Layer 3 pass rate above predates the checkpoint fixes in the table further
 up and has not been re-captured; the assertions it was scored against are

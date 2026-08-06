@@ -175,6 +175,37 @@ test('a blocking layer outranks a dead recovery agent', () => {
   assert.equal(r.status, 'NOT_EXPLOITABLE')
 })
 
+// The same rule one level down, and the level it was NOT applied at. The
+// missing-agent count was read before the BLOCKS filter, so a dead SIBLING LAYER
+// agent turned a definitive NOT_EXPLOITABLE into BLOCKED — "could not determine" —
+// exactly the answer-discarding the recovery ordering above exists to prevent.
+// The layers are conjunctive: `decideGate` requires all of them to PASS, so one
+// that BLOCKS makes the sink unreachable whatever the dead one would have said.
+test('a blocking layer outranks a dead sibling LAYER agent', () => {
+  const r = decideGate([layer('validate', 'BLOCKS')], checked, inScope, unfixed, 3, 0)
+  assert.equal(r.status, 'NOT_EXPLOITABLE')
+  assert.match(r.reason, /validate/)
+})
+
+// But mis-attribution is NOT a dead agent, and it must keep its precedence: if
+// there are more verdicts than agents dispatched, some verdict in the list came
+// from something that is not a layer, and a BLOCKS read out of that list could
+// dismiss a live finding. Unverifiable evidence outranks a definitive-looking
+// verdict built from it.
+test('mis-attributed results still outrank a BLOCKS verdict', () => {
+  const r = decideGate([layer('a', 'PASSES'), layer('b', 'BLOCKS')], checked, inScope, unfixed, 1, 0)
+  assert.equal(r.status, 'BLOCKED')
+  assert.match(r.reason, /mis-attributed/)
+})
+
+// A dead layer agent with no BLOCKS to outrank it still blocks: nothing here
+// weakens the missing-agent check, it only loses a tie it should never have won.
+test('a dead layer agent still blocks when no sibling decided the path', () => {
+  const r = decideGate([layer('a', 'PASSES')], checked, inScope, unfixed, 2, 0)
+  assert.equal(r.status, 'BLOCKED')
+  assert.match(r.reason, /1 layer agent/)
+})
+
 test('out of scope halts', () => {
   const r = decideGate([layer('a', 'PASSES')], checked, { inScope: 'NO', evidence: 'infra' }, unfixed, 1, 0)
   assert.equal(r.status, 'OUT_OF_SCOPE')
@@ -232,7 +263,7 @@ test('every non-PROCEED status carries a non-empty reason', () => {
       [layer('a', 'PASSES')],
       checked,
       inScope,
-      { fixed: 'YES', reference: '#412', searched: 'git log', evidence: '' },
+      { fixed: 'YES', complete: true, reference: '#412', searched: 'git log', evidence: '' },
       1,
     ],
   ]

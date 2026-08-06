@@ -376,6 +376,26 @@ test('a whitespace-only build is rejected, not reported as BUILT', async () => {
   }
 })
 
+// And the failure's own explanation gets the same treatment, for the same reason:
+// `failureReason: '   '` is schema-valid, it is truthy, and it was taken verbatim.
+// It becomes BUILD_FAILED's `reason` — which SKILL.md tells the orchestrator to
+// relay as the missing fact — and the retry prompt's "Why it failed:", so a second
+// attempt is told nothing about the first.
+test('a whitespace failureReason falls back rather than becoming the reason', async () => {
+  const { result, calls } = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: { build: { ...BUILT_POC, built: false, failureReason: '   ' } },
+  })
+  assert.equal(result.status, 'BUILD_FAILED')
+  assert.ok(result.reason && result.reason.trim(), 'BUILD_FAILED must explain itself')
+  const retry = calls.filter((c) => c.label.startsWith('build:'))[1]
+  assert.ok(retry, 'the second attempt must run')
+  assert.ok(
+    !/Why it failed:\s*\n/.test(retry.prompt),
+    'the retry must be told something about the first attempt',
+  )
+})
+
 test('no candidates returns NO_CANDIDATES without throwing', async () => {
   const { result, calls } = await runScript('triage-poc.js', {
     args: { ...BUILD_ARGS, candidates: [] },
@@ -508,7 +528,7 @@ test('a lost already-fixed challenge overrides the band', async () => {
           : rebutted('x'),
     }),
   })
-  assert.equal(result.status, 'DO_NOT_SUBMIT')
+  assert.equal(result.status, 'ALREADY_FIXED')
   assert.match(result.reason, /already-fixed/)
   assert.ok(!calls.some((c) => c.label === 'report'), 'a patched bug is not written up')
 })
@@ -520,7 +540,52 @@ test('a dead challenge-4 agent also overrides the band', async () => {
       challenge: (prompt) => (prompt.includes('ALREADY FIXED') ? null : rebutted('x')),
     }),
   })
-  assert.equal(result.status, 'DO_NOT_SUBMIT')
+  assert.equal(result.status, 'ALREADY_FIXED')
+})
+
+// checkpoints.md 5.1 says the already-fixed outcome "overrides everything else",
+// and the artifact gate was ahead of it. The two facts are different in kind: the
+// artifact check is a judgement about whether the PoC is real, and challenge 4 is a
+// fact about the codebase — a fix, with a reference. A dead artifact agent or a lint
+// failure therefore turned "this is already patched, retract it" into BLOCKED, which
+// SKILL.md relays as NEEDS MORE INFO and whose completion gate tells the
+// orchestrator to re-dispatch: paying twice to be told the same thing about a bug
+// that no longer exists.
+test('the already-fixed override outranks an unverifiable artifact', async () => {
+  const patched = (prompt) =>
+    prompt.includes('ALREADY FIXED')
+      ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', evidence: 'commit abc' }
+      : rebutted('x')
+  const cases = [
+    ['a dead artifact agent', null],
+    ['a lint failure', { ...CLEAN_ARTIFACT, lintExitZero: false, lintOutput: 'stub-body' }],
+    ['no PoC file', { ...CLEAN_ARTIFACT, fileExists: false }],
+  ]
+  for (const [label, artifact] of cases) {
+    const { result, calls } = await runScript('triage-poc.js', {
+      args: BUILD_ARGS,
+      agents: reviewAgents({ 'artifact-check': artifact, challenge: patched }),
+    })
+    assert.equal(result.status, 'ALREADY_FIXED', label)
+    assert.match(result.reason, /already-fixed/, label)
+    assert.match(result.reason, /commit abc/, label)
+    assert.ok(!calls.some((c) => c.label === 'report'), `${label}: a patched bug is not written up`)
+  }
+})
+
+// And the artifact gate keeps its precedence over everything that IS a judgement
+// about the PoC: the band is only meaningful if the artifact the challenges judged
+// is real.
+test('an unverifiable artifact still blocks when no fix was found', async () => {
+  const { result } = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: reviewAgents({
+      'artifact-check': null,
+      challenge: (prompt) => (prompt.includes('ALREADY FIXED') ? rebutted('4') : null),
+    }),
+  })
+  assert.equal(result.status, 'BLOCKED')
+  assert.match(result.reason, /never independently verified/)
 })
 
 test('LOW confidence does not proceed to a report', async () => {
@@ -561,7 +626,7 @@ test('an empty unproven field fails checkpoint 6.1', async () => {
     args: BUILD_ARGS,
     agents: reviewAgents({ report: { ...REPORT, unproven: '   ' } }),
   })
-  assert.equal(result.status, 'DO_NOT_SUBMIT')
+  assert.equal(result.status, 'NEEDS_MORE_INFO')
   assert.match(result.reason, /unproven/)
 })
 
@@ -576,7 +641,7 @@ test('an empty reportPath fails checkpoint 6.1', async () => {
       args: BUILD_ARGS,
       agents: reviewAgents({ report: { ...REPORT, reportPath } }),
     })
-    assert.equal(result.status, 'DO_NOT_SUBMIT', `reportPath ${JSON.stringify(reportPath)} must not pass`)
+    assert.equal(result.status, 'NEEDS_MORE_INFO', `reportPath ${JSON.stringify(reportPath)} must not pass`)
     assert.ok(result.reason && result.reason.trim(), 'a halt must explain itself')
     assert.match(result.reason, /reportPath/)
   }
@@ -596,7 +661,7 @@ test('an empty reportPath is caught before the severity cap names it', async () 
     },
     agents: reviewAgents({ report: { ...REPORT, severity: 'Critical', reportPath: '' } }),
   })
-  assert.equal(result.status, 'DO_NOT_SUBMIT')
+  assert.equal(result.status, 'NEEDS_MORE_INFO')
   assert.doesNotMatch(result.reason, /The report at\s{2}/)
 })
 
@@ -610,7 +675,7 @@ test('a blank severityRationale fails checkpoint 5.2', async () => {
       args: BUILD_ARGS,
       agents: reviewAgents({ report: { ...REPORT, severity: 'Medium', severityRationale } }),
     })
-    assert.equal(result.status, 'DO_NOT_SUBMIT')
+    assert.equal(result.status, 'NEEDS_MORE_INFO')
     assert.match(result.reason, /severityRationale/)
   }
 })
@@ -677,4 +742,51 @@ test('a workflow dispatched with no args at all returns BLOCKED, not a TypeError
       assert.equal(calls.length, 0, `${file} must not spend an agent`)
     }
   }
+})
+
+// `DO_NOT_SUBMIT` used to carry three outcomes at once, and the documented mapping
+// sent all three to FALSE POSITIVE. Two of them were the rounding error this plugin
+// exists to prevent: an already-fixed retraction (the bug was REAL) and an
+// incomplete report (nothing was disproven at all). They are three statuses now,
+// and this pins each to its own — the orchestrator no longer has to pattern-match a
+// reason prefix to tell them apart.
+test('the three Stage 3 refusals are three distinct statuses', async () => {
+  const cases = [
+    [
+      'ALREADY_FIXED',
+      reviewAgents({
+        challenge: (prompt) =>
+          prompt.includes('ALREADY FIXED')
+            ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', evidence: 'commit abc' }
+            : rebutted('x'),
+      }),
+    ],
+    [
+      'DO_NOT_SUBMIT',
+      reviewAgents({
+        challenge: (prompt) =>
+          prompt.includes('ALREADY FIXED')
+            ? rebutted('fixed')
+            : { challenge: 'c', rebuttal: 'none', winner: 'CHALLENGE', evidence: 'e' },
+      }),
+    ],
+    ['NEEDS_MORE_INFO', reviewAgents({ report: { ...REPORT, unproven: '' } })],
+  ]
+  const seen = new Set()
+  for (const [expected, agents] of cases) {
+    const { result } = await runScript('triage-poc.js', { args: BUILD_ARGS, agents })
+    assert.equal(result.status, expected)
+    assert.ok(result.reason && result.reason.trim(), `${expected} must explain itself`)
+    seen.add(result.status)
+  }
+  assert.equal(seen.size, 3, 'all three must be distinguishable without reading the reason')
+})
+
+// REPORTED was the one terminal status with no `reason`, while SKILL.md's
+// Completion Gate tells the orchestrator to relay it verbatim for every status.
+test('REPORTED carries a reason like every other terminal status', async () => {
+  const { result } = await runScript('triage-poc.js', { args: BUILD_ARGS, agents: reviewAgents() })
+  assert.equal(result.status, 'REPORTED')
+  assert.ok(result.reason && result.reason.trim(), 'REPORTED must carry a reason')
+  assert.equal(result.reason, REPORT.severityRationale)
 })

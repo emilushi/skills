@@ -45,7 +45,8 @@ naming rather than imposing your own.
 | `package.json` with `jest` | Jest | `npm test` |
 | `*_test.go` | Go testing | `go test ./... -run Security` |
 | `Cargo.toml` | cargo test | `cargo test` |
-| `pom.xml`, `build.gradle` | JUnit | `mvn test` |
+| `pom.xml` | JUnit via Maven | `mvn test` |
+| `build.gradle`, `build.gradle.kts` | JUnit via Gradle | `./gradlew test` |
 
 ## Naming and isolation
 

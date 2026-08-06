@@ -1,7 +1,7 @@
 ---
 name: fp-check
 description: "Verifies whether a suspected security bug is real before writing anything up, returning TRUE POSITIVE, FALSE POSITIVE or NEEDS MORE INFO with the evidence behind it. Runs a static verification stage always, and adds online policy checks or a built-and-executed proof-of-concept exploit on request. Use when asked whether a finding is real, exploitable, in scope, already fixed or a false positive; to triage findings from a scanner, a bug bounty submission or an agentic discovery run; and when asked to write a PoC, prove a vulnerability, demonstrate an attack or exploit a bug — those all need the attack path verified first, which is what this does. Not for hunting new bugs."
-allowed-tools: Read Grep Glob LSP Bash Write Edit Workflow AskUserQuestion Task TaskCreate TaskUpdate TaskList TaskGet
+allowed-tools: Read Grep Glob LSP Bash Write Edit Workflow AskUserQuestion Task TaskCreate TaskUpdate TaskList TaskGet TaskOutput
 ---
 
 # False Positive Check
@@ -18,8 +18,10 @@ narrow or correct what Stage 1 returned.
               └───────────────────────┬──────────────────────────────┘
                                       │ verdict + severity + open questions
   Q2: online checks? ──yes──> ┌───────▼─ Stage 2: ONLINE ────────────┐
-                              │  policy → scope → past bugs → users   │
-                              │  may halt: out-of-scope, duplicate    │
+                              │  policy → public reachability →       │
+                              │  scope → past bugs → summary          │
+                              │  may halt: offline, out-of-scope,     │
+                              │  duplicate                            │
                               └───────────────┬──────────────────────┘
   Q1: validate by PoC? ──yes──> ┌─────────────▼─ Stage 3: POC ────────┐
                                 │  build → execute → 5 challenges →    │
@@ -111,7 +113,12 @@ Stage 1 picks the route itself from the dispatch, and you can override it with
 **Deep** adds three proofs to the reachability phase — API contracts and
 environmental protections, the algebraic bounds proof, and race feasibility — and
 runs the full 13 devil's-advocate questions instead of the 7-question spot check.
-It fires automatically on 3+ layers, on a concurrency or bounds bug class, and on
+Both lists are in
+[false-positive-patterns.md]({baseDir}/references/false-positive-patterns.md).
+It fires automatically on 3+ layers; on a memory-safety, arithmetic, concurrency
+or availability bug class — the Route column of
+[bug-class-verification.md]({baseDir}/references/bug-class-verification.md) is
+the authoritative list and the tests pin `selectRoute` against it; and on
 `crossComponent: true` or `ambiguous: true`.
 
 **Standard is the default and is doing real work.** Measured: a linear checklist
@@ -127,13 +134,35 @@ ended its turn 2.4 seconds after dispatching a review stage and the workflow was
 any report existed. **Do not end your turn until the workflow has returned.** Use
 `TaskOutput` with `block: true` and a timeout of at least 600000.
 
+### `baseDir` — copy it, never reconstruct it
+
+All three stages take `baseDir` and interpolate it into the `references/...` paths
+they hand their agents. **Copy the value out of the reference links at the bottom
+of this file and strip the trailing `/references/<file>.md`.** Those links are
+already expanded to the copy of the skill that is actually running, which is the
+only place the correct value exists.
+
+Do not rebuild the path from the plugin name, and above all do not type a version
+number. The plugin is installed at
+`~/.claude/plugins/cache/<marketplace>/fp-check/<version>/skills/fp-check`,
+several versions coexist there, and a wrong one **fails silently**: nothing
+validates `baseDir`, so every reference read in every stage resolves to a file
+that is absent or stale, and the agents answer without the lookup table they were
+sent for. Measured: a traced run guessed `2.0.1` while `2.0.2` was the version
+executing.
+
+If you are running the workflows out of a checkout by `scriptPath` rather than by
+name, `baseDir` is that checkout's `plugins/fp-check/skills/fp-check` — and it
+still has to be **absolute**. A path relative to your working directory is not
+relative to the agent's.
+
 ### Stage 1 — always
 
 ```text
 Workflow({ name: 'fp-check:triage-static', args })
 
 args = {
-  baseDir:    the skill directory (references/ and scripts/ resolve under it)
+  baseDir:    absolute path of this skill's directory — see above
   finding: {
     summary:        one sentence, what the code does wrong
     sink:           file:line of the vulnerable operation
@@ -147,7 +176,9 @@ args = {
     location:     file:line of the entry point itself
     payload:      a concrete example input, not "malicious payload here"
   }
-  layers: [ { name, location, checks } ]     at most 4; never empty
+  layers: [ { name, location, checks } ]     at most 4; never empty.
+          name and location are required per layer; checks is optional and the
+          layer agent derives it from the code when you omit it
   scope:  a STRING describing the declared scope; an object interpolates as
           [object Object] and is rejected
   route:  'standard' | 'deep'                optional; computed when omitted
@@ -161,6 +192,14 @@ Returns one of `TRUE_POSITIVE`, `FALSE_POSITIVE`, `DISMISSED`, `NOT_EXPLOITABLE`
 each with a `reason`, and with `severity` and `severityCorrection` when it reached
 an impact.
 
+A return that got as far as the verdict also carries `openQuestions`: the
+cheap-pre-gate questions that came back NEEDS_MORE_INFO and were carried instead
+of ending the stage. **A non-empty `openQuestions` returns `NEEDS_MORE_INFO` even
+when all six gates read `PASS`** — the `gates` object in the payload will show six
+passes and the status will not be `TRUE_POSITIVE`. That is not a bug to route
+around; the `reason` names the unanswered question, and answering it is what
+turns the finding into a verdict.
+
 ### Stage 2 — only if Q2 was yes
 
 ```text
@@ -169,12 +208,33 @@ Workflow({ name: 'fp-check:triage-online', args })
 args = {
   baseDir, finding                  as above
   verification:  triage-static's return value, forwarded VERBATIM
+                 (its status, impact.impact and severity are all read)
   project: { name, url }            the upstream project to look up
-  sources: [ { label, query } ]     at least one public venue, at most 6:
+  sources: [ { label, query } ]     at least one public venue. Only the first 6
+                                    get an agent; the rest come back named in
+                                    `beyondCap` as unchecked rather than being
+                                    rejected, so do not pad the list:
                                     github-issues, github-prs,
                                     github-advisories, mailing-list, immunefi
 }
 ```
+
+**Only two Stage 1 statuses are accepted here: `TRUE_POSITIVE` and
+`NEEDS_MORE_INFO`.** Anything else returns `BLOCKED` — a finding already dismissed
+on the code does not need a policy check, and running one invites the online
+evidence to argue a dead finding back to life.
+
+Stage 2 also requires `verification.impact.impact` and `verification.severity` to
+be non-empty, and a Stage 1 return only carries those if it reached the impact
+phase. So a `NEEDS_MORE_INFO` raised before that — an UNCERTAIN layer, an ambiguous
+scope — is rejected too: resolve the missing fact and re-run Stage 1 rather than
+forwarding a partial return.
+
+**A declared scope is overturned by re-running Stage 1, not here.** `OUT_OF_SCOPE`
+is decided before the impact agent runs, so such a return has no impact to forward
+and Stage 2 cannot act on it. If a published policy contradicts the scope you
+declared, correct the `scope` argument and dispatch Stage 1 again — that argument
+is where the input lives.
 
 Returns `TRIAGED`, `OUT_OF_SCOPE`, `DUPLICATE`, `NEEDS_MORE_INFO`, `BLOCKED`, or
 `OFFLINE`. **`OFFLINE` is a correct outcome, not an error** — every claim this
@@ -202,12 +262,17 @@ args = {
     hosts:        array of permitted targets; [] means local process only
     destructive:  boolean; only permitted at levels 1-2
   }
-  candidates: [ { name, description, entryPoint, payload } ]   at most 2 tried
+  candidates: [ { name, description, entryPoint, payload } ]
+                description, entryPoint and payload are required per candidate;
+                name is optional and only labels the build agent. At most 2 are
+                attempted, the rest are held in reserve, and an empty list
+                returns NO_CANDIDATES without spending anything
 }
 ```
 
 Returns `REPORTED`, `DO_NOT_SUBMIT`, `BUILD_FAILED`, `NO_CANDIDATES`, or
-`BLOCKED`.
+`BLOCKED`. `REPORTED` is the one terminal status with no `reason` — relay
+`report.reportPath`, `band` and the `defeated` tally instead.
 
 ## Completion Gate
 
@@ -219,9 +284,11 @@ Before you report anything, check what actually came back.
    exact mistake this skill exists to prevent.
 2. **Read `status`, not the shape.** Failing returns carry populated payloads, so
    a result that looks complete may be a `NEEDS_MORE_INFO`.
-3. **Relay the `reason` verbatim.** Every terminal status carries one, and it
-   names the layer, clause, gate or commit that decided the outcome. That
-   specificity is the deliverable.
+3. **Relay the `reason` verbatim.** Every terminal status except Stage 3's
+   `REPORTED` carries one, and it names the layer, clause, gate or commit that
+   decided the outcome. That specificity is the deliverable, and for
+   `DO_NOT_SUBMIT` the `reason` is the only thing that says which of three very
+   different outcomes you got — see Verdicts below.
 4. **State the verdict in your final response**, with the severity and the
    evidence. Stage 3 writes its report to a file, and a file is not an answer.
    If Stage 3 ran, state the confidence band and the N/5 challenge tally too.
@@ -233,11 +300,25 @@ Stage statuses collapse onto three user-facing verdicts:
 | Verdict | From | Report as |
 |---|---|---|
 | **TRUE POSITIVE** | `TRUE_POSITIVE`, `REPORTED` | `BUG #N TRUE POSITIVE — <description>`, with severity |
-| **FALSE POSITIVE** | `DISMISSED`, `NOT_EXPLOITABLE`, `NOT_VULNERABLE`, `FALSE_POSITIVE`, `DO_NOT_SUBMIT` | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
-| **NEEDS MORE INFO** | `NEEDS_MORE_INFO`, `BLOCKED`, `OFFLINE`, `BUILD_FAILED` | `BUG #N NEEDS MORE INFO — <the missing fact>` |
+| **FALSE POSITIVE** | `DISMISSED`, `NOT_EXPLOITABLE`, `NOT_VULNERABLE`, `FALSE_POSITIVE` | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
+| **NEEDS MORE INFO** | `NEEDS_MORE_INFO`, `BLOCKED`, `OFFLINE`, `BUILD_FAILED`, `NO_CANDIDATES` | `BUG #N NEEDS MORE INFO — <the missing fact>` |
 
 `ALREADY_FIXED` and `DUPLICATE` are reported as retractions with their reference,
 and `OUT_OF_SCOPE` as a scope answer rather than a judgement on the bug.
+
+`TRIAGED` is Stage 2 finishing, not a verdict of its own: keep the Stage 1 verdict
+and correct its severity and scope from `summary.finalSeverity`,
+`summary.scopeVerdict` and `summary.openQuestions`.
+
+**`DO_NOT_SUBMIT` is three outcomes wearing one status, and the `reason` is what
+tells them apart.** Mapping all three to FALSE POSITIVE is the rounding error this
+skill exists to prevent:
+
+| The `reason` starts with | What actually happened | Report as |
+|---|---|---|
+| `already-fixed challenge unrebutted:` | a fix exists upstream; the bug was real | a **retraction**, with the reference — not a false positive |
+| `confidence LOW (…)` or `confidence NONE (…)` | reviewers rebutted the finding | **FALSE POSITIVE**, naming the unrebutted challenges |
+| `report omitted…` / `report gave no…` | the report agent left a required field blank; nothing about the bug was disproven | **NEEDS MORE INFO**, and re-dispatch |
 
 **NEEDS MORE INFO is not a hedge and must not be rounded to FALSE POSITIVE.**
 "The claim as stated is unproven" is not "no vulnerability exists"; conflating the

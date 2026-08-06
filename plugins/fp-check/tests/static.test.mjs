@@ -248,9 +248,13 @@ test('a DISMISS with no evidence still carries a reason', () => {
 
 // ------------------------------------------------------ upstreamFixStands
 
+// `complete: true` is part of the fixture because HISTORY_SCHEMA requires it: a
+// retraction has to say it is a WHOLE fix, and a fixture that omits the field is
+// not a shape the runtime validator lets through.
 const fixed = (over = {}) => ({
   fixed: 'YES',
   reference: '#412',
+  complete: true,
   searched: 'git log -p -- auth.py, CHANGELOG',
   evidence: 'the caller now HMACs both operands',
   ...over,
@@ -283,11 +287,21 @@ test('a partial fix is reported as partial, not as a retraction', () => {
   assert.equal(r.partial, true)
 })
 
-test('an omitted complete flag is treated as a complete fix', () => {
-  // `=== false` rather than falsy, so the field can be left out. The direction is
-  // the safe one: asserting "partial" by omission would report a finding that the
-  // evidence says is dead.
-  assert.equal(upstreamFixStands(fixed()).partial, false)
+// The retraction is the thing that needs earning, in both fields. `reference` is
+// enforced above because "YES with nothing behind it" discards a live finding;
+// completeness is the same claim about the same retraction, and reading an omitted
+// `complete` as `true` was the more dangerous half — a partial fix (still a
+// finding, and the impact prompt has a branch that says so) was retracted whole by
+// a field the agent simply never filled in.
+//
+// `!== true`, so only an affirmative answer retracts. `complete` is in
+// HISTORY_SCHEMA's `required` list, which is what makes the answer arrive at all;
+// this is what happens if that ever comes off again.
+test('an omitted or non-boolean complete flag is not a complete fix', () => {
+  for (const complete of [undefined, null, '', 'yes', 1]) {
+    const r = upstreamFixStands(fixed({ complete }))
+    assert.equal(r.partial, true, `complete ${JSON.stringify(complete)} must not read as a whole fix`)
+  }
 })
 
 test('a dead history agent does not stand as a fix', () => {
@@ -499,12 +513,42 @@ test('an upstream fix retracts before the impact agent is spent', async () => {
   const { result, calls } = await runScript('triage-static.js', {
     args: WIRING_ARGS,
     agents: agents({
-      history: { fixed: 'YES', reference: '#412', searched: 'git log -p', evidence: 'fixed in the caller' },
+      history: {
+        fixed: 'YES',
+        complete: true,
+        reference: '#412',
+        searched: 'git log -p',
+        evidence: 'fixed in the caller',
+      },
     }),
   })
   assert.equal(result.status, 'ALREADY_FIXED')
   assert.match(result.reason, /#412/)
   assert.ok(!calls.some((c) => c.label === 'impact'), 'a dead bug does not need its impact verified')
+})
+
+// The other half of that retraction, and the shape the schema used to let through:
+// a fix the agent found but never called complete. It retracts nothing, and the
+// analysis continues against what the fix left behind.
+test('a fix that is not affirmatively complete does not retract the finding', async () => {
+  for (const complete of [undefined, false]) {
+    const { result, calls } = await runScript('triage-static.js', {
+      args: WIRING_ARGS,
+      agents: agents({
+        history: {
+          fixed: 'YES',
+          complete,
+          reference: '#412',
+          searched: 'git log -p',
+          evidence: 'the caller normalises one of the two operands',
+        },
+      }),
+    })
+    assert.notEqual(result.status, 'ALREADY_FIXED', `complete ${JSON.stringify(complete)}`)
+    const impact = calls.find((c) => c.label === 'impact')
+    assert.ok(impact, 'a partial fix leaves a finding to verify')
+    assert.match(impact.prompt, /PARTIAL fix exists \(#412\)/)
+  }
 })
 
 test('an unreferenced YES does not retract, and the analysis continues', async () => {
@@ -566,6 +610,40 @@ test('an inapplicable deep proof does not block the finding', async () => {
     }),
   })
   assert.equal(result.status, 'TRUE_POSITIVE')
+})
+
+// A dead deep-route proof agent is the deep route not having happened. The three
+// proofs ARE the escalation — nothing else in this workflow writes the algebra or
+// establishes the threading model — so treating a null as "did not block" spends
+// the deep route's money and enforces none of it. `decideGate` blocks on a dead
+// recovery, threat-model or history agent for exactly this reason; these were the
+// three that were merely mentioned in the gate prompt and left for the agent to
+// weigh, which is the self-report the whole port exists to remove.
+test('a dead deep-route proof agent blocks rather than passing as non-blocking', async () => {
+  const { result } = await runScript('triage-static.js', {
+    args: { ...WIRING_ARGS, route: 'deep' },
+    // The three proof labels are deliberately unmapped, so their agents return
+    // nothing.
+    agents: agents(),
+  })
+  assert.equal(result.status, 'BLOCKED')
+  assert.match(result.reason, /api-contract/)
+  assert.match(result.reason, /math-bounds/)
+  assert.match(result.reason, /race-feasibility/)
+})
+
+// And it does not outrank a proof that DID decide: a BLOCKS is the answer the
+// fan-out already found, and a dead sibling must not turn it into
+// "could not determine" — the same precedence decideGate applies to the layers.
+test('a blocking deep proof outranks a dead sibling proof', async () => {
+  const { result } = await runScript('triage-static.js', {
+    args: { ...WIRING_ARGS, route: 'deep' },
+    agents: agents({
+      'math-bounds': { verdict: 'BLOCKS', evidence: 'qty >= 1 and rate >= 0 make the product non-negative' },
+    }),
+  })
+  assert.equal(result.status, 'NOT_EXPLOITABLE')
+  assert.match(result.reason, /math-bounds/)
 })
 
 test('the severity cap is applied to what the workflow returns', async () => {

@@ -1,7 +1,16 @@
 # Detailed Checkpoint Reference
 
-The pass criteria for every checkpoint. Each must pass before the next stage
-begins; a failure halts the pipeline and is not advisory.
+The pass criteria for every checkpoint. A failure is not advisory — but "halts
+the pipeline" is only one of the three things the code does with one, and which
+one is per checkpoint rather than a house rule:
+
+- **Halts**, returning a status: a blocking layer, an UNCERTAIN layer, an
+  out-of-scope or by-design threat model, a complete upstream fix, a missing
+  external precondition.
+- **Corrects**, and reports the correction: an over-rated severity at 1e.
+- **Carries**, and blocks a TRUE POSITIVE at the verdict instead of ending the
+  stage early: a brocard that answered NEEDS_MORE_INFO. That one used to halt,
+  and halting measured worse than carrying — see [brocards.md](brocards.md).
 
 ## Which stage runs which checkpoint
 
@@ -14,13 +23,21 @@ the crosswalk between them, the stages in `SKILL.md`, and the six gates in
 |---|---|---|---|
 | 1a Intake | 1.1, 1.2, 1.3 | 1 Process | `missingArgs` |
 | 1b Cheap pre-gate | brocards 2, 4, 5, 6 — see [brocards.md](brocards.md) | — | `triageBrocards` |
-| 1c Reachability | 2.1, 2.2 | 2 Reachability | `decideGate`, `alreadyFixedStands` |
+| 1c Reachability | 2.1, 2.2 | 2 Reachability | `decideGate` |
+| 1c Threat model | 3.1, 3.2, 3.3 | 2 Reachability, 3 Real Impact | `decideGate` (the `threat` verdict) |
+| 1c Already-fixed | 5.1 challenge 4, on the cheap path | — | `upstreamFixStands`, `decideGate` |
+| 1c Deep route only | — | 5 Math Bounds, 6 Environment | the blocking-proof and dead-proof checks on `proofs` |
 | 1d Recovery | 2.3 | 3 Real Impact | `decideGate(!recovery)` |
-| 1e Impact + severity | 2.4, 2.4b, 2.5, 5.2 | 3 Real Impact, 5 Math Bounds | `missingPrecondition`, `capSeverity` |
-| 1f Adversarial | 3.1, 3.2, 3.3 + the 13 questions | 6 Environment | — synthesis |
+| 1e Impact + severity | 2.4, 2.4b, 2.5, 5.2 | 3 Real Impact | `missingPrecondition`, `capSeverity` |
+| 1f Adversarial | the 13 questions | 6 Environment | — synthesis |
 | 1g Verdict | all six gates | all | `decideVerdict` |
-| 2 Online | — see the online stage in `SKILL.md` | 2, 3 | `offlineProblem`, scope halt |
-| 3 PoC | 4.1, 4.2, 4.3, 5.1, 5.2, 6.1 | 4 PoC Validation | `isAcceptableBuild`, `tallyChallenges`, `confidenceBand`, `alreadyFixedStands`, `severityCapViolation` |
+| 2 Online | — see the online stage in `SKILL.md` | 2, 3 | `offlineProblem`, `scopeHalt`, `summaryProblem` |
+| 3 PoC | 4.1, 4.2, 4.3, 5.1, 5.2, 6.1 | 4 PoC Validation | `isAcceptableBuild`, `artifactProblem`, `tallyChallenges`, `confidenceBand`, `alreadyFixedStands`, `reportProblem`, `severityCapViolation` |
+
+`upstreamFixStands` and `alreadyFixedStands` are the same rule at two stages, and
+they are two functions with two names: Stage 1 reads the history agent's
+reference, Stage 3 reads challenge 4's verdict. Citing the Stage 3 name against
+Stage 1 sends the reader looking for a function that is not in that script.
 
 Stages 2 and 3 run only when the user asks for them. **Stage 1 alone must reach
 a verdict**, which is why the already-fixed search sits in 1c as well as in
@@ -41,7 +58,9 @@ not duplicated here:
 | 4.1 test-integrated PoCs | [test-integration.md](test-integration.md) |
 
 Placeholder, ellipsis, TODO and narration detection is `scripts/poc-lint.sh`'s
-job, not a checklist item.
+job, not a checklist item — but only for the **PoC file**. Nothing runs the linter
+over the report, so checkpoint 6.1's "no placeholders, no TBD" is still yours to
+check by reading it.
 
 ---
 
@@ -121,15 +140,20 @@ positives fail here.
 List **every** validation or check between the entry point and the vulnerable
 code. For each, give its type (authorization, input sanitization, rate limiting,
 type checking, bounds checking), its `file:line`, what it checks, and whether the
-attacker payload passes — with the code as evidence:
+attacker payload passes — with the code as evidence. The three verdicts are the
+layer schema's own, so use these words:
 
-- **YES** — explain how the payload survives it
-- **NO** — this BLOCKS the attack; stop and mark NOT_EXPLOITABLE
+- **PASSES** — explain how the payload survives it
+- **BLOCKS** — this stops the attack; the finding is NOT_EXPLOITABLE
 - **UNCERTAIN** — stop; the code must be traced before this can be answered
 
 **Pass criteria:**
 
-- Identified at least 1 layer (or confirmed none exist)
+- At least 1 layer identified. "Confirmed none exist" is a *claim*, and it is
+  dispatched as one explicit layer for an agent to confirm — an empty `layers`
+  list is rejected by `missingArgs` before any agent runs, because a forgotten
+  field and a deliberate "nothing guards this path" are the same value and zero
+  layer agents would reach a verdict having inspected nothing
 - For each layer, determined pass/fail with evidence
 - ZERO "UNCERTAIN" layers — all verified
 - If any blocks: mark NOT_EXPLOITABLE
@@ -160,8 +184,13 @@ before claiming a process crash.
 - If recovery exists: impact updated from crash to error
 - If claiming "process crash": proved recovery does not catch it
 
-**If recovery exists and the claim was a process crash:** impact drops to
-Low/Informational — this is error handling, not a crash.
+**If recovery exists and the claim was a process crash:** the claim is wrong as
+stated, and the impact becomes whatever survives the recovery. That is usually
+Low/Informational — error handling, not a crash. It is not always: a crash loop
+under a restart policy, state that the restart does not restore, and a lost task
+that was the only thing draining a queue all survive recovery as real findings.
+[recovery-mechanisms.md](recovery-mechanisms.md) has the four shapes. Record the
+surviving impact, not the fact that something caught it.
 
 ### Checkpoint 2.4: Impact Verification with Evidence
 
@@ -391,7 +420,7 @@ or partial fix is reported as such.
 
 **Confidence Level — this is the canonical scale for this skill.**
 
-Bands are half-open so that every score carries exactly one label. Derived from
+The ranges are disjoint, so every score carries exactly one label. Derived from
 how many of the 5 challenges above were defeated by evidence; a challenge that
 cannot be defeated with evidence counts as won by the challenge, not as a tie.
 
@@ -472,14 +501,22 @@ Seven sections, all required:
 
 ## Checkpoint Failure Protocol
 
-The output form is in SKILL.md. The rule here is what counts as a failure:
+The output form is in SKILL.md. The rule here is what counts as a failure, and
+what the code returns for it:
 
-| Failure | Response |
-|---------|----------|
-| Missing evidence | Request source code, or mark BLOCKED |
-| Uncertain validation layer | Code trace required |
-| Recovery exists | Downgrade the impact claim |
-| A challenge wins | Lower confidence, or mark NOT_EXPLOITABLE |
-| Placeholder detected | Complete the code |
+| Failure | Response | Status returned |
+|---------|----------|-----------------|
+| Missing evidence — a contract violation, or an agent that returned nothing | Request the source, or fix the dispatch | `BLOCKED` |
+| Uncertain validation layer | Code trace required before this can be answered | `NEEDS_MORE_INFO` |
+| Recovery exists | The verified impact is the one that survives recovery, and it is what 1e records | continues on the surviving impact |
+| A brocard cannot decide | Carried, resolved from the code if possible, and blocks a TRUE POSITIVE at the verdict | `NEEDS_MORE_INFO` at 1g |
+| A Stage 3 challenge wins | Lowers the confidence band; challenge 4 winning overrides the band outright | `DO_NOT_SUBMIT` |
+| Placeholder detected | Complete the code; `poc-lint.sh` must exit 0 | `BUILD_FAILED`, or `BLOCKED` at the reviewer's re-run |
 
-In every case: HALT. Do not proceed.
+**`NOT_EXPLOITABLE` is a Stage 1 status only.** Stage 3 has no verdict of that
+name — a challenge that stands there returns `DO_NOT_SUBMIT`.
+
+Every row above except "recovery exists" and "a brocard cannot decide" ends the
+stage. Neither of those two is a licence to proceed as though the check had
+passed: the first replaces the claimed impact with the surviving one, and the
+second is reported in `openQuestions` and denies a TRUE POSITIVE in code.

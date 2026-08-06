@@ -12,6 +12,11 @@ repeated as prose.
 
 ## 1. Reimplementation — the failure that invalidates everything
 
+> This rule is what `poc-lint.sh` calls **Principle 5**, and it is the only rule
+> the linter cannot check without help: pass `--symbol <the symbol under test>` or
+> it prints `Principle 5 NOT checked` and rule 6 does not run. A clean report
+> without a symbol says nothing about this section.
+
 **A PoC that copies the vulnerable code and calls the copy only proves the copy
 is broken.** It says nothing about the application. The real code may have
 surrounding validation, different configuration, compiler flags, or recovery

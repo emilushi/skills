@@ -312,3 +312,15 @@ test('unproven is reported ahead of reportPath when both are blank', () => {
   const problem = reportProblem({ ...goodReport, unproven: '', reportPath: '' })
   assert.match(problem, /unproven/)
 })
+
+// `confidenceBand` hardcoded `defeated === 5` for HIGH while every other consumer
+// used CHALLENGES.length. Correct today and silently wrong the moment a sixth
+// challenge is added: HIGH becomes unreachable and every perfect review reports
+// MEDIUM. `total` is a defaulted parameter rather than a reference to the const,
+// because the tests evaluate this function alone where a free variable throws.
+test('the band scales with the challenge count instead of hardcoding it', () => {
+  assert.equal(confidenceBand(5, 5).label, 'HIGH')
+  assert.equal(confidenceBand(6, 6).label, 'HIGH', 'a sixth challenge must not make HIGH unreachable')
+  assert.equal(confidenceBand(5, 6).label, 'MEDIUM', 'and one lost is no longer HIGH')
+  assert.equal(confidenceBand(5).label, 'HIGH', 'the default still matches todays five')
+})

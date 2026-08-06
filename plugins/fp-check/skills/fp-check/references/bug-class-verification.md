@@ -37,7 +37,15 @@ covers the obvious spellings (`buffer overflow`, `use-after-free`, `OOB write`,
 
 Buffer overflow, heap overflow, stack overflow, out-of-bounds read/write, use-after-free, double-free, type confusion.
 
-**Language safety check first:** Memory corruption in safe Rust, Go (without `unsafe.Pointer`/cgo), or managed languages (Java, C#, Python) is almost always a false positive — the type system or runtime prevents it. Verify whether the code is in an `unsafe` block (Rust), uses cgo/`unsafe.Pointer` (Go), or calls native code via JNI/P/Invoke. If the code is entirely in the safe subset, reject the memory corruption claim unless it involves a compiler bug or soundness hole.
+**Language safety check first:** Memory corruption in safe Rust, Go (without `unsafe.Pointer`/cgo), or managed languages (Java, C#, Python) is almost always a false positive — the type system or runtime prevents it. Verify whether the code is in an `unsafe` block (Rust), uses cgo/`unsafe.Pointer`/`reflect.SliceHeader` (Go), or reaches native memory another way: JNI, P/Invoke and `sun.misc.Unsafe` on the JVM and CLR, `ctypes`, `cffi`, a C extension or a misused buffer protocol in CPython.
+
+**Then check the three exceptions before rejecting**, because "safe language" is a claim about the safe subset and not about the whole program:
+
+- **A Go data race is not memory-safe.** Go's memory model gives racing programs undefined behaviour, and a torn write to an interface value or a slice header is real type confusion with a real OOB read behind it. So a Go memory-safety finding whose trigger is a race is not disposed of by "no `unsafe.Pointer` here" — it is a concurrency finding, and the deep route's race-feasibility proof is what decides it.
+- **The `unsafe` block need not be the one you are looking at.** A safe wrapper that computes a length or an index which an `unsafe` block downstream trusts is where most real Rust findings live. Trace the value, not the block.
+- **An attacker who supplies the `ctypes` call already has code execution**, so that is brocard 2's dismissal, not this one. What is *not* dismissed is attacker-controlled **data** reaching an existing native boundary — a size, an offset, a length passed to a C extension.
+
+If none of those apply and the path is entirely in the safe subset, reject the memory corruption claim unless it involves a compiler bug or soundness hole.
 
 **Verify:**
 
@@ -139,7 +147,7 @@ Unsafe deserialization, object injection, gadget chain exploitation.
 **Verify:**
 
 - Does the attacker actually control the serialized data that reaches the deserialization call?
-- Does a usable gadget chain exist in the classpath/import graph? Without a gadget chain, unsafe deserialization is a design smell, not an exploitable bug.
+- **Does this format even need a gadget chain?** Some do not, and requiring one there turns an immediate RCE into a "design smell". Python `pickle` executes an attacker-chosen callable directly through `__reduce__` — `os.system` is in the standard library and no chain is needed; PyYAML's `yaml.load` without `SafeLoader` constructs arbitrary objects the same way. Java `ObjectInputStream`, PHP `unserialize`, Ruby `Marshal` and .NET `BinaryFormatter` **do** need a gadget: the format calls magic methods on types that must already be present.
+- Where a gadget chain IS required: does a usable one exist in the classpath or import graph? Without one, unsafe deserialization on those formats is a design smell rather than a demonstrated bug — but say which formats you mean, and check the version, because a chain that lands in a later release retroactively makes it one.
 - What deserialization library and version is in use? Are there known gadget chains for it?
 - Are there type restrictions, allowlists, or look-ahead deserialization filters that block dangerous classes?
-- For language-specific: Java `ObjectInputStream`, Python `pickle`, PHP `unserialize`, .NET `BinaryFormatter` each have different exploitation characteristics.

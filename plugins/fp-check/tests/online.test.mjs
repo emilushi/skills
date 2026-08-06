@@ -82,19 +82,77 @@ test('a non-array sources list is reported, not thrown on', () => {
 
 // A finding already dismissed on the code does not need a policy check, and
 // running one anyway invites the online evidence to argue a dead finding back to
-// life. NEEDS_MORE_INFO and OUT_OF_SCOPE are the two that Stage 2 can still move.
+// life. NEEDS_MORE_INFO is the one Stage 2 can still move: Stage 1 reaches it both
+// before and after the impact agent, so its payload sometimes carries the impact
+// this stage requires.
 test('only an actionable Stage 1 status is accepted', () => {
-  for (const status of ['TRUE_POSITIVE', 'NEEDS_MORE_INFO', 'OUT_OF_SCOPE']) {
+  for (const status of ['TRUE_POSITIVE', 'NEEDS_MORE_INFO']) {
     const problems = missingArgs({ ...GOOD, verification: { ...GOOD.verification, status } })
     assert.deepEqual(problems, [], `${status} must be accepted`)
   }
-  for (const status of ['DISMISSED', 'NOT_EXPLOITABLE', 'NOT_VULNERABLE', 'FALSE_POSITIVE', 'ALREADY_FIXED', 'BLOCKED', '', undefined]) {
+  for (const status of ['DISMISSED', 'NOT_EXPLOITABLE', 'NOT_VULNERABLE', 'FALSE_POSITIVE', 'ALREADY_FIXED', 'OUT_OF_SCOPE', 'BLOCKED', '', undefined]) {
     const problems = missingArgs({ ...GOOD, verification: { ...GOOD.verification, status } })
     assert.ok(
       problems.some((p) => p.startsWith('verification.status')),
       `${JSON.stringify(status)} must be rejected`,
     )
   }
+})
+
+// Stage 1's own OUT_OF_SCOPE payload, run through Stage 2's validator. Not a
+// hand-built fixture: the two scripts have to agree about a value one of them
+// produces and the other consumes, and a fixture can be written to agree with
+// either.
+//
+// The status was on the actionable list on the reasoning that "a DECLARED scope is
+// exactly what a published policy can overturn" — but Stage 1 decides OUT_OF_SCOPE
+// in `decideGate`, before the impact agent is ever dispatched, so the payload it
+// returns has no `impact` and no `severity` and Stage 2 requires both. Every
+// dispatch the list invited was therefore rejected by the next four lines of the
+// same function, and the rejection listed OUT_OF_SCOPE among the statuses it
+// accepts.
+test('a Stage 1 OUT_OF_SCOPE payload is rejected coherently, not invited and then refused', async () => {
+  const staticRun = await runScript('triage-static.js', {
+    args: {
+      baseDir: '/plugin/skills/fp-check',
+      finding: {
+        summary: 'unauthenticated read of arbitrary tables',
+        sink: 'search.py:34',
+        component: 'the search module',
+        claimedImpact: 'database contents disclosed',
+        bugClass: 'injection',
+        threatModel: 'an unauthenticated caller supplies a crafted filter',
+      },
+      entryPoint: { description: 'GET /search', location: 'search.py:8', payload: "f=1' OR 1=1--" },
+      layers: [{ name: 'filter-allowlist', location: 'search.py:14', checks: 'the filter is matched' }],
+      scope: 'the API surface, excluding internal tooling',
+    },
+    agents: {
+      brocard: { verdict: 'PASS', missingFact: '', evidence: 'fine' },
+      layer: { verdict: 'PASSES', evidence: 'the filter reaches the query' },
+      recovery: { recoveryExists: false, effectiveImpact: 'rows disclosed', evidence: 'no recover' },
+      'threat-model': {
+        inScope: 'NO',
+        byDesign: false,
+        byDesignIndicators: 0,
+        evidence: 'internal tooling is excluded by the declared scope',
+      },
+      history: { fixed: 'NO', complete: false, reference: '', searched: 'git log -p', evidence: 'nothing' },
+    },
+  })
+  assert.equal(staticRun.result.status, 'OUT_OF_SCOPE', 'the fixture must actually be a Stage 1 OUT_OF_SCOPE')
+  assert.equal(staticRun.result.severity, undefined, 'and it is decided before any severity exists')
+
+  const problems = missingArgs({ ...GOOD, verification: staticRun.result })
+  const rejection = problems.find((p) => p.startsWith('verification.status'))
+  assert.ok(rejection, 'Stage 2 must not offer a status whose only possible payload it rejects')
+  // The accepted list, not the whole message: naming the status it RECEIVED is the
+  // useful half of the rejection. Listing it as acceptable is the incoherent half.
+  const accepted = rejection.slice(0, rejection.indexOf('; got'))
+  assert.ok(
+    !accepted.includes('OUT_OF_SCOPE'),
+    `the rejection lists the status it just refused as acceptable: ${accepted}`,
+  )
 })
 
 test('the validator returns an array and never throws on empty input', () => {
@@ -350,6 +408,98 @@ test('a dead source agent is reported to the summary as unchecked', async () => 
   const summary = calls.find((c) => c.label === 'summary')
   assert.match(summary.prompt, /NOT searched/)
   assert.match(summary.prompt, /mailing-list/)
+})
+
+// The one agent result in this script that nothing guarded. `policy` has
+// offlineProblem, `scope` has scopeHalt, `summary` has summaryProblem — and
+// `reachability.evidence` is interpolated straight into the scope prompt, so a dead
+// reachability agent threw a TypeError out of the workflow instead of returning a
+// status. An exception is not a fail-closed outcome: the orchestrator is left
+// holding a user request with no verdict, which is the documented shape of this
+// plugin's worst measured failure (the gate stops, the orchestrator triages by
+// hand outside it).
+test('a dead reachability agent returns BLOCKED rather than throwing', async () => {
+  for (const dead of [null, undefined]) {
+    const { result, calls } = await runScript('triage-online.js', {
+      args: GOOD,
+      agents: agents({ reachability: dead }),
+    })
+    assert.equal(result.status, 'BLOCKED', `reachability ${JSON.stringify(dead)}`)
+    assert.match(result.reason, /reachability/)
+    assert.ok(
+      !calls.some((c) => c.label === 'inscope'),
+      'no scope verdict may be formed against a reachability finding that does not exist',
+    )
+  }
+})
+
+// A duplicate is a fact one of the past-bug agents established, with a link. The
+// summary's job is to write it up; its failure cannot unmake it. Ordered the other
+// way round, a summary that left openQuestions empty — the single most likely
+// summary defect, which is why the gate exists — turned "this is already publicly
+// reported at GHSA-x" into "needs more info", and the next reader pays for the
+// whole stage again to be told the same thing.
+test('a confirmed duplicate survives a summary that fails its own gate', async () => {
+  for (const summary of [{ ...SUMMARY, openQuestions: '' }, null]) {
+    const { result } = await runScript('triage-online.js', {
+      args: GOOD,
+      agents: agents({
+        summary,
+        'past-bugs': {
+          result: 'similar-bugs-found',
+          coverage: 'all pages',
+          links: 'GHSA-xxxx-yyyy-zzzz',
+          similarity: 'same trigger, same actor, same component',
+          recommendedSeverity: 'High',
+          duplicate: true,
+          evidence: 'identical report',
+        },
+      }),
+    })
+    assert.equal(result.status, 'DUPLICATE', `summary ${JSON.stringify(summary)}`)
+    assert.match(result.reason, /GHSA-/)
+  }
+})
+
+// The citation a retraction is relayed with, and `required` checks presence and not
+// content: `links: '   '` is schema-valid and truthy, so it displaced the `evidence`
+// it was meant to fall back to and DUPLICATE came back citing blank space.
+test('a whitespace links field falls back to the evidence, not to nothing', async () => {
+  const { result } = await runScript('triage-online.js', {
+    args: GOOD,
+    agents: agents({
+      'past-bugs': {
+        result: 'similar-bugs-found',
+        coverage: 'all pages',
+        links: '   ',
+        similarity: 'same trigger, same actor',
+        recommendedSeverity: 'High',
+        duplicate: true,
+        evidence: 'filed as issue 1204 in 2019',
+      },
+    }),
+  })
+  assert.equal(result.status, 'DUPLICATE')
+  assert.match(result.reason, /issue 1204/)
+})
+
+// Over-cap sources are dropped silently as far as every consumer is concerned: the
+// cap is logged, and the log is not evidence anyone downstream reads. The summary
+// agent is handed "N of M sources returned a result" with the dropped venues absent
+// from both numbers, so an unsearched venue reads as a searched one — the same
+// "absent duplicate check becomes a clean bill of health" the dead-agent list above
+// exists to prevent, arriving by a different route.
+test('sources dropped by the cap are declared unchecked, not silently omitted', async () => {
+  const sources = Array.from({ length: 8 }, (_, i) => ({ label: `src-${i}`, query: `q${i}` }))
+  const { result, calls } = await runScript('triage-online.js', {
+    args: { ...GOOD, sources },
+    agents: agents(),
+  })
+  assert.equal(result.status, 'TRIAGED')
+  assert.deepEqual(result.beyondCap, ['src-6', 'src-7'], 'the payload must name what was never dispatched')
+  const summary = calls.find((c) => c.label === 'summary')
+  assert.match(summary.prompt, /src-6/)
+  assert.match(summary.prompt, /src-7/)
 })
 
 test('the past-bug fan-out is capped, and what was dropped is logged', async () => {

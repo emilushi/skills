@@ -211,8 +211,14 @@ function missingArgs(a) {
   // not reading it is not a gate.
   const status = (a && a.verification && a.verification.status) || ''
   if (status !== 'TRUE_POSITIVE') {
+    // The message says TRUE_POSITIVE and not "cleared all six gates", which is
+    // what it used to say and is no longer the same thing: since a carried brocard
+    // question blocks a TRUE_POSITIVE in code, Stage 1 can pass all six gates and
+    // still return NEEDS_MORE_INFO. The gate is unchanged — an open question is a
+    // fact to resolve, not a finding to demonstrate — but a rejection that names a
+    // criterion the finding did meet sends the reader looking in the wrong place.
     missing.push(
-      `verification.status (must be 'TRUE_POSITIVE'; got ${status ? `'${status}'` : 'nothing'} — only a finding that cleared all six gates justifies building an exploit)`,
+      `verification.status (must be 'TRUE_POSITIVE'; got ${status ? `'${status}'` : 'nothing'} — only a finding Stage 1 confirmed outright justifies building an exploit. Six passing gates are necessary and not sufficient: an unresolved brocard or an unresolved uncertainty still returns NEEDS_MORE_INFO, and that is a missing fact to answer rather than a bug to demonstrate)`,
     )
   }
   need('envelope.level', envelope.level)
@@ -393,9 +399,16 @@ discards a PoC that actually worked.${retryContext}`,
     break
   }
 
+  // Trimmed, not merely truthy, for the same reason isAcceptableBuild trims: a
+  // schema-valid `failureReason: '   '` is truthy, and this string is both
+  // BUILD_FAILED's `reason` — which SKILL.md tells the orchestrator to relay as the
+  // missing fact — and the next attempt's "Why it failed:", which would have read as
+  // blank space.
   lastFailure = {
     candidate: candidate.description,
-    failureReason: result ? result.failureReason || 'built/executed/lint gate not satisfied' : 'builder agent failed',
+    failureReason: result
+      ? String(result.failureReason || '').trim() || 'built/executed/lint gate not satisfied'
+      : 'builder agent failed',
   }
   log(`Attempt ${i + 1} failed: ${lastFailure.failureReason}`)
 }
@@ -492,12 +505,6 @@ function artifactProblem(check) {
   return null
 }
 
-const artifactIssue = artifactProblem(artifact)
-if (artifactIssue) {
-  log(`PoC validation unsatisfied: ${artifactIssue}`)
-  return { status: 'BLOCKED', reason: artifactIssue, poc, artifact, verdicts }
-}
-
 // Pure. Tallies against the EXPECTED challenge list, not against whatever came
 // back: a challenge with no verdict counts as won by the challenge, which is the
 // stated rule. Tallying the returned array instead lets a dead agent raise
@@ -527,8 +534,11 @@ function alreadyFixedStands(unrebutted) {
 }
 
 // checkpoints.md 5.1, applied as code rather than self-reported.
-function confidenceBand(defeated) {
-  if (defeated === 5) return { label: 'HIGH', range: '90-100%', action: 'PROCEED' }
+// `total` is a defaulted parameter rather than a reference to CHALLENGES.length:
+// the tests extract this function and evaluate it alone, where a free variable is a
+// ReferenceError. test_the_band_total_matches_the_challenge_count pins the two.
+function confidenceBand(defeated, total = 5) {
+  if (defeated === total) return { label: 'HIGH', range: '90-100%', action: 'PROCEED' }
   if (defeated >= 3) return { label: 'MEDIUM', range: '50-89%', action: 'PROCEED_WITH_UNCERTAINTIES' }
   if (defeated >= 1) return { label: 'LOW', range: '10-49%', action: 'DO_NOT_SUBMIT' }
   return { label: 'NONE', range: '0-9%', action: 'DO_NOT_SUBMIT' }
@@ -537,7 +547,7 @@ function confidenceBand(defeated) {
 const tally = tallyChallenges(verdicts, CHALLENGES.map((c) => c.key))
 const defeated = tally.defeated
 const lost = tally.unrebutted
-const band = confidenceBand(defeated)
+const band = confidenceBand(defeated, CHALLENGES.length)
 
 if (tally.missing > 0) {
   log(`${tally.missing} challenge agent(s) returned nothing; counted as won by the challenge.`)
@@ -545,14 +555,33 @@ if (tally.missing > 0) {
 log(`${defeated}/${CHALLENGES.length} challenges defeated → ${band.label} (${band.range})`)
 
 // The band alone would let 4/5 defeated proceed on an already-patched bug.
+//
+// FIRST, and ahead of the artifact gate below, because 5.1's rule is that this
+// outcome "overrides everything else" and the artifact gate was above it. The two
+// are different in kind: the artifact check is a judgement about whether this PoC is
+// real, and challenge 4 is a fact about the codebase — a fix, with a reference,
+// which no amount of PoC verification makes less true. With the gate first, a dead
+// artifact agent or a failing lint turned "already patched, retract it" into
+// BLOCKED, which SKILL.md relays as NEEDS MORE INFO and whose completion gate tells
+// the orchestrator to re-dispatch, buying the same answer twice for a bug that no
+// longer exists.
 if (alreadyFixedStands(lost)) {
   const verdict = verdicts.find((v) => v.key === 'already-fixed')
+  // Trimmed: `evidence: '   '` is schema-valid and truthy, and this is the reason a
+  // retraction is relayed with.
   const why = verdict
-    ? verdict.evidence || 'see challenge 4'
+    ? String(verdict.evidence || '').trim() || 'see challenge 4'
     : 'challenge 4 returned no verdict, which counts as won by the challenge'
-  log(`DO_NOT_SUBMIT: the already-fixed challenge stands. ${why}`)
+  log(`ALREADY_FIXED: the already-fixed challenge stands. ${why}`)
   return {
-    status: 'DO_NOT_SUBMIT',
+    // ALREADY_FIXED, not DO_NOT_SUBMIT. The bug was real and a fix landed, so this
+    // is a RETRACTION with a reference — and Stage 1 already returns exactly this
+    // status for exactly this rule. Under one shared DO_NOT_SUBMIT the orchestrator
+    // had to pattern-match the reason prefix to tell a retraction from a false
+    // positive from an incomplete report, and the documented mapping sent all three
+    // to FALSE POSITIVE. Two of the three were the rounding error this plugin
+    // exists to prevent.
+    status: 'ALREADY_FIXED',
     reason: `already-fixed challenge unrebutted: ${why}. Retract rather than report at a lowered severity.`,
     band,
     defeated,
@@ -561,6 +590,17 @@ if (alreadyFixedStands(lost)) {
     verdicts,
     unrebutted: lost,
   }
+}
+
+// Now the artifact, and it outranks everything below it: the band is a tally of
+// judgements about a PoC, so it means nothing until someone other than the builder
+// has confirmed the PoC is there and lints clean. Only the already-fixed rule above
+// escapes it, and only because it is a fact about the code rather than about the
+// artifact.
+const artifactIssue = artifactProblem(artifact)
+if (artifactIssue) {
+  log(`PoC validation unsatisfied: ${artifactIssue}`)
+  return { status: 'BLOCKED', reason: artifactIssue, poc, artifact, verdicts, band, defeated, unrebutted: lost }
 }
 
 if (band.action === 'DO_NOT_SUBMIT') {
@@ -652,8 +692,12 @@ function reportProblem(result) {
 
 const reportIssue = reportProblem(report)
 if (reportIssue) {
-  log(`Report incomplete: ${reportIssue}`)
-  return { status: 'DO_NOT_SUBMIT', reason: reportIssue, band, defeated, poc, artifact, verdicts, unrebutted: lost }
+  // NEEDS_MORE_INFO, not DO_NOT_SUBMIT. Nothing was disproven here — five
+  // challenges were defeated and the PoC ran; the report agent left a field the
+  // report is defined by blank. Calling that a false positive discards a finding
+  // for a clerical failure.
+  log(`NEEDS_MORE_INFO: ${reportIssue}`)
+  return { status: 'NEEDS_MORE_INFO', reason: reportIssue, band, defeated, poc, artifact, verdicts, unrebutted: lost }
 }
 
 // checkpoints.md 2.4b and 2.5, as arithmetic rather than judgement. Stage 1
@@ -696,4 +740,6 @@ if (capViolation) {
 }
 
 log(`REPORTED at ${report.severity}, confidence ${band.label} (${defeated}/${CHALLENGES.length}).`)
-return { status: 'REPORTED', band, defeated, poc, artifact, verdicts, report }
+// Every other terminal status carries a `reason`, and SKILL.md's Completion Gate
+// tells the orchestrator to relay it verbatim. This was the one exception.
+return { status: 'REPORTED', reason: report.severityRationale, band, defeated, poc, artifact, verdicts, report }

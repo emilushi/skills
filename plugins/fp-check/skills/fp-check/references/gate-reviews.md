@@ -33,7 +33,10 @@ right verdict. Naming the blocker is not the same as concluding.
 ## Verdicts
 
 Three, not two. The workflow returns a finer-grained status; these are what to
-report to a human.
+report to a human. **SKILL.md's Verdicts table is the authoritative status →
+verdict mapping** and is not repeated here — in particular Stage 3's
+`DO_NOT_SUBMIT` covers three outcomes and only one of them is a FALSE POSITIVE.
+What follows is the shape to report once you have the verdict.
 
 | Verdict | Reached when | Report as |
 |---|---|---|

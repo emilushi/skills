@@ -18,25 +18,26 @@ The fastest path to an answer. Everything below this table is elaboration.
 | Go `net/http` | **Per-connection `recover()` in `conn.serve`** | That one connection is closed. **No status is written** — not a 500 | Handler panic does not stop the server; the client sees a dropped connection |
 | Go Gin | Recovery middleware, included in `gin.Default()` | 500 | Check whether `gin.New()` was used instead |
 | Go, general | No recovery unless `defer`/`recover` | Process crash | `grep -rn 'defer func' \| grep -A3 recover` |
-| Rust, general | No recovery unless `catch_unwind` | Process crash | `grep -rn catch_unwind` |
-| Rust Actix-web | **No default panic recovery** | Worker thread dies | Check for panic middleware |
-| Node.js Express | Depends on an error-handling middleware being registered | Varies | Look for `app.use((err, req, res, next) =>` |
-| Node.js, general | Uncaught exception terminates unless a handler exists | Process exit | `grep -rn uncaughtException` |
+| Rust, general | No recovery unless `catch_unwind` — and none at all under `panic = "abort"` | Panicking thread dies. That is the **process** only if it is `main` or the profile aborts; another thread's death is one thread | `grep -rn catch_unwind`, plus `panic =` in `Cargo.toml`, plus which thread the panic is on |
+| Rust Actix-web | **No default panic recovery, and no 500** | That worker thread dies mid-request; the client sees a dropped connection and the process survives | Whether the server log shows a worker being replaced — do not assume either way |
+| Node.js Express | **A synchronous throw IS caught** by the built-in error handler, with or without a custom one | 500 | Whether the handler is `async`: see the row below |
+| Node.js Express, async handler | Express 4 does **not** catch a rejected promise; Express 5 forwards it to the error handler | Express 4: unhandled rejection, which on Node ≥15 exits the process. Express 5: 500 | The Express major version, and whether the route `await`s without a `try` |
+| Node.js, general | Uncaught exception terminates unless a handler exists | Process exit | `grep -rn uncaughtException`, and `unhandledRejection` for the async case |
 | Python Flask | Built-in error handler | 500 | Default behavior |
 | Python Django | Middleware catches exceptions | 500 | Default behavior |
 | Python, general | Uncaught exception unwinds to the interpreter and exits | Process exit | The absence of `try` is not the question — find the outermost frame |
 | Python `asyncio` | **A task that raises dies alone.** The loop keeps running and logs "Task exception was never retrieved" — often only at GC | One task lost, silently | `grep -n 'create_task\|ensure_future'` and check who awaits the result |
 | Python `threading` | An exception in a thread kills that thread only | One thread lost | `threading.excepthook`, and whether the thread was doing the only copy of the work |
-| Java Spring Boot | `@ExceptionHandler` / `@ControllerAdvice` | 500 | Check for a global advice class |
+| Java Spring Boot | Handled by the framework whether or not you register anything: `@ExceptionHandler` / `@ControllerAdvice` if present, otherwise `BasicErrorController` | 500 (the whitelabel error page, absent an advice class) | An advice class changes the *body*, not whether it is caught |
 | Java, general | Uncaught exception kills the thread, not the JVM | One thread lost | `Thread.setDefaultUncaughtExceptionHandler` |
 | C# / ASP.NET | Exception filter pipeline | 500 | Built-in middleware |
-| Ruby on Rails | `show_exceptions` middleware | 500 | Default in production; raises in development |
+| Ruby on Rails | `ShowExceptions` middleware, on by default | 500 | Production serves the static error page; development renders the `DebugExceptions` diagnostic page (still a 500). The generated **test** env is the one that re-raises |
 | PHP-FPM | Fatal error ends that request; the pool worker is reused or respawned | 500, pool survives | `max_children`, and whether the fatal leaks state |
 | Erlang / Elixir | **Supervisor restarts the process by design** | Restart, state lost | The supervision tree, and the restart strategy and intensity |
 | Rust `tokio` | A panicking task is captured in its `JoinHandle`; the runtime survives | One task lost | Whether anything inspects the `JoinError` |
 | Go, `errgroup` / `WaitGroup` | Neither recovers — a panic in a member goroutine still takes the process | Process crash | `recover()` inside each goroutine, not around the group |
 | WebAssembly | Trapped at the VM boundary | Call fails, host survives | Cannot escape the VM |
-| Docker container | Container exits, restart policy applies | Restart, brief unavailability | `docker inspect` restart policy |
+| Docker container | Container exits; the restart policy decides and **defaults to `no`** | Without `--restart`, the container stays down — not a blip | `docker inspect -f '{{.HostConfig.RestartPolicy.Name}}'`, or the Compose `restart:` key |
 | Kubernetes pod | `restartPolicy: Always` by default, with exponential backoff | Restart; **`CrashLoopBackOff` if repeatable** | The liveness probe, and whether a crash loop is itself the DoS |
 | systemd unit | `Restart=` decides, and defaults to `no` | Depends entirely on the unit file | `systemctl cat`, and `StartLimitBurst` |
 | Subprocess | Child exits, parent observes | Isolated failure | Parent's `subprocess` handling |
@@ -71,13 +72,20 @@ the process, no matter what the enclosing handler does.
   Request error, not server crash.
 - **"An exception in a Flask view crashes the server."** Flask's error handler
   catches it. 500, not a crash.
-- **"A Rust panic always crashes."** Only without `catch_unwind`. Check.
+- **"A Rust panic always crashes."** Only without `catch_unwind`, and only on a
+  thread whose death is the process's. Check both.
+- **"An exception in an Express route crashes the server."** A synchronous throw
+  is caught and answered 500 without any middleware of your own. The async
+  rejection is the case worth checking.
 
 ## Patterns that are usually real crashes
 
 - **Go panic in an unrecovered goroutine** — `recover()` does not reach it.
-- **Rust panic with no `catch_unwind`** on the path — unwinds and aborts.
-- **Node.js uncaught exception with no `uncaughtException` handler.**
+- **Rust panic on `main` with no `catch_unwind`** — unwinds out and the process
+  exits 101. Under `panic = "abort"` any thread's panic aborts the process.
+- **Node.js uncaught exception with no `uncaughtException` handler** — and, since
+  Node 15, an unhandled promise rejection with no `unhandledRejection` handler,
+  which terminates by default rather than warning.
 - **Panic in `init()` or startup** — recovery is not installed yet. And this is
   the case where a restart policy makes things *worse*, not better: a crash in
   startup restarts into the same crash, which is a `CrashLoopBackOff` and an

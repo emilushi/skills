@@ -84,8 +84,9 @@ for f in "${FILES[@]}"; do
   # Same rule as the zero-files case one level down. Bytes are not content, and
   # `[ ! -s ]` only caught the truly empty file: a lone newline, a stray space
   # and a UTF-8 BOM each satisfied every pattern below by having nothing to
-  # match, and were reported as a clean PoC — through review-poc's independent
-  # checkpoint 4.3 re-check. One alphanumeric character covers all three.
+  # match, and were reported as a clean PoC — through triage-poc's independent
+  # artifact check, which re-runs this linter. One alphanumeric character covers
+  # all three.
   #
   # Deliberately not "has a line of code". Rules 2 to 5 all match INSIDE
   # comments, so a file of nothing but comments is something they read rather
@@ -315,7 +316,7 @@ export REIMPL_RE
 #          """Transferring -500 credits the attacker and underflows."""
 #          pass
 #
-#    That is not an exotic shape — build-poc.js instructs the builder to "write
+#    That is not an exotic shape — triage-poc.js instructs the builder to "write
 #    the docstring to match the assertion" on a test-integrated PoC, so it is
 #    precisely what a half-written one looks like. Comment and docstring lines
 #    are therefore not read as the body. The delimiters arrive as awk variables
