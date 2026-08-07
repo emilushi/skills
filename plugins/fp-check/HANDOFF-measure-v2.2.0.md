@@ -101,7 +101,7 @@ fields and no-answer runs (`judgeVotes: null` with empty evidence) yourself.
 Report the mean **both ways** — as the CLI computes it, and excluding ungradeable
 runs. Quote the per-case table, never the mean alone.
 
-## 2. What changed in 2.2.0 and what it should do
+## 2. What changed in 2.2.0/2.2.1 and what it should do
 
 Three subagents fixed 17 bugs after v2. The measured problem they were aimed at:
 
@@ -128,8 +128,9 @@ and they decided the cases the ported machinery existed to decide:
 
 Fixes: `PROOF_SCHEMA.applies` required and read `=== true` so an auxiliary proof
 cannot block a question that does not apply; a blocking proof is carried rather
-than terminal so `capSeverity` always runs; brocards 4 and 5 defer to the recovery
-and history gates (2 and 6 keep the short-circuit — nothing downstream tests them);
+than terminal so `capSeverity` always runs; brocards 2, 4 and 5 defer to the impact,
+recovery and history gates (**6 is the only one left that ends the stage**, and the
+only one with no downstream equivalent — nothing else evaluates remediation cost);
 `upstreamFixStands` moved above the blocking-layer branch; `settledByStageOne`
 gives Stage 3 a degraded mode so its refusal reads as a verdict about the finding
 rather than a complaint about the caller.
