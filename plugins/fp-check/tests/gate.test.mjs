@@ -62,18 +62,18 @@ test('two live definitions are a hard stop, not a first-wins guess', () => {
 })
 
 test('all layers passable and threat model clear proceeds', () => {
-  const r = decideGate([layer('auth', 'PASSES'), layer('bounds', 'PASSES')], checked, inScope, unfixed, 2, 0)
+  const r = decideGate([layer('auth', 'PAYLOAD_REACHES_SINK'), layer('bounds', 'PAYLOAD_REACHES_SINK')], checked, inScope, unfixed, 2)
   assert.equal(r.status, 'PROCEED')
 })
 
 test('a blocking layer is NOT_EXPLOITABLE and names where', () => {
-  const r = decideGate([layer('auth', 'PASSES'), layer('validate', 'BLOCKS')], checked, inScope, unfixed, 2, 0)
+  const r = decideGate([layer('auth', 'PAYLOAD_REACHES_SINK'), layer('validate', 'PAYLOAD_STOPPED_HERE')], checked, inScope, unfixed, 2)
   assert.equal(r.status, 'NOT_EXPLOITABLE')
   assert.match(r.reason, /validate/)
 })
 
-test('BLOCKS wins over UNCERTAIN — the stronger verdict decides', () => {
-  const r = decideGate([layer('a', 'UNCERTAIN'), layer('b', 'BLOCKS')], checked, inScope, unfixed, 2, 0)
+test('a stopped payload wins over UNCERTAIN — the stronger verdict decides', () => {
+  const r = decideGate([layer('a', 'UNCERTAIN'), layer('b', 'PAYLOAD_STOPPED_HERE')], checked, inScope, unfixed, 2)
   assert.equal(r.status, 'NOT_EXPLOITABLE')
 })
 
@@ -83,12 +83,13 @@ test('BLOCKS wins over UNCERTAIN — the stronger verdict decides', () => {
 // and could not be traced. Calling that BLOCKED sends the reader to the harness
 // instead of to the code.
 test('any UNCERTAIN layer needs more info: checkpoint 2.2 requires zero', () => {
-  const r = decideGate([layer('a', 'PASSES'), layer('b', 'UNCERTAIN')], checked, inScope, unfixed, 2, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK'), layer('b', 'UNCERTAIN')], checked, inScope, unfixed, 2)
   assert.equal(r.status, 'NEEDS_MORE_INFO')
   assert.match(r.reason, /unresolved/)
 })
 
-// The gate reads PASSES rather than "not BLOCKS and not UNCERTAIN". Grading by
+// The gate reads PAYLOAD_REACHES_SINK rather than "not stopped and not
+// UNCERTAIN". Grading by
 // exclusion made PROCEED the fall-through for any verdict the script does not
 // recognise — on the checkpoint the phase map calls MOST CRITICAL, and the only
 // gate in this pipeline that did not read the value it wanted.
@@ -96,7 +97,7 @@ test('a verdict outside the enum blocks rather than falling through to PROCEED',
   for (const verdict of [undefined, '', 'passes', 'BANANA']) {
     const r = decideGate([{ layer: 'a', location: 'a.py:1', verdict }], checked, inScope, unfixed, 1)
     assert.equal(r.status, 'BLOCKED', `verdict ${JSON.stringify(verdict)} must not PROCEED`)
-    assert.match(r.reason, /no PASSES verdict/)
+    assert.match(r.reason, /no PAYLOAD_REACHES_SINK verdict/)
   }
 })
 
@@ -106,22 +107,22 @@ test('a verdict outside the enum blocks rather than falling through to PROCEED',
 test('an inScope value outside the enum does not fall through to being read as YES', () => {
   for (const value of [undefined, '', 'yes', 'MAYBE']) {
     const threat = { inScope: value, byDesign: false, evidence: 'e' }
-    const r = decideGate([layer('a', 'PASSES')], checked, threat, unfixed, 1)
+    const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, threat, unfixed, 1)
     assert.equal(r.status, 'NEEDS_MORE_INFO', `inScope ${JSON.stringify(value)} must not PROCEED`)
   }
 })
 
 // The bug this function was extracted to expose. Before the refactor the gate
-// filtered for BLOCKS and UNCERTAIN over an empty array, matched neither, and
+// filtered for stopped and UNCERTAIN over an empty array, matched neither, and
 // fell through to PROCEED — reporting success having verified nothing.
-test('every layer agent dying BLOCKS rather than proceeding', () => {
-  const r = decideGate([], checked, inScope, unfixed, 3, 0)
+test('every layer agent dying blocks rather than proceeding', () => {
+  const r = decideGate([], checked, inScope, unfixed, 3)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /returned nothing/)
 })
 
 test('a partial layer-agent failure blocks', () => {
-  const r = decideGate([layer('a', 'PASSES')], checked, inScope, unfixed, 3, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, inScope, unfixed, 3)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /2 layer agent/)
 })
@@ -133,10 +134,40 @@ test('a partial layer-agent failure blocks', () => {
 // omitted the field was indistinguishable from a deliberate claim, and both
 // returned "attack path verified" having dispatched zero agents against the
 // checkpoint the phase map marks MOST CRITICAL.
-test('zero dispatched layers BLOCKS: 2.2 cannot pass on zero evidence', () => {
-  const r = decideGate([], checked, inScope, unfixed, 0, 0)
+test('zero dispatched layers and no declaration blocks: 2.2 cannot pass on zero evidence', () => {
+  const r = decideGate([], checked, inScope, unfixed, 0)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /no validation layers were inspected/)
+})
+
+// The other half of the same checkpoint — "or confirmed none exist" — which was
+// unreachable while the only way to say it was to invent a layer. The 2.3.0 probe
+// measured what that cost: the orchestrator sent the absence of a check AS a
+// layer, exactly as the old message instructed, and the agent asked to rule on it
+// returned the stopping verdict with a reason stating it meant the opposite.
+test('zero layers WITH a declaration proceeds: that is 2.2 "or confirmed none exist"', () => {
+  const r = decideGate([], checked, inScope, unfixed, 0, 'read charge.py, rates.py, ledger.py; no sign or bounds check anywhere on the path')
+  assert.equal(r.status, 'PROCEED', 'an audited "nothing validates this path" must reach the impact agent and the severity cap')
+})
+
+// Read affirmatively, exactly as the arg validator reads it. A forgotten `layers`
+// field and a deliberate claim were the same value once; the declaration is the
+// only thing telling them apart, so anything that is not a real statement leaves
+// the vacuous pass exactly where it was.
+test('a blank or non-string declaration is still the vacuous pass', () => {
+  for (const declared of [undefined, null, '', '   ', 0, 1, true, {}, ['charge.py']]) {
+    const r = decideGate([], checked, inScope, unfixed, 0, declared)
+    assert.equal(r.status, 'BLOCKED', `declaration ${JSON.stringify(declared)} must not pass the gate`)
+  }
+})
+
+// The declaration says nothing about layers that WERE dispatched, so it must not
+// rescue a fan-out that came back short. Otherwise "I looked and found none"
+// silently covers "four agents ran and one died".
+test('a declaration does not excuse a layer agent that died', () => {
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, inScope, unfixed, 2, 'read everything')
+  assert.equal(r.status, 'BLOCKED')
+  assert.match(r.reason, /returned nothing/)
 })
 
 test('MORE verdicts than agents dispatched blocks rather than passing', () => {
@@ -146,7 +177,7 @@ test('MORE verdicts than agents dispatched blocks rather than passing', () => {
   // that as "no agent is missing" while a layer agent is genuinely absent.
   // additionalProperties: false makes it unreachable; this makes it fail loudly
   // if that ever comes off.
-  const r = decideGate([layer('a', 'PASSES'), layer('b', 'PASSES')], checked, inScope, unfixed, 1, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK'), layer('b', 'PAYLOAD_REACHES_SINK')], checked, inScope, unfixed, 1)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /mis-attributed/)
 })
@@ -156,14 +187,14 @@ test('a dead recovery agent blocks: 2.3 requires recovery be checked, not assume
   // from a dead agent used to fall through to the impact prompt as "not
   // established" and PROCEED — assuming absence by a different route.
   for (const dead of [undefined, null]) {
-    const r = decideGate([layer('a', 'PASSES')], dead, inScope, unfixed, 1, 0)
+    const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], dead, inScope, unfixed, 1)
     assert.equal(r.status, 'BLOCKED')
     assert.match(r.reason, /recovery/)
   }
 })
 
 test('a dead threat-model agent blocks rather than proceeding', () => {
-  const r = decideGate([layer('a', 'PASSES')], checked, undefined, unfixed, 1, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, undefined, unfixed, 1)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /threat-model/)
 })
@@ -174,7 +205,7 @@ test('a dead threat-model agent blocks rather than proceeding', () => {
 // positive easier to report — only the REASON the orchestrator relays changes.
 // And the two coincide constantly, because the usual shape of an already-fixed
 // finding is a fix one layer up that a layer agent then correctly reports as
-// BLOCKS: `already-fixed`'s own fix is in `auth.py`, one layer above the reported
+// stopped: `already-fixed`'s own fix is in `auth.py`, one layer above the reported
 // `session.py:88`. Its grader asks for the commit — "the reason has to be the
 // fix, cited as evidence" — and `blocked at _digest (auth.py:31)` does not carry
 // it, so the better-specified of two equally-safe answers should win.
@@ -187,7 +218,7 @@ const retracted = {
 }
 
 test('a referenced complete fix outranks a blocking layer, and names both', () => {
-  const r = decideGate([layer('digest', 'BLOCKS')], checked, inScope, retracted, 1)
+  const r = decideGate([layer('digest', 'PAYLOAD_STOPPED_HERE')], checked, inScope, retracted, 1)
   assert.equal(r.status, 'ALREADY_FIXED')
   assert.match(r.reason, /#412/)
   assert.match(r.reason, /digest/, 'the blocking layer is not lost, only outranked')
@@ -205,7 +236,7 @@ test('an unreferenced or partial fix does not outrank a blocking layer', () => {
     { ...retracted, complete: undefined },
     { ...retracted, fixed: 'UNCERTAIN' },
   ]) {
-    const r = decideGate([layer('digest', 'BLOCKS')], checked, inScope, history, 1)
+    const r = decideGate([layer('digest', 'PAYLOAD_STOPPED_HERE')], checked, inScope, history, 1)
     assert.equal(r.status, 'NOT_EXPLOITABLE', JSON.stringify(history))
     assert.match(r.reason, /blocked at digest/)
   }
@@ -215,7 +246,7 @@ test('an unreferenced or partial fix does not outrank a blocking layer', () => {
 // dispatched, the results were mis-attributed and nothing read out of them is
 // trustworthy — including the history verdict's position in the same array.
 test('mis-attributed results still outrank a retraction', () => {
-  const r = decideGate([layer('a', 'PASSES'), layer('b', 'PASSES')], checked, inScope, retracted, 1)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK'), layer('b', 'PAYLOAD_REACHES_SINK')], checked, inScope, retracted, 1)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /mis-attributed/)
 })
@@ -225,7 +256,7 @@ test('mis-attributed results still outrank a retraction', () => {
 // fall through to the layers rather than reaching the blocker below.
 test('a dead history agent still blocks rather than falling through as unfixed', () => {
   for (const dead of [undefined, null]) {
-    const r = decideGate([layer('a', 'PASSES')], checked, inScope, dead, 1)
+    const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, inScope, dead, 1)
     assert.equal(r.status, 'BLOCKED')
     assert.match(r.reason, /history/)
   }
@@ -234,54 +265,54 @@ test('a dead history agent still blocks rather than falling through as unfixed',
 test('a blocking layer outranks a dead recovery agent', () => {
   // Ordering matters: NOT_EXPLOITABLE is the more informative answer, and it is
   // reached without needing the recovery verdict at all.
-  const r = decideGate([layer('validate', 'BLOCKS')], undefined, inScope, unfixed, 1, 0)
+  const r = decideGate([layer('validate', 'PAYLOAD_STOPPED_HERE')], undefined, inScope, unfixed, 1)
   assert.equal(r.status, 'NOT_EXPLOITABLE')
 })
 
 // The same rule one level down, and the level it was NOT applied at. The
-// missing-agent count was read before the BLOCKS filter, so a dead SIBLING LAYER
+// missing-agent count was read before the stopped-payload filter, so a dead SIBLING LAYER
 // agent turned a definitive NOT_EXPLOITABLE into BLOCKED — "could not determine" —
 // exactly the answer-discarding the recovery ordering above exists to prevent.
 // The layers are conjunctive: `decideGate` requires all of them to PASS, so one
-// that BLOCKS makes the sink unreachable whatever the dead one would have said.
+// that stops the payload makes the sink unreachable whatever the dead one would have said.
 test('a blocking layer outranks a dead sibling LAYER agent', () => {
-  const r = decideGate([layer('validate', 'BLOCKS')], checked, inScope, unfixed, 3, 0)
+  const r = decideGate([layer('validate', 'PAYLOAD_STOPPED_HERE')], checked, inScope, unfixed, 3)
   assert.equal(r.status, 'NOT_EXPLOITABLE')
   assert.match(r.reason, /validate/)
 })
 
 // But mis-attribution is NOT a dead agent, and it must keep its precedence: if
 // there are more verdicts than agents dispatched, some verdict in the list came
-// from something that is not a layer, and a BLOCKS read out of that list could
+// from something that is not a layer, and a stopping verdict read out of that list could
 // dismiss a live finding. Unverifiable evidence outranks a definitive-looking
 // verdict built from it.
-test('mis-attributed results still outrank a BLOCKS verdict', () => {
-  const r = decideGate([layer('a', 'PASSES'), layer('b', 'BLOCKS')], checked, inScope, unfixed, 1, 0)
+test('mis-attributed results still outrank a stopped-payload verdict', () => {
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK'), layer('b', 'PAYLOAD_STOPPED_HERE')], checked, inScope, unfixed, 1)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /mis-attributed/)
 })
 
-// A dead layer agent with no BLOCKS to outrank it still blocks: nothing here
+// A dead layer agent with no stopping verdict to outrank it still blocks: nothing here
 // weakens the missing-agent check, it only loses a tie it should never have won.
 test('a dead layer agent still blocks when no sibling decided the path', () => {
-  const r = decideGate([layer('a', 'PASSES')], checked, inScope, unfixed, 2, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, inScope, unfixed, 2)
   assert.equal(r.status, 'BLOCKED')
   assert.match(r.reason, /1 layer agent/)
 })
 
 test('out of scope halts', () => {
-  const r = decideGate([layer('a', 'PASSES')], checked, { inScope: 'NO', evidence: 'infra' }, unfixed, 1, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'NO', evidence: 'infra' }, unfixed, 1)
   assert.equal(r.status, 'OUT_OF_SCOPE')
 })
 
 test('ambiguous scope needs more info rather than assuming in-scope', () => {
-  const r = decideGate([layer('a', 'PASSES')], checked, { inScope: 'UNCERTAIN', evidence: '?' }, unfixed, 1, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'UNCERTAIN', evidence: '?' }, unfixed, 1)
   assert.equal(r.status, 'NEEDS_MORE_INFO')
 })
 
 test('by-design halts as NOT_VULNERABLE', () => {
   const threat = { inScope: 'YES', byDesign: true, evidence: 'admin escape hatch' }
-  const r = decideGate([layer('a', 'PASSES')], checked, threat, unfixed, 1, 0)
+  const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, threat, unfixed, 1)
   assert.equal(r.status, 'NOT_VULNERABLE')
 })
 
@@ -310,20 +341,20 @@ test('every non-PROCEED status carries a non-empty reason', () => {
   const cases = [
     [[], checked, inScope, unfixed, 0],
     [[], checked, inScope, unfixed, 3],
-    [[layer('a', 'BLOCKS')], checked, inScope, unfixed, 1],
+    [[layer('a', 'PAYLOAD_STOPPED_HERE')], checked, inScope, unfixed, 1],
     [[layer('a', 'UNCERTAIN')], checked, inScope, unfixed, 1],
     [[{ layer: 'a', location: 'a.py:1' }], checked, inScope, unfixed, 1],
-    [[layer('a', 'PASSES')], undefined, inScope, unfixed, 1],
-    [[layer('a', 'PASSES')], checked, undefined, unfixed, 1],
-    [[layer('a', 'PASSES')], checked, inScope, undefined, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'UNCERTAIN' }, unfixed, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'NO', byDesign: false, evidence: '' }, unfixed, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'NO', byDesign: false, evidence: '   ' }, unfixed, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'YES', byDesign: true, evidence: '' }, unfixed, 1],
-    [[layer('a', 'PASSES')], checked, { inScope: 'YES', byDesign: true, evidence: '   ' }, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], undefined, inScope, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, undefined, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, inScope, undefined, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'UNCERTAIN' }, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'NO', byDesign: false, evidence: '' }, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'NO', byDesign: false, evidence: '   ' }, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'YES', byDesign: true, evidence: '' }, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'YES', byDesign: true, evidence: '   ' }, unfixed, 1],
     // A referenced fix retracts, and its reason has to name the reference.
     [
-      [layer('a', 'PASSES')],
+      [layer('a', 'PAYLOAD_REACHES_SINK')],
       checked,
       inScope,
       { fixed: 'YES', complete: true, reference: '#412', searched: 'git log', evidence: '' },

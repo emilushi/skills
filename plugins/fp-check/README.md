@@ -9,7 +9,7 @@ Three stages in a fixed order, behind two questions asked once up front.
 
 | Stage | When | What it does |
 |---|---|---|
-| **1 Static** | always | brocard pre-gate → one agent per validation layer → recovery → already-fixed search → impact and severity → adversarial pass → the six gates |
+| **1 Static** | always | one agent per validation layer → recovery → already-fixed search → impact and severity → adversarial pass → the six gates |
 | **2 Online** | on request | the project's published policy, how the bug is reached in the published project, bounty scope, and one agent per named venue searching for past reports and duplicates. Fails closed when offline |
 | **3 PoC** | on request | build the exploit against the real code in an isolated worktree, execute it, then five agents that did not build it try to reject it |
 
@@ -74,7 +74,7 @@ workflows/
   triage-poc.js        Stage 3, on request
 skills/fp-check/
   SKILL.md             routing, the two questions, the dispatch contract
-  references/          the criteria, the brocards, the runtime lookup tables
+  references/          the criteria, the dismissal grounds, the lookup tables
   scripts/poc-lint.sh  the PoC quality gate
 tests/                 four layers; see tests/README.md
 evals/                 7 cases with ablation baselines
@@ -85,7 +85,7 @@ evals/                 7 cases with ablation baselines
 | File | Purpose |
 |------|---------|
 | [checkpoints.md](skills/fp-check/references/checkpoints.md) | The pass criteria for every checkpoint, and the crosswalk from stages to checkpoints to the six gates |
-| [brocards.md](skills/fp-check/references/brocards.md) | The cheap pre-gate, and the guards against wrongly dismissing a valid finding |
+| [dismissal-grounds.md](skills/fp-check/references/dismissal-grounds.md) | Why a report may not be a finding, and the guards against wrongly dismissing a valid one |
 | [gate-reviews.md](skills/fp-check/references/gate-reviews.md) | The six gates and the verdict format |
 | [false-positive-patterns.md](skills/fp-check/references/false-positive-patterns.md) | The 13-item checklist and the four red-flag lists |
 | [bug-class-verification.md](skills/fp-check/references/bug-class-verification.md) | What each bug class specifically has to establish |
@@ -128,7 +128,7 @@ were invalid, each of which produced a plausible-looking number.
 
 ## Credits
 
-The brocard pre-gate is adapted from William Woodruff,
+The dismissal grounds are adapted from William Woodruff,
 ["Brocards for vulnerability triage"](https://blog.yossarian.net/2026/04/11/Brocards-for-vulnerability-triage);
 `vulnerability-triage-brocards` carries the full worked examples and edge cases.
 Stages 1 and 3 graft the checkpoint gates and the five independent

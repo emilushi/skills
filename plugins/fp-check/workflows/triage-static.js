@@ -1,11 +1,10 @@
 export const meta = {
   name: 'triage-static',
   description:
-    'Stage 1: brocard pre-gate, per-layer reachability, recovery, already-fixed history, impact and severity, then the six gates as code',
+    'Stage 1: per-layer reachability, recovery, already-fixed history, impact and severity, then the six gates as code',
   whenToUse:
     'Always, and first. Runs offline against the code in front of you and reaches a TRUE POSITIVE / FALSE POSITIVE / NEEDS MORE INFO verdict on its own. Stages 2 and 3 only narrow or correct what this returns.',
   phases: [
-    { title: 'Brocards' },
     { title: 'Layers' },
     { title: 'Impact' },
     { title: 'Verdict' },
@@ -23,7 +22,7 @@ export const meta = {
 // or an omitted block — makes this destructure throw before `missingArgs` can
 // report anything, so the run dies with a TypeError instead of returning
 // BLOCKED.
-const { baseDir, finding, entryPoint, layers = [], scope } = args || {}
+const { baseDir, finding, entryPoint, layers = [], scope, layersSearched } = args || {}
 
 const MAX_LAYERS = 4
 
@@ -32,42 +31,29 @@ const MAX_LAYERS = 4
 // key is a signal the prompt and the schema have drifted.
 // test_every_schema_forbids_extra_keys pins it across all three workflows.
 
-const BROCARD_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['verdict', 'missingFact', 'evidence'],
-  properties: {
-    verdict: { enum: ['PASS', 'DISMISS', 'NEEDS_MORE_INFO'] },
-    // On NEEDS_MORE_INFO this names the fact that would decide it. The whole
-    // point of the third state is that it is actionable rather than a hedge.
-    // Required rather than optional, and empty for a PASS or a DISMISS.
-    // `triageBrocards` branches on it, and `required` is the only thing the
-    // runtime validator enforces — a prompt asking for it is a request the model
-    // may decline, and a NEEDS_MORE_INFO that does not name the missing fact is
-    // the hedge this state exists to replace.
-    missingFact: { type: 'string' },
-    severityInput: {
-      type: 'string',
-      description: 'brocard 6 only: what remediation cost does to the severity, if it survives',
-    },
-    evidence: { type: 'string' },
-  },
-}
-
 const LAYER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['verdict', 'evidence'],
   properties: {
-    verdict: { enum: ['PASSES', 'BLOCKS', 'UNCERTAIN'] },
+    verdict: {
+      enum: ['PAYLOAD_REACHES_SINK', 'PAYLOAD_STOPPED_HERE', 'UNCERTAIN'],
+      description:
+        'PAYLOAD_REACHES_SINK: the payload survives this layer and carries on. PAYLOAD_STOPPED_HERE: this layer stops it, so the finding is not exploitable',
+    },
     location: { type: 'string', description: 'file:line of the check itself' },
     evidence: { type: 'string', description: 'the code, and why the payload survives or does not' },
     reason: { type: 'string' },
   },
 }
 
-// The deep-route proofs. Same verdict enum as a layer, plus the one field that
-// tells them apart from one: `applies`.
+// The deep-route proofs. A layer's verdict and a proof's are DIFFERENT questions
+// and no longer share an enum: a layer is asked what happens to the payload, a
+// proof is asked whether its own argument leaves the finding alive. Sharing one
+// enum is part of how the polarity got inverted — "the payload passes" and "the
+// bounds proof passes" are opposite directions of the same word.
+//
+// `applies` is the other field that tells them apart.
 //
 // A layer is ON the attack path and is always applicable — it either stops the
 // payload or it does not. A proof is an auxiliary argument, and two of the three
@@ -76,7 +62,7 @@ const LAYER_SCHEMA = {
 // used to be a line of prompt telling the agent to answer UNCERTAIN in that case,
 // and a prompt is not an enforcement mechanism — an agent asked "is concurrent
 // access actually possible?" about a finding with no concurrency in it answers
-// the question it was asked, truthfully, with BLOCKS.
+// the question it was asked, truthfully, with the refuting verdict.
 //
 // Measured: `integration-cap` scored 0/3 on the latest sweep, and two of those
 // three runs came back NOT_EXPLOITABLE from this path with every one of the other
@@ -99,7 +85,11 @@ const PROOF_SCHEMA = {
       type: 'boolean',
       description: 'false when this question is not applicable to this finding at all; a proof that does not apply cannot answer it',
     },
-    verdict: { enum: ['PASSES', 'BLOCKS', 'UNCERTAIN'] },
+    verdict: {
+      enum: ['FINDING_SURVIVES', 'FINDING_REFUTED', 'UNCERTAIN'],
+      description:
+        'FINDING_SURVIVES: this proof does not dispose of the finding. FINDING_REFUTED: this proof shows the finding cannot happen',
+    },
     location: { type: 'string' },
     evidence: { type: 'string' },
     reason: { type: 'string' },
@@ -239,10 +229,13 @@ function missingArgs(a, maxLayers = 4) {
   need('finding.component', finding.component)
   need('finding.claimedImpact', finding.claimedImpact)
   need('finding.bugClass', finding.bugClass)
-  // Brocard 1, enforced rather than asked: a report that cannot say who the
-  // attacker is, what they hold, how they trigger it and what breaks is
-  // dismissible on its face, and every downstream stage would be guessing at
-  // the threat model it is supposed to align to.
+  // The one dismissal ground that survives as a HARD requirement, and it survives
+  // because it is about the dispatch rather than about the finding: a report that
+  // cannot say who the attacker is, what they hold, how they trigger it and what
+  // breaks is unanalysable, and every downstream stage would be guessing at the
+  // threat model it is supposed to align to. Refusing an unusable arg shape is not
+  // the same as dismissing a finding, which is why this is here and the other
+  // grounds are guidance in references/dismissal-grounds.md.
   need('finding.threatModel', finding.threatModel)
   need('entryPoint.description', entry.description)
   need('entryPoint.location', entry.location)
@@ -259,17 +252,42 @@ function missingArgs(a, maxLayers = 4) {
   // `.entries()` on a non-array throws out of the validator, so a wrong shape
   // would kill the run instead of being reported.
   const layers = a && a.layers
-  // Checkpoint 2.2 passes on "identified at least 1 layer (or confirmed none
-  // exist)". An empty list confirms nothing: `layers` defaults to [] in the
-  // destructure, so a forgotten field and a deliberate "nothing validates this
-  // path" are the same value. Either way zero layer agents run, the gate has
-  // nothing to fail on, and a verdict comes back having inspected nothing. If
-  // the sink really is reachable with no check in between, that is a claim —
-  // pass it as one explicit layer and let an agent confirm it.
+  // Checkpoint 2.2 passes on "identified at least 1 layer (OR CONFIRMED NONE
+  // EXIST)", and until 2.4.0 only the first half was reachable. An empty list on
+  // its own still confirms nothing — `layers` defaults to [] in the destructure,
+  // so a forgotten field and a deliberate "nothing validates this path" were the
+  // same value, zero agents ran, and a verdict came back having inspected
+  // nothing.
+  //
+  // The old fix was to demand the absence be passed AS a layer. The probe on
+  // 2.3.0 measured what that costs: on `integration-cap`, where nothing on the
+  // path validates anything, the orchestrator did exactly as instructed and sent
+  // `{name: 'rate-value validation between fetch_rate and ledger.debit',
+  // description: 'No validation layer exists between...'}`. An agent then had to
+  // answer "does this layer stop the payload?" about a layer that is the absence
+  // of a layer, and returned the stopping verdict with a reason saying it meant
+  // the opposite. The finding died at `decideGate` before the impact agent, and
+  // the severity cap the case exists to exercise did not run. **The contract
+  // manufactured the fabrication that broke it.**
+  //
+  // So the second half of the checkpoint gets its own input. `layersSearched` is
+  // an affirmative, auditable statement of what was read and what was not found —
+  // the same shape as `sourcesRead`, `searched` and `coverage` elsewhere in this
+  // plugin, where a null result is acceptable precisely because it says where it
+  // looked. A blank string does not satisfy it, and neither does its absence.
+  const searched = a && a.layersSearched
+  const declaredNone = typeof searched === 'string' && searched.trim() !== ''
   if (layers === undefined || layers === null || (Array.isArray(layers) && layers.length === 0)) {
-    missing.push(
-      'layers (Stage 1c needs at least one layer to inspect; if no validation stands between the entry point and the sink, pass that as a single explicit layer so an agent confirms it)',
-    )
+    if (!declaredNone) {
+      missing.push(
+        'layers (Stage 1c needs at least one layer to inspect; if NOTHING on the path validates the payload, send layers: [] together with layersSearched naming the files and functions you read and what you did not find. Do not pass the absence of a check as a layer — an agent asked whether a layer that does not exist stops the payload cannot answer coherently)',
+      )
+    }
+  } else if (searched !== undefined && searched !== null && !declaredNone) {
+    // Present but blank, alongside real layers. Reported rather than ignored:
+    // silently dropping it is how a blank `links` came to displace the evidence
+    // it was meant to fall back to.
+    missing.push('layersSearched (present but empty; omit it or say what was read)')
   }
   // Reject an over-long list HERE rather than after dispatching. Failing closed
   // is only worth anything if it happens before the spend.
@@ -387,307 +405,6 @@ if (argProblems.length > 0) {
 
 const route = selectRoute(args)
 
-// ------------------------------------------------------------- Stage 1b
-// The cheap pre-gate. Four questions about the shape of the claim, none of which
-// needs the code traced, each of which can end the analysis for a few cents.
-
-phase('Brocards')
-
-// `defersTo` names a downstream mechanism that asks the SAME question with more
-// evidence and answers it better. A DISMISS from a brocard that has one does not
-// end the stage: it is carried, the specialised gate runs, and the specialised
-// gate's answer is what the user gets.
-//
-// This is the fix for the merge's largest measured regression. The brocard
-// pre-gate is a first-position gate NEITHER parent had — concept-prover's
-// verify-attack-path.js has no brocards at all — and being both cheap and first
-// it won the race on findings the specialised gates were built for. Measured
-// across 63 with-plugin runs of the seven eval cases: a brocard DISMISS decided
-// 12 of them, while `upstreamFixStands`, `capSeverity`, `missingPrecondition`
-// and `decideVerdict` fired ZERO times between them. Three of the seven cases
-// exist to exercise exactly those four.
-//
-// The two concrete losses, both readable in the recorded answers:
-//   - `already-fixed`: brocard 5 dismissed as "already-fixed/documented
-//     behavior" and `upstreamFixStands` never ran, so the answer was a brocard's
-//     prose instead of "already fixed by #412 — <commit>. Retract."
-//   - `inflated-impact`: brocard 4 dismissed as "no vulnerability from standard
-//     behavior" on a case whose grader says in terms that the panic is REAL and
-//     must not be dismissed; the recovery agent, whose whole job is to downgrade
-//     the impact rather than deny the bug, never decided.
-//
-// Brocards 2 and 6 keep the short-circuit, and that is deliberate rather than
-// timid: nothing downstream tests "the attacker already holds this capability"
-// or "the cure is worse than the disease", so deferring them would buy a full
-// fan-out and no better answer. The cheap path stays cheap for what the pre-gate
-// genuinely disposes of on its own.
-//
-// A deferred DISMISS is NOT discarded — `decideVerdict` blocks a TRUE_POSITIVE on
-// one in code. So the worst this can do is turn a DISMISSED into a
-// NEEDS_MORE_INFO that carries the brocard's own reasoning, which is more willing
-// to keep analysing and never more willing to report a finding as real.
-const BROCARDS = [
-  {
-    key: 'from-the-heavens',
-    title: 'Brocard 2 — no exploit from the heavens',
-    // Deferred, on evidence. This brocard was left short-circuiting on the
-    // reasoning that nothing downstream asks its question — and that is wrong for
-    // one whole class. "The attacker must already control the upstream rate
-    // service" IS an integration root cause, which is exactly what
-    // `missingPrecondition` and `capSeverity` exist to decide: the finding is
-    // real, the precondition has to be stated, and the severity caps at Medium.
-    //
-    // Measured, at $1.15: a probe of `integration-cap` on 2.2.0 returned
-    // "DISMISSED at Stage 1's pre-gate (Brocard 2)" with the answer stating
-    // "Severity: not reached — the finding was dismissed before the
-    // impact/severity phase". So the gate that was fixed to always run the cap
-    // was starved by the one brocard still allowed to end the stage.
-    //
-    // Its genuine dismissals — an active MITM that can already inject, ctypes
-    // that already implies code execution — survive this: the impact stage reaches
-    // the same answer with the trace in hand, and a deferred dismissal blocks a
-    // TRUE POSITIVE in code either way.
-    defersTo:
-      'the impact stage, which decides root cause and applies the Medium cap when the capability the attack needs is an external precondition rather than power the attacker already holds',
-    prompt: `Do the attacker capabilities this attack REQUIRES already equal or exceed the
-impact it GRANTS? If the attacker must already hold the power the exploit would
-give them, the finding is redundant and you should DISMISS.
-
-Two traps in the other direction. A privilege-escalation chain does NOT fail this
-test: limited access exploited into elevated access is valid, because the
-post-exploit capability exceeds the pre-exploit one. And "the attacker can do X"
-is not "the attacker can do X in this context" — code execution inside a sandbox
-is not code execution with the sandbox's privileges.`,
-  },
-  {
-    key: 'standard-behavior',
-    title: 'Brocard 4 — no vulnerability from standard behavior',
-    // Overlaps the recovery check and the threat-model agent's design-intent
-    // question, and the overlap is where it goes wrong: "the framework recovers
-    // this panic" is standard behaviour that DOWNGRADES the impact, not a
-    // specification that makes the bug imaginary. Stage 1d states the impact
-    // that survives; this test cannot.
-    defersTo: 'the recovery check (Stage 1d) and the threat-model agent, which decide impact and design intent on the code rather than on the shape of the claim',
-    prompt: `Is this behaviour a correct implementation of a specification? If the spec
-requires or permits it, the vulnerability is in the standard, not this code —
-DISMISS and say which standard.
-
-The nuance inverts the test, so check it before dismissing: an implementation
-that VOLUNTARILY claims a stricter posture than the spec requires IS vulnerable
-when that strictness fails. Read what this code documents about itself. A
-library documented as TLS 1.3-only that falls back to a 1.2 CBC suite has broken
-its own promise, and the spec permitting 1.2 is no defence.`,
-  },
-  {
-    key: 'documented-behavior',
-    title: 'Brocard 5 — no vulnerability from documented behavior',
-    // Overlaps the already-fixed history search, and the two are told apart by
-    // one fact this test does not have: a CHANGELOG entry describing a FIX is
-    // not documentation telling you to live with the behaviour. Both dismiss;
-    // only the history agent produces the commit reference the retraction needs.
-    defersTo: 'the already-fixed history search, which distinguishes documentation you must live with from a fix that landed, and cites the commit',
-    prompt: `Does this project's own documentation describe this behaviour, and warn against
-the misuse? If so, DISMISS the report against THIS project.
-
-The nuance is a redirection rather than a dismissal: downstream usage that
-violates documented guidance is a valid finding against the DOWNSTREAM project.
-If that is the situation, say which project it is a bug in — the answer is "not
-a bug here", not "not a bug".
-
-**If the document that would settle this is not in this repository, answer PASS
-and say which document you would need.** That is not a hedge and it is not
-NEEDS_MORE_INFO: this test is only about what THIS project documents, and a
-governing spec, an upstream service contract or a downstream consumer's guidance
-are all outside its reach. Answering NEEDS_MORE_INFO on an external document makes
-this test structurally unanswerable for every finding whose root cause is an
-integration — which is measured, not hypothetical: it aborted the whole static
-stage on two graded runs, and the finding those runs were meant to cap came back
-uncapped because the analysis never ran. The online stage exists for exactly that
-question and will pick it up when the user asks for it.`,
-  },
-  {
-    key: 'cure-worse',
-    title: 'Brocard 6 — no cure worse than the disease',
-    prompt: `Would remediating this cause more harm than the vulnerability? Weigh the
-severity in practice, the cost and disruption of the fix, and the blast radius
-across the dependency graph.
-
-DISMISS only when the cure is genuinely worse. More often the finding survives at
-a lower severity with the trade-off stated: put that in severityInput, which is
-carried into the severity decision later. Nothing else in this analysis looks at
-remediation cost, so if you leave it blank it is not considered anywhere.`,
-  },
-]
-
-// The fan-out is written over BROCARDS at the call site rather than over a
-// hoisted `brocardChecks` const, so it is visibly bounded by a script-local array
-// literal. A hoisted thunk list derived from BROCARDS is bounded too, but nothing
-// at the `parallel()` call says so, and test_no_unbounded_fanout is right to
-// refuse it: the same shape over a caller-supplied collection is unbounded, and
-// the two are indistinguishable at the call.
-const brocardRaw = await parallel(BROCARDS.map((b) => () =>
-  agent(
-    `${b.title}. You are applying ONE cheap triage test to a reported finding,
-before anyone traces data flow. Read ${baseDir}/references/brocards.md for the
-full statement of this test and the rationalizations to reject.
-
-Finding: ${finding.summary}
-Bug class: ${finding.bugClass}
-Reported threat model: ${finding.threatModel}
-Claimed impact: ${finding.claimedImpact}
-Sink: ${finding.sink}
-Entry point: ${entryPoint.description} (${entryPoint.location})
-
-${b.prompt}
-
-Answer NEEDS_MORE_INFO if the evidence available cannot decide it, and name the
-missing fact. NEEDS_MORE_INFO is a legitimate answer and is not a soft DISMISS:
-"the claim as stated is unproven" is NEEDS_MORE_INFO, never "no vulnerability
-exists". Conflating those two killed a real finding in this plugin's own history.`,
-    { label: `brocard:${b.key}`, phase: 'Brocards', schema: BROCARD_SCHEMA, effort: 'low' },
-  ).then((v) => (v ? { ...v, key: b.key, title: b.title } : null)),
-))
-const brocardVerdicts = brocardRaw.filter(Boolean)
-
-// Pure. Tallies against the EXPECTED list, not against what came back: a
-// brocard whose agent died is unevaluated, and an unevaluated test must not read
-// as a pass. Tallying the returned array instead lets a dead agent shrink the
-// denominator and quietly clear the gate.
-//
-// Order matters and is the declaration order of BROCARDS: the brocards skill's
-// rule is "stop at the first DISMISS", and with the tests running concurrently
-// the first in canonical order is what that means. All four still run — four
-// low-effort agents cost less than the wall-clock of sequencing them — so a
-// DISMISS reported here does not hide the others' verdicts.
-//
-// `expected` is a list of DESCRIPTORS — `{ key, defersTo }` — not a list of keys.
-// A descriptor with a non-empty `defersTo` names a downstream mechanism that
-// answers the same question better, and its DISMISS is deferred rather than
-// terminal. A malformed entry carrying no `key` matches no verdict and falls
-// through to the unevaluated branch, which blocks a TRUE_POSITIVE: a caller that
-// gets this wrong fails toward more analysis, not toward a dismissal it did not
-// earn.
-function triageBrocards(verdicts, expected) {
-  const byKey = new Map((verdicts || []).filter(Boolean).map((v) => [v.key, v]))
-  const specs = (expected || []).filter(Boolean)
-
-  // A DISMISS from a brocard with no downstream equivalent is the ONLY terminal
-  // outcome, and it is read before anything else. Each brocard is an independent
-  // falsifiable test and any one dismissing is sufficient, so no later evidence
-  // can unmake it and no sibling's silence matters — the same rule `decideGate`
-  // applies when a blocking layer outranks a dead recovery agent.
-  for (const spec of specs) {
-    const v = byKey.get(spec.key)
-    if (v && v.verdict === 'DISMISS' && !String(spec.defersTo || '').trim()) {
-      return {
-        dismissal: {
-          status: 'DISMISSED',
-          reason: `${v.title}: ${String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence'}`,
-        },
-        deferred: [],
-        unresolved: [],
-      }
-    }
-  }
-
-  // Deferred dismissals. Collected in declaration order, all of them rather than
-  // only the first: two brocards dismissing for two different reasons is two
-  // things the downstream gates have to answer, and reporting one of them would
-  // silently drop the other.
-  const deferred = []
-  for (const spec of specs) {
-    const v = byKey.get(spec.key)
-    if (!v || v.verdict !== 'DISMISS') continue
-    deferred.push({
-      key: spec.key,
-      title: v.title || spec.key,
-      what: String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence',
-      defersTo: String(spec.defersTo || '').trim(),
-    })
-  }
-
-  // Everything else is CARRIED, not terminal. This is the fix for the most
-  // expensive structural defect the first measured sweep found.
-  //
-  // "This test dismisses the finding" and "this test cannot decide" had the same
-  // power to end the stage, and they are not the same statement: the second is
-  // precisely what the expensive stages downstream exist to resolve. Worse,
-  // aborting did not produce a safe non-answer — it produced an UNGUARDED one. The
-  // pre-gate stopped, Stage 3 then refused for want of a TRUE_POSITIVE, and the
-  // orchestrator — still holding a user request for a PoC — built one by hand,
-  // outside every gate, and reported an uncapped Critical. Fail-closed at the gate
-  // became fail-open one level up, at 4-5x the baseline cost for an identical
-  // score. Measured on 3 of 18 runs; the DISMISS path was right on 8 of 8.
-  //
-  // The finding now gets the full analysis — reachability verified, severity
-  // capped — and an unresolved brocard is surfaced to the later prompts and
-  // blocks a TRUE_POSITIVE in code at the verdict, where the decision is made by
-  // the agent holding all the evidence rather than by the cheapest one to raise a
-  // hand.
-  const unresolved = []
-  for (const spec of specs) {
-    const v = byKey.get(spec.key)
-    if (!v) {
-      // A dead agent is unknown, not passed. It is carried rather than fatal so
-      // one flaky agent degrades the verdict instead of destroying the run.
-      unresolved.push({ key: spec.key, title: spec.key, what: 'the agent returned nothing, so this test never ran' })
-    } else if (v.verdict === 'NEEDS_MORE_INFO') {
-      const what = String(v.missingFact || '').trim() || String(v.evidence || '').trim()
-      unresolved.push({
-        key: spec.key,
-        title: v.title,
-        what: what || 'agent reported NEEDS_MORE_INFO without naming the missing fact',
-      })
-    }
-  }
-  return { dismissal: null, deferred, unresolved }
-}
-
-const brocardTriage = triageBrocards(
-  brocardVerdicts,
-  BROCARDS.map((b) => ({ key: b.key, defersTo: b.defersTo || '' })),
-)
-if (brocardTriage.dismissal) {
-  log(`DISMISSED: ${brocardTriage.dismissal.reason}`)
-  return {
-    status: brocardTriage.dismissal.status,
-    reason: brocardTriage.dismissal.reason,
-    brocards: brocardVerdicts,
-  }
-}
-
-// Carried to the impact and verdict prompts, and enforced at the verdict.
-const openQuestions = brocardTriage.unresolved
-if (openQuestions.length > 0) {
-  log(`${openQuestions.length} brocard question(s) unresolved and carried: ${openQuestions.map((q) => q.key).join(', ')}`)
-}
-
-// Same channel, different claim: these brocards DID dismiss, and a mechanism
-// with more evidence is about to answer the same question. Carried into the
-// impact and verdict prompts and enforced at the verdict, exactly as
-// openQuestions are.
-const deferredDismissals = brocardTriage.deferred
-if (deferredDismissals.length > 0) {
-  log(
-    `${deferredDismissals.length} brocard dismissal(s) deferred to a downstream gate: ${deferredDismissals
-      .map((d) => d.key)
-      .join(', ')}`,
-  )
-}
-
-// Brocard 6 may survive as a severity input rather than a dismissal. Carried
-// forward explicitly, because a value nothing reads is a value that does not
-// exist.
-const remediationCost = brocardVerdicts
-  .filter((v) => String(v.severityInput || '').trim())
-  .map((v) => `${v.key}: ${v.severityInput}`)
-
-log(
-  `No brocard ended the stage${
-    deferredDismissals.length ? ` (${deferredDismissals.length} dismissal(s) deferred)` : ''
-  }. Route: ${route}.`,
-)
-
 // ------------------------------------------------------- Stages 1c and 1d
 
 phase('Layers')
@@ -721,9 +438,18 @@ reaches the next hop toward ${finding.sink}. Quote the code in your evidence.
 Class-specific requirements for a ${finding.bugClass} finding are in
 ${baseDir}/references/bug-class-verification.md.
 
-Answer UNCERTAIN if you cannot establish it from the code. UNCERTAIN is a
-legitimate answer and is preferable to a guess; it halts the pipeline for a
-manual trace, which is the intended behaviour.`,
+The verdict is about the PAYLOAD, not about the finding:
+  - PAYLOAD_REACHES_SINK — it survives this layer and carries on. The finding is
+    still alive as far as this layer is concerned
+  - PAYLOAD_STOPPED_HERE — this layer stops it. The finding is not exploitable
+  - UNCERTAIN — you cannot establish it from the code
+
+UNCERTAIN is a legitimate answer and is preferable to a guess; it halts the
+pipeline for a manual trace, which is the intended behaviour.
+
+If the check named above turns out not to exist in the code, that is
+PAYLOAD_REACHES_SINK with the absence quoted as the evidence — a layer that is
+not there stops nothing.`,
       { label: `layer:${layer.name || i + 1}`, phase: 'Layers', schema: LAYER_SCHEMA, effort: 'low' },
       // This guard is the only thing standing between a dead layer agent and a
       // fail-open, and it is load-bearing rather than defensive: `{...null}` is
@@ -843,16 +569,12 @@ safely there, and whether tests cover this path. See
 ${baseDir}/references/false-positive-patterns.md for the API-contract and
 context-blind red-flag lists.
 
-Return PASSES if no such protection exists, so the alleged issue is still open
-after both questions. BLOCKS if a protection you have READ prevents it entirely.
-UNCERTAIN if you cannot establish either from the code. Set applies: false if
-neither question bears on this finding — no relevant API contract and no relevant
-platform protection — and leave the verdict as UNCERTAIN.
-
-The polarity above is stated because it used to be left to you: the two questions
-are phrased so that "yes" means the finding is dead, while the verdict enum is
-phrased so that PASSES means it is alive, and an answer given in the wrong
-direction reads as a proof that the finding is impossible.`,
+Return FINDING_SURVIVES if no such protection exists, so the alleged issue is
+still open after both questions. FINDING_REFUTED if a protection you have READ
+prevents it entirely. UNCERTAIN if you cannot establish either from the code. Set
+applies: false if neither question bears on this finding — no relevant API
+contract and no relevant platform protection — and leave the verdict as
+UNCERTAIN.`,
       { label: 'api-contract', phase: 'Layers', schema: PROOF_SCHEMA, effort: 'medium' },
     ),
   )
@@ -864,7 +586,7 @@ else in this analysis does it.
 
 Finding: ${finding.summary}
 Sink: ${finding.sink}
-Validation on the path: ${layers.map((l) => `${l.name} at ${l.location}`).join('; ')}
+Validation on the path: ${layers.length ? layers.map((l) => `${l.name} at ${l.location}`).join('; ') : `NONE. What was read, and what was not found: ${layersSearched}`}
 
 Write the explicit algebra, using the template in
 ${baseDir}/references/evidence-templates.md. The form is:
@@ -876,13 +598,13 @@ reachable. Concretely: if the code checks \`size >= MIN\` and \`MIN >= sizeof(hd
 then \`size - sizeof(hdr)\` cannot underflow, and the finding is mathematically
 impossible rather than merely unlikely.
 
-Return PASSES if the vulnerable condition is algebraically reachable, BLOCKS if
-the validation makes it impossible, UNCERTAIN if the relations cannot be pinned
-down. If this is not a bounds or arithmetic finding, set applies: false with
-verdict UNCERTAIN and say so in the evidence — do not invent algebra for a logic
-bug, and do not report BLOCKS to mean "there is no algebra here". Only
-applies: true can end the analysis, so mis-setting it is how a logic bug gets
-dismissed by an arithmetic argument that was never made.`,
+Return FINDING_SURVIVES if the vulnerable condition is algebraically reachable,
+FINDING_REFUTED if the validation makes it impossible, UNCERTAIN if the relations
+cannot be pinned down. If this is not a bounds or arithmetic finding, set
+applies: false with verdict UNCERTAIN and say so in the evidence — do not invent
+algebra for a logic bug. Only applies: true can end the analysis, so mis-setting
+it is how a logic bug gets dismissed by an arithmetic argument that was never
+made.`,
       { label: 'math-bounds', phase: 'Layers', schema: PROOF_SCHEMA, effort: 'high' },
     ),
   )
@@ -902,12 +624,12 @@ suggestive the code looks. For a TOCTOU claim specifically, show what modifies
 the checked value between the check and the use — if it is read and used in the
 same function with no external mutation possible, there is no TOCTOU.
 
-Return PASSES if the race is feasible, BLOCKS if the model rules it out,
-UNCERTAIN if the threading model cannot be established. If concurrency is not
-part of this finding's trigger, set applies: false with verdict UNCERTAIN and say
-so. BLOCKS is reserved for a finding that DOES claim a race and whose threading
-model rules it out; answering BLOCKS because there is no concurrency in the
-finding at all dismisses it on a question it never asked.`,
+Return FINDING_SURVIVES if the race is feasible, FINDING_REFUTED if the model
+rules it out, UNCERTAIN if the threading model cannot be established. If
+concurrency is not part of this finding's trigger, set applies: false with verdict
+UNCERTAIN and say so. FINDING_REFUTED is reserved for a finding that DOES claim a
+race and whose threading model rules it out; refuting a finding because there is
+no concurrency in it at all dismisses it on a question it never asked.`,
       { label: 'race-feasibility', phase: 'Layers', schema: PROOF_SCHEMA, effort: 'medium' },
     ),
   )
@@ -927,6 +649,16 @@ finding at all dismisses it on a question it never asked.`,
 // blocking layer skips the impact agent and both later stages entirely.
 const raw = await parallel(checks)
 const layerVerdicts = raw.slice(0, layers.length).filter(Boolean)
+
+// What the fan-out established, rendered once for the three prompts that quote
+// it. With `layers: []` there is no fan-out, and "All 0 validation layers were
+// independently verified as passable" is worse than saying nothing: it reads to
+// the impact and verdict agents as a completed check that found no obstacle,
+// which is the vacuous pass arriving by the prompt instead of by the gate.
+const layerSummary = layers.length
+  ? `All ${layerVerdicts.length} validation layer(s) were independently verified as passable.`
+  : `NO validation layer stands between the entry point and the sink — the caller declared this rather than any agent verifying it. What was read, and what was not found: ${layersSearched}`
+
 const recovery = raw[at.recovery] || null
 const threat = raw[at.threat] || null
 const history = raw[at.history] || null
@@ -971,14 +703,21 @@ function upstreamFixStands(historyVerdict) {
 // attemptedLayers is how many layer agents were dispatched. A verdict list
 // shorter than that means agents died, and a gate that inspected nothing must
 // not report a verdict.
-function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, attemptedLayers) {
+function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, attemptedLayers, layersSearched) {
   const where = (ls) => ls.map((l) => `${l.layer} (${l.location})`).join(', ')
 
-  // Zero dispatched layers is the vacuous pass: no BLOCKS to find, no UNCERTAIN
-  // to find, so every filter below matches nothing and the function falls
-  // through. The arg validator rejects an empty `layers` before any agent is
-  // spent; this is the same rule at the gate, where the decision is made.
-  if (attemptedLayers === 0) {
+  // Zero dispatched layers is the vacuous pass UNLESS the caller declared it: no
+  // stopping verdict to find and no UNCERTAIN to find, so every filter below
+  // matches nothing and the function falls through to PROCEED having inspected
+  // nothing.
+  //
+  // The declaration is what tells the two apart, and it is read the same way the
+  // arg validator reads it — an affirmative, non-blank statement of what was read.
+  // Anything else, including a forgotten `layers` field, is still the vacuous pass
+  // and still BLOCKED. This is the checkpoint's own "or confirmed none exist",
+  // which was unreachable while the only way to say it was to invent a layer.
+  const declaredNone = typeof layersSearched === 'string' && layersSearched.trim() !== ''
+  if (attemptedLayers === 0 && !declaredNone) {
     return {
       status: 'BLOCKED',
       reason: 'no validation layers were inspected; Stage 1c cannot pass on zero evidence',
@@ -1013,9 +752,10 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   // The missing-LAYER-agent count is such a check, and it used to sit above this
   // filter — so the same discarding happened whenever a sibling LAYER agent died,
   // which is the likeliest death of all: there are up to four of them. The layers
-  // are conjunctive (a PROCEED needs every one to PASS), so one that BLOCKS
-  // settles reachability on its own and the dead sibling cannot overturn it.
-  const blocked = verdicts.filter((l) => l.verdict === 'BLOCKS')
+  // are conjunctive (a PROCEED needs the payload to survive every one), so one
+  // that stops the payload settles reachability on its own and the dead sibling
+  // cannot overturn it.
+  const blocked = verdicts.filter((l) => l.verdict === 'PAYLOAD_STOPPED_HERE')
 
   // A referenced, complete upstream fix outranks the blocking layer, and this is
   // a reordering rather than a new rule: both outcomes retract the finding, so
@@ -1063,14 +803,14 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
     return { status: 'NEEDS_MORE_INFO', reason: `unresolved layers: ${where(uncertain)}` }
   }
 
-  // Read the affirmative value. Grading by exclusion — anything not BLOCKS and
+  // Read the affirmative value. Grading by exclusion — anything not stopped and
   // not UNCERTAIN — made a pass the fall-through for a verdict this script does
   // not recognise, on the checkpoint that carries the measured delta.
-  const passed = verdicts.filter((l) => l.verdict === 'PASSES')
+  const passed = verdicts.filter((l) => l.verdict === 'PAYLOAD_REACHES_SINK')
   if (passed.length !== attemptedLayers) {
     return {
       status: 'BLOCKED',
-      reason: `${attemptedLayers - passed.length} layer(s) returned no PASSES verdict; Stage 1c is unverified`,
+      reason: `${attemptedLayers - passed.length} layer(s) returned no PAYLOAD_REACHES_SINK verdict; Stage 1c is unverified`,
     }
   }
 
@@ -1117,7 +857,7 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   return { status: 'PROCEED', reason: '' }
 }
 
-const gate = decideGate(layerVerdicts, recovery, threat, history, layers.length)
+const gate = decideGate(layerVerdicts, recovery, threat, history, layers.length, layersSearched)
 
 if (gate.status !== 'PROCEED') {
   log(`${gate.status}: ${gate.reason}`)
@@ -1125,9 +865,6 @@ if (gate.status !== 'PROCEED') {
     status: gate.status,
     reason: gate.reason,
     route,
-    brocards: brocardVerdicts,
-    openQuestions,
-    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -1147,7 +884,7 @@ if (gate.status !== 'PROCEED') {
 // keep analysing.
 //
 // The result is CARRIED rather than terminal. A layer is on the attack path and
-// is conjunctive with its siblings — one that BLOCKS settles reachability. A
+// is conjunctive with its siblings — one that stops the payload settles it. A
 // proof is an auxiliary argument by a single agent that saw one question, and
 // making it terminal put it above the impact stage, the severity cap and the six
 // gates, none of which then ran. `gateMathBounds` and `gateEnvironment` are those
@@ -1160,7 +897,7 @@ if (gate.status !== 'PROCEED') {
 // is NEEDS_MORE_INFO carrying the proof's own evidence.
 function blockingProofs(proofs) {
   return (proofs || [])
-    .filter((p) => p && p.verdict && p.verdict.applies === true && p.verdict.verdict === 'BLOCKS')
+    .filter((p) => p && p.verdict && p.verdict.applies === true && p.verdict.verdict === 'FINDING_REFUTED')
     .map((p) => ({
       key: p.key,
       title: p.key,
@@ -1195,9 +932,6 @@ if (deadProofs.length > 0) {
     status: 'BLOCKED',
     reason: why,
     route,
-    brocards: brocardVerdicts,
-    openQuestions,
-    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -1218,12 +952,9 @@ severity.
 Finding: ${finding.summary}
 Originally claimed impact: ${finding.claimedImpact}
 Recovery finding: ${recovery.recoveryExists ? 'recovery EXISTS' : 'no recovery found'} — ${recovery.effectiveImpact}
-All ${layerVerdicts.length} validation layers were independently verified as passable.
+${layerSummary}
 ${history.fixed === 'UNCERTAIN' ? `History search was inconclusive: ${history.searched}` : ''}
 ${upstreamFixStands(history) ? `A PARTIAL fix exists (${upstreamFixStands(history).reference}); report what remains, not the original claim.` : ''}
-${remediationCost.length ? `Remediation cost raised at the pre-gate:\n  ${remediationCost.join('\n  ')}` : ''}
-${openQuestions.length ? `Unresolved at the cheap pre-gate, carried rather than fatal — resolve what you can from the code:\n  ${openQuestions.map((q) => `${q.title}: ${q.what}`).join('\n  ')}` : ''}
-${deferredDismissals.length ? `Dismissed at the cheap pre-gate and deferred to you, because you hold the evidence\nit did not. Answer it from the code — and note that a framework or specification\nthat contains the damage is a reason to DOWNGRADE the impact, not a reason to say\nthe bug is imaginary:\n  ${deferredDismissals.map((d) => `${d.title}: ${d.what}`).join('\n  ')}` : ''}
 ${blockingProof.length ? `Deep-route proof(s) reporting that the finding is impossible. They were carried\nrather than made terminal; weigh them against the traced path:\n  ${blockingProof.map((p) => `${p.key}: ${p.what}`).join('\n  ')}` : ''}
 
 Verify the claimed impact against evidence. If recovery downgrades it, the
@@ -1252,6 +983,16 @@ Then set a severity and justify it on impact and exploitability both. An
 integration or external root cause caps severity at Medium, and a hardening gap
 is not written up as an exploited vulnerability — those caps are applied in code
 after you answer, so a rating above them is corrected rather than accepted.
+
+Before you settle on \`vulnerability\`, read
+${baseDir}/references/dismissal-grounds.md. It is the list of recurring reasons a
+reported finding turns out not to be one — the attacker already holds what the
+exploit grants, the behaviour is specified, the project documents and warns about
+it, the cure is worse than the disease. **Those are grounds for judgement, not
+tests that end anything**, and you are the first agent with the traced path in hand,
+so you are the first who can apply them honestly. Note especially that "the trigger
+comes from outside this repository" is an external precondition to state and a
+severity to cap — not a reason the bug is imaginary.
 
 See ${baseDir}/references/checkpoints.md for the pass criteria of each, and
 ${baseDir}/references/bug-class-verification.md for what a ${finding.bugClass}
@@ -1300,9 +1041,6 @@ if (!impact || impact.result !== 'VERIFIED') {
     status,
     reason,
     route,
-    brocards: brocardVerdicts,
-    openQuestions,
-    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -1333,9 +1071,6 @@ if (missingPrecondition(impact)) {
     status: 'NEEDS_MORE_INFO',
     reason: why,
     route,
-    brocards: brocardVerdicts,
-    openQuestions,
-    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -1400,13 +1135,10 @@ Root cause: ${impact.rootCause}${impact.rootCause === 'internal' ? '' : ` (exter
 Classification: ${impact.classification}
 Severity after the caps: ${capped.severity}${capped.note ? ` — ${capped.note}` : ''}
 Recovery: ${recovery.recoveryExists ? `EXISTS, ${recovery.mechanism || 'mechanism not named'}` : 'none found'} — ${recovery.effectiveImpact}
-Validation layers, all independently verified as passable:
-  ${layerVerdicts.map((l) => `${l.layer} (${l.location}): ${l.evidence}`).join('\n  ')}
+${layerSummary}${layerVerdicts.length ? `\n  ${layerVerdicts.map((l) => `${l.layer} (${l.location}): ${l.evidence}`).join('\n  ')}` : ''}
 Already-fixed search: ${history.fixed} — ${history.searched}
 ${proofs.length ? `Deep-route proofs:\n  ${proofs.map((p) => `${p.key}: ${p.verdict ? `${p.verdict.applies === true ? p.verdict.verdict : `${p.verdict.verdict} (does not apply to this finding)`} — ${p.verdict.evidence}` : 'agent returned nothing'}`).join('\n  ')}` : ''}
 Route: ${route}
-${openQuestions.length ? `\nUnresolved at the cheap pre-gate and still open. Resolve each from the code if you\ncan, and put whatever remains into unresolvedUncertainty — an unresolved one blocks\na TRUE POSITIVE whatever the six gates say:\n  ${openQuestions.map((q) => `${q.title}: ${q.what}`).join('\n  ')}\n` : ''}
-${deferredDismissals.length ? `\nDismissed at the cheap pre-gate on the shape of the claim alone, then deferred to\nyou because you hold the traced evidence it did not. This is the argument AGAINST\nthe finding, already made — answer it. If it holds, the matching gate below is a\nFAIL and the finding is a FALSE POSITIVE that names which gate; if it does not,\nsay why on the evidence. A deferred dismissal blocks a TRUE POSITIVE in code\neither way, so do not leave it unanswered:\n  ${deferredDismissals.map((d) => `${d.title}: ${d.what}\n    (deferred to ${d.defersTo || 'this review'})`).join('\n  ')}\n` : ''}
 ${blockingProof.length ? `\nDeep-route proof(s) reporting the finding impossible. They were carried rather\nthan made terminal, because a single auxiliary proof is not above the traced path:\n  ${blockingProof.map((p) => `${p.key}: ${p.what}`).join('\n  ')}\n` : ''}
 First, argue against the finding, then for it. Work through
 ${baseDir}/references/false-positive-patterns.md — the 13-item checklist and the
@@ -1416,7 +1148,7 @@ exist to work against that.
 
 Then the other direction, which is not optional and carries equal weight. The
 guards against wrongly DISMISSING a valid finding are in
-${baseDir}/references/brocards.md: "only reachable in debug mode" needs debug
+${baseDir}/references/dismissal-grounds.md: "only reachable in debug mode" needs debug
 mode proven off in production; "the attacker would need local access" is a real
 threat model for containerised services; "nobody uses that API" needs usage
 data, not an assumption; and inventing a mitigation you have not read in the
@@ -1459,16 +1191,18 @@ No speculative language in verdictReason: "probably", "likely", "might", "would"
 // A missing verdict counts AGAINST the finding, and unresolved uncertainty is
 // its own outcome rather than being resolved in either direction.
 //
-// `overruled` is the third input and the one that makes deferral safe: it is the
-// list of arguments some earlier, cheaper stage already made FOR dismissing this
-// finding — a brocard whose DISMISS was deferred to a specialised gate, a
-// deep-route proof that reported the finding impossible. They were carried here
-// instead of ending the stage, and the invariant that makes that legal is
-// enforced below rather than asked for: nothing on this list can be silently
-// dropped, because a non-empty list forbids TRUE_POSITIVE. Deferring is therefore
-// only ever a decision to keep analysing, never a decision to report.
-function decideVerdict(result, carried, overruled) {
-  const open = (carried || []).filter(Boolean)
+// `overruled` is the second input and the one that makes deferral safe: it is the
+// list of arguments some earlier stage already made FOR dismissing this finding —
+// today, a deep-route proof that reported the finding impossible. They were
+// carried here instead of ending the stage, and the invariant that makes that
+// legal is enforced below rather than asked for: nothing on this list can be
+// silently dropped, because a non-empty list forbids TRUE_POSITIVE. Deferring is
+// therefore only ever a decision to keep analysing, never a decision to report.
+//
+// It took a THIRD input until 2.5.0 — the unresolved brocard questions. The
+// brocard pre-gate is gone and nothing else produced that list, so a parameter
+// that is always empty has been removed rather than left to read as coverage.
+function decideVerdict(result, overruled) {
   const dismissals = (overruled || []).filter(Boolean)
   if (!result) {
     return { status: 'NEEDS_MORE_INFO', reason: 'the gate-review agent returned nothing; no gate was evaluated' }
@@ -1518,21 +1252,6 @@ function decideVerdict(result, carried, overruled) {
     }
   }
 
-  // An unresolved brocard blocks a TRUE POSITIVE, in code. The pre-gate no longer
-  // aborts the stage on one — so the finding has been fully analysed by now and the
-  // report is useful — but "brocard 4 never answered" is a real gap that nothing
-  // downstream tests, and carrying it as prose for an agent to honour is the
-  // self-report this whole port exists to remove. Reported with the missing fact,
-  // so it is actionable rather than a shrug.
-  if (open.length > 0) {
-    return {
-      status: 'NEEDS_MORE_INFO',
-      reason: `all six gates passed, but ${open.length} cheap-pre-gate question(s) remain unresolved: ${open
-        .map((q) => `${q.title} — ${q.what}`)
-        .join('; ')}`,
-    }
-  }
-
   // The other half of deferral. A dismissal that was carried here rather than
   // acted on has to be answered by the six gates, and "answered" means a FAIL
   // that names the gate — which is checked first, above, and returns
@@ -1552,13 +1271,10 @@ function decideVerdict(result, carried, overruled) {
   return { status: 'TRUE_POSITIVE', reason: why }
 }
 
-const verdict = decideVerdict(verdictAgent, openQuestions, [...deferredDismissals, ...blockingProof])
+const verdict = decideVerdict(verdictAgent, blockingProof)
 
 const payload = {
   route,
-  brocards: brocardVerdicts,
-  openQuestions,
-  deferredDismissals,
   layers: layerVerdicts,
   recovery,
   threat,

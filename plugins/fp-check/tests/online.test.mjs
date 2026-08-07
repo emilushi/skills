@@ -21,6 +21,8 @@ const missingArgs = loadFn(ONLINE, 'missingArgs')
 const offlineProblem = loadFn(ONLINE, 'offlineProblem')
 const scopeHalt = loadFn(ONLINE, 'scopeHalt')
 const summaryProblem = loadFn(ONLINE, 'summaryProblem')
+const needsUserCensus = loadFn(ONLINE, 'needsUserCensus')
+const censusProblem = loadFn(ONLINE, 'censusProblem')
 
 const GOOD = {
   baseDir: '/plugin/skills/fp-check',
@@ -128,8 +130,7 @@ test('a Stage 1 OUT_OF_SCOPE payload is rejected coherently, not invited and the
       scope: 'the API surface, excluding internal tooling',
     },
     agents: {
-      brocard: { verdict: 'PASS', missingFact: '', evidence: 'fine' },
-      layer: { verdict: 'PASSES', evidence: 'the filter reaches the query' },
+      layer: { verdict: 'PAYLOAD_REACHES_SINK', evidence: 'the filter reaches the query' },
       recovery: { recoveryExists: false, effectiveImpact: 'rows disclosed', evidence: 'no recover' },
       'threat-model': {
         inScope: 'NO',
@@ -295,12 +296,133 @@ test('a dead summary agent is a problem', () => {
   assert.ok(summaryProblem(null))
 })
 
+// ------------------------------------------------------- needsUserCensus
+//
+// The parent's `triage-online-users` role is genuinely conditional: for a bug
+// exploitable in the target itself, a census of the project's consumers answers a
+// question nobody asked. The condition is code rather than a third question at
+// Step 0, because whether severity turns on downstream usage is a finding of the
+// reachability analysis, and because a non-interactive harness answers every extra
+// question `no` — which is how this plugin shipped three capabilities that fired
+// zero times in 63 measured runs.
+
+const IN_REPO = { impact: { rootCause: 'internal', classification: 'vulnerability' } }
+
+test('a bug exploitable in the target itself needs no consumer census', () => {
+  assert.equal(needsUserCensus(IN_REPO, REACHED, IN_SCOPE), false)
+})
+
+test('a root cause outside this project makes it the client-side that matters', () => {
+  for (const rootCause of ['integration', 'external']) {
+    const verification = { impact: { rootCause, classification: 'vulnerability' } }
+    assert.equal(needsUserCensus(verification, REACHED, IN_SCOPE), true, rootCause)
+  }
+})
+
+// A hardening gap is by definition not exploitable on its own, so whether it
+// matters IS the question about how consumers use it.
+test('a hardening gap needs the census even with an in-repo caller', () => {
+  const verification = { impact: { rootCause: 'internal', classification: 'hardening_gap' } }
+  assert.equal(needsUserCensus(verification, REACHED, IN_SCOPE), true)
+})
+
+test('a sink only a consumer can drive needs the census', () => {
+  assert.equal(needsUserCensus(IN_REPO, { ...REACHED, driver: 'client-code' }, IN_SCOPE), true)
+})
+
+// Read by exclusion, and deliberately the opposite direction from every other
+// gate in this file. Elsewhere the risk is a claim made on no evidence, so only
+// the affirmative value counts. Here the measured risk is a capability that never
+// fires: an omitted `driver` reading as "no census needed" is that failure exactly.
+// One wasted agent is the cost of being wrong this way; losing the role again is
+// the cost of being wrong the other way.
+test('an unsettled or missing driver runs the census rather than skipping it', () => {
+  for (const driver of ['unknown', undefined, '', null]) {
+    assert.equal(needsUserCensus(IN_REPO, { ...REACHED, driver }, IN_SCOPE), true, `driver ${JSON.stringify(driver)}`)
+  }
+  assert.equal(needsUserCensus(IN_REPO, null, IN_SCOPE), true, 'a missing reachability result')
+})
+
+// Unreachable from the workflow — scopeHalt returned before this — but the
+// predicate is unit-tested alone and must not say yes to "census the consumers of
+// a project whose policy excludes this finding".
+test('an out-of-scope finding gets no census whatever else is true', () => {
+  const verification = { impact: { rootCause: 'external', classification: 'hardening_gap' } }
+  const out = { ...IN_SCOPE, verdict: 'out-of-scope' }
+  assert.equal(needsUserCensus(verification, { ...REACHED, driver: 'client-code' }, out), false)
+})
+
+test('the predicate never throws on a missing payload', () => {
+  for (const args of [[undefined, undefined, undefined], [null, null, null], [{}, {}, {}]]) {
+    assert.equal(typeof needsUserCensus(...args), 'boolean')
+  }
+})
+
+// --------------------------------------------------------- censusProblem
+
+test('a census that searched a live index is not a problem', () => {
+  assert.equal(censusProblem(CENSUS), null)
+})
+
+// The same rule as offlineProblem, applied to the one agent whose subject is the
+// world: a census that reached nothing must never be summarised as "no consumer
+// is affected", which is a positive claim about every consumer there is.
+test('a census that could not search halts on the affirmative value', () => {
+  for (const value of [undefined, null, false, '', 'yes', 1]) {
+    assert.ok(censusProblem({ ...CENSUS, reachedNetwork: value }), `reachedNetwork ${JSON.stringify(value)}`)
+  }
+})
+
+test('a dead census agent is a problem', () => {
+  for (const dead of [null, undefined]) assert.ok(censusProblem(dead))
+})
+
+test('a census that names no query it ran is not evidence of absence', () => {
+  for (const coverage of [undefined, '', '   ']) {
+    const r = censusProblem({ ...CENSUS, coverage })
+    assert.ok(r, `coverage ${JSON.stringify(coverage)}`)
+    assert.match(r, /uncitable|named no query/)
+  }
+})
+
+// The asymmetry the enum exists for: `affected-users-found` is a positive claim
+// that raises severity, so it has to be earned with a named consumer.
+test('affected-users-found with nobody named is a problem', () => {
+  for (const confirmed of [undefined, '', '   ']) {
+    assert.ok(censusProblem({ ...CENSUS, result: 'affected-users-found', confirmed }), JSON.stringify(confirmed))
+  }
+  assert.equal(
+    censusProblem({ ...CENSUS, result: 'affected-users-found', confirmed: 'acme/widgets calls search(req.query.f) at app.js:88' }),
+    null,
+  )
+})
+
 // --------------------------------------------------- the gates, where used
+
+// The reachability agent has its own schema now: it is asked who drives the sink
+// in the published project, and never asked for a policy verdict or a quoted
+// clause, which SCOPE_SCHEMA required of it and nothing read.
+const REACHED = {
+  driver: 'in-repo-caller',
+  eligibilityCaveats: 'requires the search endpoint to be exposed publicly',
+  evidence: 'reachable from /search',
+}
+
+const CENSUS = {
+  reachedNetwork: true,
+  result: 'no-confirmed-users',
+  pattern: 'calling search(filter) with a caller-built filter string',
+  coverage: 'GitHub code search for `search(` across the 40 dependents listed on the package index',
+  confirmed: '',
+  severityEffect: 'lower',
+  evidence: 'every dependent read passes a constant',
+}
 
 const agents = (over = {}) => ({
   policy: READ,
-  reachability: { ...IN_SCOPE, verdict: 'unclear', clause: '', evidence: 'reachable from /search' },
+  reachability: REACHED,
   inscope: IN_SCOPE,
+  'downstream-users': CENSUS,
   'past-bugs': {
     result: 'nothing',
     coverage: 'searched all 3 pages of the advisory list',
@@ -531,8 +653,101 @@ test('an incomplete summary is NEEDS MORE INFO, not a triage result', async () =
   assert.equal(result.status, 'NEEDS_MORE_INFO')
 })
 
+// The census, where it is used. `needsUserCensus` being right is worth nothing if
+// nothing dispatches on it — that is the shape of every capability this plugin has
+// lost: present, correct, covered, and never reached.
+
+const CLIENT_DRIVEN = {
+  ...GOOD,
+  verification: {
+    ...GOOD.verification,
+    impact: { impact: 'a caller-built filter reaches the query', rootCause: 'integration', classification: 'vulnerability' },
+  },
+}
+
+test('the census is dispatched when severity turns on how consumers use the project', async () => {
+  const { result, calls } = await runScript('triage-online.js', { args: CLIENT_DRIVEN, agents: agents() })
+  assert.equal(result.status, 'TRIAGED')
+  assert.ok(calls.some((c) => c.label === 'downstream-users'), 'the census agent was never dispatched')
+  assert.equal(result.census.state, 'performed')
+  const summary = calls.find((c) => c.label === 'summary')
+  assert.match(summary.prompt, /Downstream-consumer census: no-confirmed-users/)
+  // Absence of hits is not proof no consumer is affected, and the summary must
+  // not be free to read it that way.
+  assert.match(summary.prompt, /NOT proof that no consumer is affected/)
+})
+
+test('a confirmed affected consumer reaches the summary with its link', async () => {
+  const { calls, result } = await runScript('triage-online.js', {
+    args: CLIENT_DRIVEN,
+    agents: agents({
+      'downstream-users': {
+        ...CENSUS,
+        result: 'affected-users-found',
+        confirmed: 'acme/widgets passes req.query.f straight to search() — app.js:88',
+        severityEffect: 'raise',
+      },
+    }),
+  })
+  assert.equal(result.census.state, 'performed')
+  const summary = calls.find((c) => c.label === 'summary')
+  assert.match(summary.prompt, /acme\/widgets/)
+  assert.match(summary.prompt, /severityEffect raise/)
+})
+
+// A silent skip is how `beyondCap` went wrong: it was logged, and a log is not
+// something any consumer reads, so the summary saw an absence and read it as a
+// clean result. Logged AND carried, both asserted.
+test('a skipped census is logged and carried, not silently absent', async () => {
+  const { result, calls, logs } = await runScript('triage-online.js', { args: GOOD, agents: agents() })
+  assert.equal(result.status, 'TRIAGED')
+  assert.ok(!calls.some((c) => c.label === 'downstream-users'), 'the census was paid for on a directly exploitable bug')
+  assert.equal(result.census.state, 'not-applicable')
+  assert.match(result.census.why, /in-repo-caller/)
+  assert.ok(logs.some((l) => /census not-applicable/.test(l)), `the skip must be logged; logs were: ${logs}`)
+  assert.match(calls.find((c) => c.label === 'summary').prompt, /census: not applicable/)
+})
+
+// The one thing that must not happen: a census that searched nothing summarised
+// as "no consumer is affected". Reported unchecked rather than halting the stage —
+// a completed policy read, scope verdict and past-bug fan-out are still evidence,
+// and `unsearched` already sets that precedent for this stage.
+test('a census that could not search is reported unchecked, never as a clean result', async () => {
+  for (const dead of [null, { ...CENSUS, reachedNetwork: false, coverage: 'the code-search API refused every request' }]) {
+    const { result, calls } = await runScript('triage-online.js', {
+      args: CLIENT_DRIVEN,
+      agents: agents({ 'downstream-users': dead }),
+    })
+    assert.equal(result.status, 'TRIAGED', `census ${JSON.stringify(dead)}`)
+    assert.equal(result.census.state, 'unperformed')
+    const summary = calls.find((c) => c.label === 'summary').prompt
+    assert.match(summary, /census: NOT PERFORMED/)
+    assert.match(summary, /UNCHECKED rather than clear/)
+    assert.ok(!/no-confirmed-users/.test(summary), 'a census that searched nothing reached the summary as a result')
+  }
+})
+
+test('the census state is carried on a terminal duplicate too', async () => {
+  const { result } = await runScript('triage-online.js', {
+    args: CLIENT_DRIVEN,
+    agents: agents({
+      'past-bugs': {
+        result: 'similar-bugs-found',
+        coverage: 'all pages',
+        links: 'GHSA-xxxx-yyyy-zzzz',
+        similarity: 'same trigger, same actor',
+        recommendedSeverity: 'High',
+        duplicate: true,
+        evidence: 'identical report',
+      },
+    }),
+  })
+  assert.equal(result.status, 'DUPLICATE')
+  assert.equal(result.census.state, 'performed')
+})
+
 test('every gate function is extractable: a rename must fail loudly', () => {
-  const names = ['missingArgs', 'offlineProblem', 'scopeHalt', 'summaryProblem']
+  const names = ['missingArgs', 'offlineProblem', 'scopeHalt', 'summaryProblem', 'needsUserCensus', 'censusProblem']
   const loaded = loadFns(ONLINE, ...names)
   for (const name of names) {
     assert.equal(typeof loaded[name], 'function', `${name} is not extractable`)

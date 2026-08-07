@@ -1,7 +1,7 @@
 export const meta = {
   name: 'triage-online',
   description:
-    "Stage 2: check the project's current public posture — disclosure policy, bounty scope, advisories and past reports — and correct the scope or severity Stage 1 reached",
+    "Stage 2: check the project's current public posture — disclosure policy, bounty scope, advisories, past reports, and a census of the public downstream users when severity turns on how they consume the target — and correct the scope or severity Stage 1 reached",
   whenToUse:
     'Only when the user asked for online checks, and only after triage-static has produced a verdict. Requires network access to a real upstream project; it fails closed rather than triaging policy from memory.',
   phases: [{ title: 'Policy' }, { title: 'Scope' }, { title: 'History' }, { title: 'Summary' }],
@@ -56,6 +56,35 @@ const SCOPE_SCHEMA = {
   },
 }
 
+// The reachability agent had SCOPE_SCHEMA, which is the `inscope` agent's shape:
+// it was made to answer with a policy `verdict` and a quoted `clause`, and its
+// prompt asks it for neither. Nothing read either field. That is the same
+// "loosen one schema to fit two jobs" that gave DO_NOT_SUBMIT three outcomes, and
+// it is why this stage could not tell whether the sink is driven by the project's
+// own code or only by a consumer's — the one fact `needsUserCensus` turns on.
+//
+// Every field here is required and every field here is read.
+const REACHABILITY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['driver', 'eligibilityCaveats', 'evidence'],
+  properties: {
+    // Who drives the sink in the PUBLISHED project. `client-code` is the library
+    // shape — the bug needs an unsafe usage a consumer writes — and it is what
+    // makes the downstream-consumer census worth an agent.
+    driver: {
+      enum: ['in-repo-caller', 'client-code', 'unknown'],
+      description:
+        "'in-repo-caller' when the project's own code reaches the sink, 'client-code' when only a consumer's code can, 'unknown' when the published evidence does not settle it",
+    },
+    // Was optional, and read with a fallback in two prompts. Required for the
+    // same reason SUMMARY_SCHEMA requires openQuestions: the prompt asks for the
+    // unknowns that would change the verdict, and an omitted gap reads as none.
+    eligibilityCaveats: { type: 'string', description: 'the unknowns that would change the verdict, and the mitigating factors' },
+    evidence: { type: 'string' },
+  },
+}
+
 const PAST_BUGS_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -75,6 +104,45 @@ const PAST_BUGS_SCHEMA = {
     // reads as `undefined` — falsy — so a genuine duplicate the agent found but
     // did not flag is reported as a live finding.
     duplicate: { type: 'boolean', description: 'this exact bug is already publicly reported' },
+    evidence: { type: 'string' },
+  },
+}
+
+// online-triage's `triage-online-users` role: the only role in any parent that
+// produced evidence about the WORLD rather than about the project.
+//
+// `result` is an enum rather than a count because the two answers are not
+// symmetrical. `affected-users-found` is a positive claim backed by links;
+// `no-confirmed-users` bounds what was looked at and says nothing about what was
+// not. `coverage` is required so the second one is auditable, and the summary is
+// told in as many words not to read it as proof.
+const CENSUS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['reachedNetwork', 'result', 'pattern', 'coverage', 'confirmed', 'severityEffect', 'evidence'],
+  properties: {
+    // Same fail-closed rule the policy agent lives by, for the same reason: a
+    // census answered from memory is a claim about which projects are vulnerable
+    // today, made from a snapshot of a package ecosystem that has since moved.
+    reachedNetwork: { type: 'boolean', description: 'a live search of a real code or package index actually succeeded' },
+    result: { enum: ['no-confirmed-users', 'affected-users-found'] },
+    pattern: {
+      type: 'string',
+      description: 'the client-side usage that makes the bug exploitable, written as it would appear in a consumer',
+    },
+    coverage: {
+      type: 'string',
+      description: 'the queries actually run, the indexes searched, and where you looked and found nothing — one query is not a census',
+    },
+    confirmed: {
+      type: 'string',
+      description:
+        'each confirmed consumer: name, a link to the exact occurrence, and the context that tells it from a string match. Empty when none was confirmed',
+    },
+    severityEffect: {
+      enum: ['raise', 'lower', 'none'],
+      description: 'raise on a confirmed unsafe consumer, lower when the misuse is only theoretical, none when the evidence does not settle it',
+    },
     evidence: { type: 'string' },
   },
 }
@@ -265,8 +333,17 @@ Then state the unknowns that would change the verdict. "It's probably not
 reachable" is an open question, not a mitigation: record what would have to be
 true rather than quietly downgrading the severity.
 
+Then set \`driver\`, which decides whether anyone needs to look at this project's
+consumers at all:
+  - in-repo-caller — the project's own published code reaches the sink, so the
+    bug is exploitable in the target itself
+  - client-code — only code a CONSUMER writes reaches it: an exported API, a
+    pattern the docs tell clients to implement, a callback the project never
+    calls itself
+  - unknown — the published evidence does not settle which
+
 Cite a link for every material claim.`,
-  { label: 'reachability', phase: 'Scope', schema: SCOPE_SCHEMA, effort: 'medium' },
+  { label: 'reachability', phase: 'Scope', schema: REACHABILITY_SCHEMA, effort: 'medium' },
 )
 
 // The only agent result here that was read without a guard, and the reason it needs
@@ -417,6 +494,140 @@ if (unsearched.length > 0) {
   log(`${unsearched.length} of ${attempted} source(s) returned nothing at all: ${unsearched.join(', ')}`)
 }
 
+// ------------------------------------------------- Downstream-user census
+
+// Pure. online-triage's `triage-online-users` role was gated on the reachability
+// and scope files saying severity depends on downstream users, and the parent
+// gated it for a reason: for a bug directly exploitable in the target, a census
+// of consumers answers a question nobody asked.
+//
+// A gate in code rather than a third question at Step 0, because whether severity
+// turns on downstream usage is a FINDING of the reachability analysis and not
+// something the user knows when they start — and because every extra question is
+// one more thing a non-interactive harness silently defaults to `no`, which is how
+// this plugin has now shipped three capabilities that fired zero times.
+//
+// The last clause is read by exclusion, and that is deliberate. Everywhere else in
+// this stage the affirmative value is the one that counts, because there the risk
+// is a claim made on no evidence. Here the risk runs the other way: the measured
+// failure is a capability that never fires, and an omitted `driver` reading as "no
+// census needed" is exactly that. A false positive costs one agent; a false
+// negative loses the role again.
+function needsUserCensus(verification, reachability, scope) {
+  // Unreachable from the call site below — `scopeHalt` has already returned on an
+  // out-of-scope verdict. Kept because the predicate is unit-tested on its own and
+  // "census a project's consumers over a finding its policy excludes" must not be
+  // something it says yes to when someone reuses it.
+  if (scope && scope.verdict === 'out-of-scope') return false
+
+  const impact = (verification && verification.impact) || {}
+  // An integration or external root cause means the attack needs a failure
+  // outside this project, which is the client's side of the boundary.
+  if (impact.rootCause === 'integration' || impact.rootCause === 'external') return true
+  // A hardening gap is by definition not exploitable on its own; whether it
+  // matters is a question about how it is used. Not narrowed to "in an exported
+  // surface" — nothing structural tells us that, and guessing narrows toward the
+  // failure that costs the capability.
+  if (impact.classification === 'hardening_gap') return true
+
+  const driver = (reachability && reachability.driver) || ''
+  return driver !== 'in-repo-caller'
+}
+
+const censusWanted = needsUserCensus(verification, reachability, scope)
+
+const census = censusWanted
+  ? await agent(
+      `Do real, popular public consumers of this project actually exhibit the unsafe
+pattern this finding depends on?
+
+Project: ${project.name} (${project.url})
+Finding: ${finding.summary}
+Component: ${finding.component}
+Sink: ${finding.sink}
+Impact established offline: ${verification.impact.impact}
+Root cause: ${verification.impact.rootCause}
+Public reachability: ${reachability.evidence}
+
+First derive the pattern. From the reachability findings above, write down what
+the unsafe usage looks like in a CONSUMER's code — the call, the argument, the
+missing check, the order of operations — and put it in \`pattern\`. Everything
+after this depends on searching for the right thing.
+
+Then look for it. Use the dependents graph, public code search, the package
+index's reverse dependencies, and the project's own list of users. Prefer
+consumers with real usage over toy repositories and forks.
+
+Keep only CONFIRMED hits: a real occurrence, a link to the exact file and line,
+and enough surrounding context to tell it from a string match on the same
+identifier. A consumer that calls the API safely is not a hit. Record each one in
+\`confirmed\`, with the link.
+
+Record in \`coverage\` the queries you actually ran and the indexes you searched,
+including where you looked and found nothing. Finding nothing bounds what you
+looked at; it is not evidence that no consumer is affected, and \`coverage\` is
+what lets the next reader tell those apart.
+
+severityEffect: raise when a confirmed consumer exhibits the pattern, lower when
+the misuse is only theoretical, none when the search does not settle it.
+
+Set reachedNetwork according to whether a live search actually SUCCEEDED. If you
+could not reach the network, set it false and stop there. A census answered from
+memory is a claim about which projects are vulnerable today, drawn from a snapshot
+of an ecosystem that has since moved.`,
+      { label: 'downstream-users', phase: 'History', schema: CENSUS_SCHEMA, effort: 'medium' },
+    )
+  : null
+
+// Pure. The same rule the rest of this stage lives by — no claim about the world
+// without having looked — applied to the one agent whose subject IS the world.
+// The failure it exists to stop is the census degrading into "no users found",
+// which is a positive claim, when what happened is that nothing was searched.
+function censusProblem(result) {
+  if (!result) return 'the census agent returned nothing, so no consumer was looked at'
+  if (result.reachedNetwork !== true) {
+    return `no consumer index could be searched: ${String(result.coverage || '').trim() || 'the agent did not say where it looked'}`
+  }
+  if (!String(result.coverage || '').trim()) {
+    return 'the census named no query it ran; an uncitable "no affected consumers" is not evidence'
+  }
+  if (result.result === 'affected-users-found' && !String(result.confirmed || '').trim()) {
+    return 'the census reported affected consumers but named none, so there is nothing to raise the severity on'
+  }
+  return null
+}
+
+const censusIssue = censusWanted ? censusProblem(census) : null
+
+// Carried, not merely logged. `beyondCap` is the precedent and the lesson: a log
+// is not something any consumer reads, so a silently skipped step reaches the
+// summary as an absence and reads as a clean result. Both the summary prompt and
+// every return below get this.
+const censusState = !censusWanted ? 'not-applicable' : censusIssue ? 'unperformed' : 'performed'
+const censusWhy = !censusWanted
+  ? `the bug is exploitable in the target itself — root cause ${verification.impact.rootCause}, classification ${verification.impact.classification}, and the published call sites are driven by ${reachability.driver}`
+  : censusIssue
+if (censusState !== 'performed') log(`downstream-users census ${censusState}: ${censusWhy}`)
+
+// A blind census is reported to the summary as unchecked rather than halting the
+// stage, which is where this departs from `offlineProblem`. The policy read is
+// this stage's premise and nothing downstream of it means anything; the census is
+// one input, and killing a completed policy read, scope verdict and past-bug
+// fan-out over it would throw away evidence that is still good. `unsearched` sets
+// the precedent for exactly this shape. What must not happen — a census that
+// searched nothing summarised as "no consumer is affected" — is what the wording
+// below prevents.
+const censusReport =
+  censusState === 'performed'
+    ? `Downstream-consumer census: ${census.result} (severityEffect ${census.severityEffect}).
+  unsafe pattern searched for: ${census.pattern}
+  confirmed consumers: ${String(census.confirmed || '').trim() || 'none confirmed'}
+  coverage: ${census.coverage}
+  A census that confirmed nothing bounds what was looked at. It is NOT proof that no consumer is affected.`
+    : censusState === 'unperformed'
+      ? `Downstream-consumer census: NOT PERFORMED — ${censusWhy}. Severity here turns on how consumers use this project, and that is UNCHECKED rather than clear; it belongs in openQuestions.`
+      : `Downstream-consumer census: not applicable — ${censusWhy}.`
+
 // ----------------------------------------------------------------- Summary
 
 phase('Summary')
@@ -452,14 +663,16 @@ ${unsearched.length ? `NOT searched, because those agents returned nothing — t
 ${beyondCap.length ? `NOT searched, because they were beyond the cap of ${MAX_SOURCES} and no agent was dispatched — unchecked, not clear:\n  ${beyondCap.join('\n  ')}` : ''}
 ${duplicates.length ? `Reported as an existing public duplicate:\n  ${duplicates.map((r) => `${r.source}: ${dupCite(r)}`).join('\n  ')}` : 'No source reported this as an existing duplicate.'}
 
+${censusReport}
+
 Give the final severity recommendation and the reasoning that gets you there,
 mapping the reachability facts onto the policy clauses. Where the online evidence
 contradicts the offline severity, say which one you are following and why.
 
 openQuestions is required and may not be empty. If the policy does not address
-this class of bug, if a venue went unsearched, or if the rubric is ambiguous, that
-belongs here — a summary that omits the gap reads as though the question was
-settled.`,
+this class of bug, if a venue went unsearched, if the consumer census could not be
+performed, or if the rubric is ambiguous, that belongs here — a summary that omits
+the gap reads as though the question was settled.`,
   { label: 'summary', phase: 'Summary', schema: SUMMARY_SCHEMA, effort: 'high' },
 )
 
@@ -497,6 +710,7 @@ if (duplicates.length > 0) {
     pastBugs: searched,
     unsearched,
     beyondCap,
+    census: { state: censusState, why: censusWhy, result: census },
     summary,
   }
 }
@@ -513,6 +727,7 @@ if (summaryIssue) {
     pastBugs: searched,
     unsearched,
     beyondCap,
+    census: { state: censusState, why: censusWhy, result: census },
   }
 }
 
@@ -526,5 +741,6 @@ return {
   pastBugs: searched,
   unsearched,
   beyondCap,
+  census: { state: censusState, why: censusWhy, result: census },
   summary,
 }

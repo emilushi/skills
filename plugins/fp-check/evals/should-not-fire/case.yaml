@@ -4,6 +4,7 @@ description: A documentation question that must NOT trigger the PoC pipeline, wi
   deliberately available.
 tags:
 - fp-check
+- static
 context:
   scaffold_script: scaffold.sh
 execution:

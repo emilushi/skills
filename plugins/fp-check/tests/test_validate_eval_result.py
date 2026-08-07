@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 HERE = Path(__file__).resolve().parent
 VALIDATOR = HERE / "validate_eval_result.py"
@@ -47,17 +48,26 @@ def real() -> dict:
     return json.loads(REAL_RESULT.read_text())
 
 
-def expected_cases() -> set[str]:
-    """`EXPECTED_CASES` as the validator actually defines it.
+def case_suites() -> dict[str, set[str]]:
+    """`CASE_SUITES` as the validator actually defines it.
 
     Read out of the script rather than duplicated here: the two are the same
     list, and a second copy is the thing that let the first one go stale.
     """
-    m = re.search(r"EXPECTED_CASES = \{(.*?)\}", VALIDATOR.read_text(), re.S)
-    assert m, "EXPECTED_CASES not found in the validator"
-    names = set(re.findall(r'"([^"]+)"', m.group(1)))
-    assert names, "EXPECTED_CASES is empty; refusing to report success"
-    return names
+    m = re.search(r"CASE_SUITES = \{(.*?)\n\}", VALIDATOR.read_text(), re.S)
+    assert m, "CASE_SUITES not found in the validator"
+    suites = {
+        name: set(re.findall(r'"([^"]+)"', body))
+        for name, body in re.findall(r'"(\w+)":\s*\{(.*?)\},', m.group(1), re.S)
+    }
+    assert suites, "CASE_SUITES is empty; refusing to report success"
+    for name, names in suites.items():
+        assert names, f"CASE_SUITES[{name!r}] is empty; refusing to report success"
+    return suites
+
+
+def expected_cases() -> set[str]:
+    return {name for names in case_suites().values() for name in names}
 
 
 def test_expected_cases_matches_the_cases_on_disk():
@@ -75,6 +85,67 @@ def test_expected_cases_matches_the_cases_on_disk():
     )
 
 
+def test_the_validator_suites_match_the_tags_on_disk():
+    """The split is declared in two places and both are load-bearing.
+
+    `--tag` is what the operator actually runs; `CASE_SUITES` is what decides
+    whether the resulting JSON is complete. If they disagree, the validator
+    demands a case the tag never selected — or, worse, accepts a static sweep
+    that silently lost one.
+    """
+    suites = case_suites()
+    by_tag: dict[str, set[str]] = {name: set() for name in suites}
+    for path in (HERE.parents[0] / "evals").glob("*/case.yaml"):
+        tags = set(yaml.safe_load(path.read_text()).get("tags") or [])
+        for name in suites:
+            if name in tags:
+                by_tag[name].add(path.parent.name)
+    assert by_tag == suites, (
+        f"validate_eval_result.py splits the cases {ns(suites)} but the tags on disk split "
+        f"them {ns(by_tag)}. `--tag` and the completeness check must select the same sets."
+    )
+    overlap = suites["static"] & suites["online"]
+    assert not overlap, f"{sorted(overlap)} is in both suites, so no result can be complete"
+
+
+def ns(d: dict[str, set[str]]) -> dict[str, list[str]]:
+    return {k: sorted(v) for k, v in d.items()}
+
+
+def test_a_result_mixing_the_two_suites_is_rejected(tmp_path: Path, passing: dict):
+    """The failure the tag split exists to prevent, asserted rather than assumed.
+
+    Stage 2's ground truth is public record and the static cases' is authored
+    here; a mean over both answers no question. `claude plugin eval` runs every
+    case it finds, so producing this JSON takes nothing more than forgetting
+    `--tag` — and the resulting number would look entirely ordinary.
+    """
+    template = json.loads(json.dumps(passing["cases"][0]))
+    template["name"] = sorted(case_suites()["online"])[0]
+    passing["cases"].append(template)
+    passing["aggregates"]["casesTotal"] = len(passing["cases"])
+    passing["aggregates"]["casesPassed"] = len(passing["cases"])
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 1
+    assert "must never be averaged" in proc.stderr
+
+
+def test_an_unrecognised_case_is_reported_rather_than_ignored(tmp_path: Path, passing: dict):
+    """A case the validator has never heard of is checked against nothing.
+
+    Silently ignoring it is how the list went stale the first time: a renamed
+    case disappears from the expectations and its absence stops being detectable.
+    """
+    template = json.loads(json.dumps(passing["cases"][0]))
+    template["name"] = "some-case-nobody-registered"
+    passing["cases"].append(template)
+    passing["aggregates"]["casesTotal"] = len(passing["cases"])
+    passing["aggregates"]["casesPassed"] = len(passing["cases"])
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 1
+    assert "some-case-nobody-registered" in proc.stderr
+
+
 @pytest.fixture
 def passing(real: dict) -> dict:
     """The real result, edited to the shape a *good* run would have.
@@ -83,15 +154,21 @@ def passing(real: dict) -> dict:
     to be constructed. It is built by editing the real one, so it keeps every
     key the CLI actually emits.
 
-    The recorded run predates two cases, so the case list is topped up from
-    EXPECTED_CASES rather than hardcoded — otherwise adding a case makes this
+    The recorded run predates two cases, so the case list is topped up from the
+    STATIC suite rather than hardcoded — otherwise adding a case makes this
     fixture, and every assertion built on it, silently wrong.
+
+    The static suite specifically, not every known case: the recorded run is a
+    static sweep, and topping it up from the union built a result spanning both
+    suites, which the validator now rejects as the un-averageable mix it is.
     """
     payload = json.loads(json.dumps(real))
     payload["partial"] = False
     template = payload["cases"][0]
+    static = case_suites()["static"]
+    payload["cases"] = [c for c in payload["cases"] if c.get("name", c.get("case")) in static]
     seen = {c.get("name", c.get("case")) for c in payload["cases"]}
-    for name in sorted(expected_cases() - seen):
+    for name in sorted(static - seen):
         extra = json.loads(json.dumps(template))
         extra["name"] = name
         payload["cases"].append(extra)

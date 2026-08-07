@@ -12,14 +12,15 @@ narrow or correct what Stage 1 returned.
 
 ```text
               ┌─ Stage 1: STATIC  (always) ──────────────────────────┐
-  finding ──> │  brocard pre-gate → per-layer reachability →          │
-              │  recovery → already-fixed → impact + severity →       │
+  finding ──> │  per-layer reachability → recovery →                  │
+              │  already-fixed → impact + severity →                  │
               │  adversarial → the six gates                          │
               └───────────────────────┬──────────────────────────────┘
                                       │ verdict + severity + open questions
   Q2: online checks? ──yes──> ┌───────▼─ Stage 2: ONLINE ────────────┐
                               │  policy → public reachability →       │
-                              │  scope → past bugs → summary          │
+                              │  scope → past bugs → consumer census  │
+                              │  → summary                            │
                               │  may halt: offline, out-of-scope,     │
                               │  duplicate                            │
                               └───────────────┬──────────────────────┘
@@ -72,9 +73,8 @@ answer, so the question either hangs until the timeout or silently falls through
 to the default. Both defaults are **no**, so a plugin that always asks measures
 Stage 1 and reports it as though all three stages had run.
 
-Then restate the bug in your own words. **Half of false positives collapse here** —
-the claim stops making sense when stated precisely. Establish, and if you cannot,
-ask:
+Then restate the bug in your own words. **Half of false positives collapse here.**
+Establish, and if you cannot, ask:
 
 - **The claim** — "heap overflow in `parse_header()` when `content_length` > 4096"
 - **The alleged root cause** — "no bounds check before the `memcpy` at line 142"
@@ -87,8 +87,15 @@ ask:
 - **The bug class** — and read
   [bug-class-verification.md]({baseDir}/references/bug-class-verification.md) for
   what that class specifically has to establish
-- **The entry point and the layers between it and the sink** — this is the
-  dispatch's most important input; see below
+- **Whether it is a finding at all** — read
+  [dismissal-grounds.md]({baseDir}/references/dismissal-grounds.md): the attacker
+  already holds what the exploit grants, the behaviour is specified or documented,
+  the cure is worse than the disease. **Guidance, not a gate** — four agents used
+  to dismiss on the shape of the claim, and over 65 measured runs they decided
+  cases the specialised gates were built for. Recognise the shape here; let the
+  stage holding the trace decide it
+- **The entry point and the layers between it and the sink** — the dispatch's
+  most important input; see below
 
 ## Enumerating the layers
 
@@ -97,10 +104,17 @@ inspects. Walk the path from the entry point to the sink and name every check
 between them: authorization, input sanitisation, allowlists, rate limiting, type
 checking, bounds checking.
 
-**If you believe nothing validates the path, pass that as one explicit layer.** An
-empty list is rejected rather than treated as "no checks exist" — a forgotten
-field and a deliberate "nothing guards this" are the same value, and the second
-one is a claim that deserves an agent.
+**A layer must be a check that EXISTS, with a `file:line`.** Never enumerate the
+*absence* of one. This used to say the opposite, and a traced run measured the
+cost: an agent asked whether a layer that does not exist stops the payload
+answered `PAYLOAD_STOPPED_HERE` while explaining in its own `reason` that it meant
+the opposite, and the finding died before the impact agent ran.
+
+**If nothing on the path validates the payload, send `layers: []` together with
+`layersSearched`** — the files and functions you read, and what you did not find.
+That is checkpoint 2.2's "or confirmed none exist". An empty list alone is still
+rejected: a forgotten field and a deliberate "nothing guards this" are the same
+value, and the declaration is what tells them apart.
 
 At most **4** layers are dispatched. More than that is rejected before anything is
 spent: narrow the attack path or split the finding.
@@ -176,9 +190,11 @@ args = {
     location:     file:line of the entry point itself
     payload:      a concrete example input, not "malicious payload here"
   }
-  layers: [ { name, location, checks } ]     at most 4; never empty.
+  layers: [ { name, location, checks } ]     at most 4. Checks that EXIST only.
           name and location are required per layer; checks is optional and the
           layer agent derives it from the code when you omit it
+  layersSearched: required ONLY when layers is [] — what you read and what you
+          did not find. Never send the absence of a check as a layer instead
   scope:  a STRING describing the declared scope; an object interpolates as
           [object Object] and is rejected
   route:  'standard' | 'deep'                optional; computed when omitted
@@ -192,13 +208,12 @@ Returns one of `TRUE_POSITIVE`, `FALSE_POSITIVE`, `DISMISSED`, `NOT_EXPLOITABLE`
 each with a `reason`, and with `severity` and `severityCorrection` when it reached
 an impact.
 
-A return that got as far as the verdict also carries `openQuestions`: the
-cheap-pre-gate questions that came back NEEDS_MORE_INFO and were carried instead
-of ending the stage. **A non-empty `openQuestions` returns `NEEDS_MORE_INFO` even
-when all six gates read `PASS`** — the `gates` object in the payload will show six
-passes and the status will not be `TRUE_POSITIVE`. That is not a bug to route
-around; the `reason` names the unanswered question, and answering it is what
-turns the finding into a verdict.
+A return that got as far as the verdict also carries `blockingProofs`: deep-route
+proofs that reported the finding impossible, carried to the six gates rather than
+allowed to end the stage. **A non-empty `blockingProofs` returns `NEEDS_MORE_INFO`
+even when all six gates read `PASS`** — the payload will show six passes and the
+status will not be `TRUE_POSITIVE`. The `reason` quotes the proof; answering it is
+what turns the finding into a verdict.
 
 ### Stage 2 — only if Q2 was yes
 
@@ -235,6 +250,21 @@ is decided before the impact agent runs, so such a return has no impact to forwa
 and Stage 2 cannot act on it. If a published policy contradicts the scope you
 declared, correct the `scope` argument and dispatch Stage 1 again — that argument
 is where the input lives.
+
+**The downstream-consumer census is decided in code, not asked for.** When
+severity turns on how clients use the target — an `integration` or `external` root
+cause, a `hardening_gap`, or a sink no in-repo caller drives — Stage 2 searches the
+dependents graph and the public code indexes for consumers that actually exhibit
+the unsafe pattern, and keeps only confirmed occurrences with links. On a bug
+exploitable in the target itself the census is skipped, because it answers a
+question nobody asked; the skip and its reason come back in `census.why` rather
+than being silent. Read `census.state` before reading anything into the result:
+
+| `census.state` | What it means |
+|---|---|
+| `performed` | consumers were searched. `census.result` is `affected-users-found` or `no-confirmed-users`, and **the latter bounds what was searched — it is not proof no consumer is affected** |
+| `unperformed` | the census was needed and could not be run. Downstream usage is UNCHECKED, not clear |
+| `not-applicable` | the bug does not depend on a consumer, and `census.why` says which facts decided that |
 
 Returns `TRIAGED`, `OUT_OF_SCOPE`, `DUPLICATE`, `NEEDS_MORE_INFO`, `BLOCKED`, or
 `OFFLINE`. **`OFFLINE` is a correct outcome, not an error** — every claim this
@@ -435,7 +465,7 @@ dispatch each finding and keep your own record of which returned what.
 |---|---|---|
 | "Rapid analysis of the remaining bugs" | Every finding gets the same dispatch | Go back and dispatch the next one |
 | "This pattern looks dangerous, so it's a vulnerability" | Pattern recognition is not analysis | Let Stage 1 trace the layers |
-| "I can see it's unreachable, no need to dispatch" | That judgement is what the per-layer fan-out exists to make independently. It is also the judgement a linear read gets wrong: 6 of 6 measured runs named the blocking guard and only 1 of 6 concluded correctly | Dispatch |
+| "I can see it's unreachable, no need to dispatch" | That judgement is what the per-layer fan-out exists to make independently, and a linear read gets it wrong: 6 of 6 measured runs named the blocking guard, 1 of 6 concluded correctly | Dispatch |
 | "The sink is genuinely injectable, so the finding is real" | Attacker control **of the sink** is not control of any reachable entry point. A PoC calling the sink directly is the canonical false positive with an exploit attached | Gate 2 (Reachability) decides this, on the entry point |
 | "Similar code was vulnerable elsewhere" | Each context has different validation, callers and protections | Verify this instance |
 | "This is clearly critical" | LLMs over-rate severity, and the severity caps are arithmetic | Let Stage 1e apply them |
@@ -448,8 +478,8 @@ dispatch each finding and keep your own record of which returned what.
 
 - [checkpoints.md]({baseDir}/references/checkpoints.md) — the pass criteria for
   every checkpoint, and the crosswalk from stages to checkpoints to the six gates
-- [brocards.md]({baseDir}/references/brocards.md) — the cheap pre-gate, and the
-  guards against wrongly dismissing a valid finding
+- [dismissal-grounds.md]({baseDir}/references/dismissal-grounds.md) — why a report
+  may not be a finding, and the guards against wrongly dismissing a valid one
 - [gate-reviews.md]({baseDir}/references/gate-reviews.md) — the six gates and the
   verdict format
 - [false-positive-patterns.md]({baseDir}/references/false-positive-patterns.md) —

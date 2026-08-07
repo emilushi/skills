@@ -545,15 +545,6 @@ GATE_FIELD_CONTRACTS = [
     # args, not by the agent — so no schema can be expected to require them.
     ("triage-static.js", "decideGate", "LAYER_SCHEMA", ("l",), {"layer", "location"}),
     ("triage-static.js", "decideGate", "THREAT_SCHEMA", ("threatVerdict",), set()),
-    # `key` and `title` are attached by the .then() wrapper from the script-local
-    # BROCARDS list, for the same reason as `layer` above.
-    (
-        "triage-static.js",
-        "triageBrocards",
-        "BROCARD_SCHEMA",
-        ("v",),
-        {"key", "title"},
-    ),
     # `complete` was exempt here, on the reasoning that an omitted field reads as
     # `undefined` and "the fix is treated as complete, which is the safe direction".
     # That has the direction backwards: treating it as complete is exactly what
@@ -562,6 +553,10 @@ GATE_FIELD_CONTRACTS = [
     # requires it.
     ("triage-static.js", "upstreamFixStands", "HISTORY_SCHEMA", ("historyVerdict",), set()),
     ("triage-static.js", "decideVerdict", "VERDICT_SCHEMA", ("result",), set()),
+    # The brocard pre-gate and its BROCARD_SCHEMA row are gone as of 2.5.0. The
+    # four tests are guidance in references/dismissal-grounds.md now, read by the
+    # agents that hold the traced path, and nothing dispatches an agent whose
+    # verdict can end the stage on the shape of the claim alone.
     # lintOutput decorates a message that already carries its own fallback
     # ('no output captured', pinned in review.test.mjs). Its absence does not
     # change the decision, so it is not something this gate reads.
@@ -571,6 +566,13 @@ GATE_FIELD_CONTRACTS = [
     ("triage-online.js", "offlineProblem", "POLICY_SCHEMA", ("result",), set()),
     ("triage-online.js", "scopeHalt", "SCOPE_SCHEMA", ("result",), set()),
     ("triage-online.js", "summaryProblem", "SUMMARY_SCHEMA", ("result",), set()),
+    ("triage-online.js", "censusProblem", "CENSUS_SCHEMA", ("result",), set()),
+    # `needsUserCensus` decides on two agents' results at once, so it gets a row
+    # per schema. The `driver` row is the one that matters: the whole point of
+    # giving the reachability agent its own schema was that SCOPE_SCHEMA could not
+    # require the one field this gate reads.
+    ("triage-online.js", "needsUserCensus", "REACHABILITY_SCHEMA", ("reachability",), set()),
+    ("triage-online.js", "needsUserCensus", "SCOPE_SCHEMA", ("scope",), set()),
 ]
 
 

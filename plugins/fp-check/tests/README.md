@@ -69,7 +69,25 @@ Covered: `missingArgs` (three copies), `selectRoute`, `triageBrocards`,
 `upstreamFixStands`, `decideGate`, `missingPrecondition`, `capSeverity`,
 `decideVerdict`, `selectAttempts`, `isAcceptableBuild`, `artifactProblem`,
 `tallyChallenges`, `alreadyFixedStands`, `confidenceBand`, `reportProblem`,
-`severityCapViolation`, `offlineProblem`, `scopeHalt`, `summaryProblem`.
+`severityCapViolation`, `offlineProblem`, `scopeHalt`, `summaryProblem`,
+`needsUserCensus`, `censusProblem`.
+
+**Two verdict vocabularies, and they are deliberately different.** A layer is asked
+what happens to the payload (`PAYLOAD_REACHES_SINK` / `PAYLOAD_STOPPED_HERE`); a
+deep-route proof is asked whether its own argument leaves the finding alive
+(`FINDING_SURVIVES` / `FINDING_REFUTED`). They shared `PASSES` / `BLOCKS` until
+2.4.0, which is one direction of the same word for each — see the 2.3.0 probe
+below for the run where an agent said so in its own `reason` field.
+
+`needsUserCensus` is the one gate in this plugin that reads a field **by
+exclusion** — `driver !== 'in-repo-caller'`, so an omitted `driver` runs the
+census. Everywhere else the affirmative value is the one that counts, because
+elsewhere the risk is a claim made on no evidence. Here the measured risk runs the
+other way: `capSeverity`, `upstreamFixStands` and `decideVerdict` each fired **0
+times in 63 runs** with every unit test covering them green, so a predicate whose
+default is "skip" is how the capability gets lost a second time. One wasted agent
+is the cost of being wrong in this direction. Do not "fix" it to read
+affirmatively without changing what the mutation gate asserts.
 
 `loadFns()` exists because `decideGate` calls `upstreamFixStands`: `loadFn`
 evaluates one function alone, so a call to a sibling is a ReferenceError, and the
@@ -196,15 +214,36 @@ guards the precondition.
 
 ## Layer 4: eval
 
+**Two suites, and `--tag` is what keeps them apart.** `claude plugin eval` runs
+every `case.yaml` it finds, so the tag is the only thing stopping the online case
+from joining the static mean — see `test_online_cases_are_tagged_and_pinned_consistently`.
+
 ```bash
 export CLAUDE_CODE_WALNUT_SPIRE=1
-claude plugin eval ./plugins/fp-check \
+# The seven static cases. This is the mean quoted against concept-prover.
+claude plugin eval ./plugins/fp-check --tag static \
   --runs 3 --ablation with-without --scaffold \
-  --allow-tools Bash Write Skill Workflow Task TaskCreate TaskUpdate TaskList TaskGet \
+  --allow-tools Bash Write Skill Workflow WebFetch WebSearch Task TaskCreate TaskUpdate TaskList TaskGet \
   --model sonnet --judge-model sonnet \
   --output-dir /tmp/fp-eval --json /tmp/fp-eval/result.json
 uv run --no-project python plugins/fp-check/tests/validate_eval_result.py out.json
 ```
+
+```bash
+# Stage 2, whose ground truth is public record. NEVER averaged with the seven.
+claude plugin eval ./plugins/fp-check --tag online \
+  --runs 3 --ablation with-without --scaffold \
+  --allow-tools Bash Write Skill Workflow WebFetch WebSearch Task TaskCreate TaskUpdate TaskList TaskGet \
+  --model sonnet --judge-model sonnet \
+  --output-dir /tmp/fp-online --json /tmp/fp-online/result.json
+```
+
+`WebFetch` and `WebSearch` are in **both** grants deliberately. They are gated,
+and the online case declares them; a grant without them lets the run start,
+denies it the network, and Stage 2 then halts `OFFLINE` — which is the *correct*
+behaviour, scored as a failure, on a run that measured the operator's flags.
+`test_the_documented_eval_command_grants_every_tool_the_cases_need` caught exactly
+that before it cost anything.
 
 Every flag above is load-bearing, and three of them were learned by paying for a
 run that measured the harness instead of the plugin:
@@ -1093,6 +1132,255 @@ penalises it. Closing the variant means adding an in-repo `qty` guard to the
 scaffold and its checked-in fixture — a change to what the case *means*, not a
 grader fix, so it is left for a decision rather than folded into this one.
 
+### The online suite: one case, authored 2026-08-07, NOT YET MEASURED
+
+**Status: authored, invariants green, never run.** This suite has no number
+attached to it and must not be quoted as if it had. The rule this file states
+elsewhere applies to it in full — *prove a new case discriminates at n=3 before
+admitting it*; two cases were once admitted on n=1 smoke tests showing +0.60 and
+came in at +0.07 and −0.20.
+
+`online-known-duplicate` is the first case here whose ground truth is **public
+record rather than authored**. The target is a real bug in a real project:
+`rewrite()` in python-dotenv 1.2.1 writes to a temp file in the system temp
+directory and then `shutil.move()`s it over the `.env` path, which follows a
+symlink when the move falls back to a copy across filesystems. The code is
+genuinely wrong, so a static-only reading correctly calls it real — and filing it
+would duplicate an advisory published months earlier.
+
+Why this shape, and not an offline case with a hand-written key:
+
+- **A GHSA id cannot be guessed.** Twelve characters from a restricted alphabet.
+  It appears in neither the prompt nor the scaffolded source, so the only route
+  into a final answer is to have gone and read the advisory. That is a
+  deterministic grader whose answer key costs nothing to maintain and cannot be
+  reasoned to — which is precisely what the synthetic fixtures cannot offer.
+- **The failure it measures is the expensive one.** Not "did you find the bug"
+  but "did you check whether anyone already had". A response that says
+  *"confirmed, file it"* has done the static half correctly and skipped the half
+  that saves the report.
+- **python-dotenv publishes no SECURITY.md.** So it also exercises the branch
+  `offlineProblem` draws a line under — *a project that publishes nothing is not
+  the same as a project you could not reach* — which has had a unit test since
+  Stage 2 was written and has never once run against a real project.
+
+Two things about it are known weaknesses rather than oversights:
+
+1. **The advisory predates some training cutoffs** (published 2026-04-19), so an
+   identifier could in principle arrive from memory rather than from a lookup.
+   The `actually-went-online` grader requires `WebFetch` to have been called at
+   least once, which is what makes the pair mean "went and checked". `WebFetch`
+   and not `Bash`, because `Bash` is also how the already-fixed search runs
+   `git log` — a `Bash`-min-1 grader would pass a run that never left the machine.
+2. **A real project's public posture changes.** That is Stage 2's entire premise,
+   and it means this case decays in a way the synthetic ones do not. A published
+   advisory id is the most durable fact available — it is immutable once
+   assigned — which is why the deterministic grader keys on that and not on
+   policy text.
+
+**The two suites are never averaged.** `--tag static` is the seven-case mean
+quoted against concept-prover; `--tag online` is this one. Three separate things
+enforce it, because `claude plugin eval` runs every `case.yaml` it finds and
+forgetting `--tag` is all it would take:
+`test_online_cases_are_tagged_and_pinned_consistently` holds each case's tag to
+the answer its prompt pins, `test_the_validator_suites_match_the_tags_on_disk`
+holds the tags to the completeness check, and `validate_eval_result.py` rejects a
+result JSON containing cases from both.
+
+### The 2.4.0 probe: the fix held, and the case was the next thing wrong (2026-08-07)
+
+`integration-cap`, 1 run, sonnet, CLI 2.1.224. **$2.75, 1143s, score 0.333 —
+unchanged.** An unchanged score after a fix is the result most worth reading
+carefully, because the two obvious conclusions ("the fix did nothing" and "the
+fix worked, something else broke") look identical in the aggregate.
+
+**The fix held.** The orchestrator dispatched `layers: []` with a real
+`layersSearched` naming all three files it had read and what it had not found in
+each — no fabricated layer anywhere in the trace. Stage 1 then ran **end to end,
+nine agents**, where 2.3.0 had died at `decideGate` before the impact agent. The
+impact agent returned `result: VERIFIED, severity: Medium, rootCause: integration,
+classification: hardening_gap` — the exact answer this case exists to reward.
+
+**Two corrections to the probe checklist**, both of which had been measuring the
+wrong thing:
+
+- **`severityCorrection` absent is not a failure.** `capSeverity` lowers Critical
+  to Medium for an integration root cause; the impact agent independently returned
+  Medium, so the cap had nothing to lower and correctly emitted no note. The check
+  was written when the cap never *ran*. What to assert is the workflow's returned
+  severity, not the presence of a correction note.
+- **Grep the trace for a VALUE, not a word.** All 8 hits on the 2.3.0 probe and
+  all 4 here were in the workflow source text the agent had read. The journal at
+  `<transcriptDir>/journal.jsonl` carries each agent's actual return value and is
+  the only honest place to read this.
+
+**What actually cost the points.** Brocard 2 returned `NEEDS_MORE_INFO` asking
+*"is the upstream rate service inside the same trust boundary as the ledger, or a
+genuinely separate, lower-privileged dependency?"* — **unanswerable on this
+fixture**, which ships `client/rates.py` and no rate service at all. That carried
+question reaches the six-gate agent as the argument against the finding, exactly as
+designed, and it failed `gateReachability`, `gateRealImpact` and
+`gatePocValidation` on it. `decideVerdict` then correctly returned FALSE_POSITIVE,
+discarding the Medium the impact agent had already got right.
+
+Every mechanism behaved as specified. **The case was asking the plugin to invent a
+trust boundary, and penalising it for refusing** — the one behaviour every other
+case here rewards. One structurally unanswerable question cascading into three gate
+failures is also why this case scored 0–1/3 on every sweep regardless of what was
+fixed in the plugin.
+
+Fixed in the case, not the plugin: the prompt now names who operates the rate
+service, which is a fact any real triage has. It deliberately does not say whether
+the attacker controls the rate, how easily the provider could be compromised, what
+the root cause is called, or what the severity should be —
+`test_no_regex_grader_is_satisfied_by_the_prompt_alone` holds it to that.
+
+**The generalisable lesson**, and it is the second one this plugin has learned in
+two probes: *a question the fixture cannot answer is not a neutral question.* It
+propagates into every gate downstream of it, and the verdict that comes back is
+about the missing context rather than about the finding. The 2.3.0 probe found a
+validator that forced a dishonest input; this one found a prompt that withheld an
+honest one. Both produced a confident, well-reasoned, wrong verdict.
+
+### 2.5.0 removed the brocard pre-gate, and integration-cap passed (2026-08-07)
+
+`integration-cap`, 1 run, sonnet, CLI 2.1.224. **$5.54, 1083s, score 1.000** —
+the first full pass this case has ever had, against 0.333 / 0.333 / 0.167 on the
+three probes before it.
+
+The change: the four brocard agents are gone. They were a fan-out dispatched
+before any data-flow work, each able to end the stage on the shape of the claim
+alone. Their content is now [dismissal-grounds.md](../skills/fp-check/references/dismissal-grounds.md),
+guidance read by the agents that hold the traced path.
+
+What the journals show, and it is the causal story the previous probe predicted:
+
+| | probe 3 (2.4.0 + case fix) | probe 4 (2.5.0) |
+|---|---|---|
+| Brocards | 4 agents, all PASS | none dispatched |
+| Impact agent | `VERIFIED, Medium, integration, hardening_gap` | identical |
+| Six gates | Reachability, RealImpact, PocValidation **FAIL** | **all six PASS** |
+| `decideVerdict` | FALSE_POSITIVE | TRUE_POSITIVE |
+| Stage 3 | never dispatched | PoC built and executed, 5/5 challenges rebutted, severity Medium |
+
+Probe 3 isolated the conflict: `rootCause: integration` means the trigger is
+outside the repository, and `gateReachability` as prompted demanded it be traced
+inside. What made that fatal was not the gate's wording — it was that a brocard's
+unanswerable *"is the upstream service inside the same trust boundary?"* reached
+the gate agent as the argument against the finding. Remove the brocard and the
+gate agent judges the finding instead of the missing context.
+
+**So the pre-gate's cost was never its verdicts.** It was that a cheap agent
+asking an unanswerable question poisons every gate downstream of it. Three probes
+tried to fix which brocard fired and in what order; none of that mattered.
+
+Two caveats, both load-bearing:
+
+- **n=1.** A single run at 1.000 is not a measurement. The seven-case sweep is
+  what settles it, and the reason to trust the mechanism ahead of the number is
+  the journal, not the score.
+- **The cheap path is no longer cheap.** Every finding now pays the full fan-out;
+  nothing can dismiss one for a few cents. On the measured history that is the
+  right trade — the pre-gate's dismissals were wrong more often than right on the
+  cases the specialised gates were built for — but it is a real cost increase and
+  the sweep's spend is where it will show.
+
+### Re-probe after the case fix: the conflict is in the plugin (2026-08-07)
+
+Same case, same flags, **$3.12, 793s, score 0.167** — down from 0.333, on n=1, with
+the composition changed. The score is not the finding here; the journal is.
+
+**The case fix did exactly what it was for.** All four brocards returned PASS,
+where brocard 2 had blocked the previous run. `names-the-integration-root-cause`
+went from fail to pass. The deep route ran, and the impact agent again returned
+`VERIFIED, severity: Medium, rootCause: integration, classification: hardening_gap`.
+
+**And the six-gate agent failed it anyway**, on its own reasoning rather than on
+any carried question:
+
+> the negative value has to originate from the FX rate service itself, and that
+> service's implementation, validation, and exposure are outside this repository
+> … an external precondition asserted as a given, not shown reachable by any
+> traced caller or attacker action in the billing codebase
+
+`gateReachability: FAIL`, `gateRealImpact: FAIL`, `gatePocValidation: FAIL`, so
+`decideVerdict` returned FALSE_POSITIVE and the Medium was discarded again.
+
+**This isolates a structural conflict inside the plugin.** `rootCause: integration`
+means, by definition, that the trigger originates outside the repository.
+`gateReachability` as prompted demands that the trigger be traced *inside* it. The
+two cannot both be satisfied, so **every integration finding fails the six-gate
+review on principle** — and the entire machinery built to handle exactly these
+findings at a capped severity (`missingPrecondition`, `externalPrecondition`,
+`capSeverity`, checkpoint 2.4b) can never produce a verdict.
+
+That is the real reason behind the "`capSeverity` fired 0 times in 63 runs" line
+this file has been repeating. It is not that the cap never runs. **It runs, and
+then the gate downstream of it kills the finding.** Two journals now show the same
+sequence with different upstream causes, which is what makes it structural rather
+than a bad roll.
+
+Not yet fixed, and deliberately not fixed blind: the options are to teach
+`gateReachability` that a *stated and accepted* external precondition is reachability
+satisfied at a capped severity, or to route integration findings past that gate the
+way `capSeverity` already routes their severity. Both change what a FALSE_POSITIVE
+means, so neither should be chosen from a single run.
+
+### The 2.3.0 probe: the dispatch contract manufactured the defect (2026-08-07)
+
+`integration-cap`, 1 run, `--ablation none`, sonnet, CLI 2.1.224. **$5.10, 951s,
+score 0.333.** Two of the four probe checks failed. It is the fourth consecutive
+probe to find something that would have wasted the sweep, and this one found the
+cause of the case's whole 3-point shortfall.
+
+| Check | |
+|---|---|
+| `Skill` ≥1, `Workflow` ≥1 | pass — Skill 2, Workflow 4 |
+| `AskUserQuestion` == 0 | pass — 0 |
+| `severityCorrection` appears | **fail** — 8 occurrences, every one in the workflow SOURCE TEXT the agent read. `capSeverity` had then fired 0 times in 64 runs |
+| final answer Medium, not Critical | **fail** — Critical |
+
+The chain, from the trace:
+
+1. `evals/fixtures/case4_billing` has **no validation anywhere** between
+   `fetch_rate` and `ledger.debit`. `missingArgs` rejected `layers: []`, and its
+   own message said *"if no validation stands between the entry point and the
+   sink, pass that as a single explicit layer"*.
+2. The orchestrator did exactly that:
+   `{name: 'rate-value validation between fetch_rate and ledger.debit',
+   description: 'No validation layer exists between…'}`. It enumerated the
+   **absence** of a check as a layer, because the contract told it to.
+3. Asked whether that layer stops the payload, the agent returned
+   `verdict: 'BLOCKS'` with
+   `reason: "I labeled this BLOCKS meaning the payload is NOT blocked/validated —
+   it fully reaches ledger.debit unmodified"`. The label was inverted against its
+   own evidence. It also cited `billing/charge.py:60-62` in a 44-line file.
+4. `decideGate` read the label, returned `NOT_EXPLOITABLE` **before the impact
+   agent**, so the severity cap the case exists to exercise never ran.
+5. The orchestrator noticed the contradiction, discarded the whole workflow and
+   reported its own uncapped **Critical** — the documented worst failure shape,
+   the gate stopping and the analysis happening by hand outside it.
+
+Two defects, both fixed in 2.4.0, and the second is the one that matters:
+
+- **`PASSES` / `BLOCKS` do not say what passes.** They read equally well as a
+  property of the layer and of the finding. Renamed to `PAYLOAD_REACHES_SINK` /
+  `PAYLOAD_STOPPED_HERE`; the deep-route proofs, which ask a different question
+  and had no business sharing the enum, became `FINDING_SURVIVES` /
+  `FINDING_REFUTED`. Three prompts carried a paragraph apologising for the
+  polarity, which is what the names were substituting for. Those are gone.
+- **The ≥1-layer rule manufactured the fabrication.** Checkpoint 2.2 passes on
+  "at least 1 layer **or confirmed none exist**", and only the first half was
+  reachable. `layers: []` is now accepted with `layersSearched` — an affirmative,
+  auditable statement of what was read and not found, the same shape as
+  `sourcesRead`, `searched` and `coverage`. Blank or absent is still the vacuous
+  pass, and still BLOCKED.
+
+**The lesson generalises past this bug.** A validator that rejects the honest
+input pushes the caller into a dishonest one, and the dishonest one then decides
+the case. Before adding a required field, ask what a correct dispatch does when
+it genuinely has nothing to put there.
+
 ### What the two PROCEED-seeking cases actually do (measured, CLI 2.1.220)
 
 Both were run end to end at a cost of $5.78. The design expectation was half
@@ -1129,7 +1417,12 @@ that land before review-poc is dispatched.
 the suite to go red. Anything that survives is testing the model, not the
 plugin. It fails if zero mutations run.
 
-Last run, after the merge: **119 run, 0 survived, 0 stale, 12 deferred** (131 total).
+Last run, after 2.5.0 removed the brocard pre-gate: **128 run, 0 survived, 0
+stale, 12 deferred** (140 total). Two of those are new and both guard the removal
+rather than the machinery: one breaks the `dismissal-grounds.md` reference in the
+impact prompt (a removal that loses the content is not what was decided, and a
+dangling reference is invisible until an agent reports the file missing), the
+other reintroduces the brocard schema.
 
 The 12 deferrals are the Layer 3 mutations. They break the recorded run that
 `test_regrade.py` grades, and that module skips because its capture is a recording
@@ -1271,6 +1564,9 @@ agent's discretion or to the orchestrator's good behaviour:
 | 2.4b/2.5 severity caps — stated in the report prompt, self-reported by the agent | `severityCapViolation` |
 | Destructive operations only at safety levels 1–2 | `missingArgs` in `build-poc` |
 | The PoC must be readable by its reviewers — the builder runs in an isolated worktree | `poc.absolutePath`, required by the build gate |
+| Brocard 5's redirection — "do real consumers exhibit the unsafe pattern?" was a question Stage 1 raised and no agent answered | `needsUserCensus`, dispatching the census |
+| A census that searched nothing must never read as "no consumer is affected" | `censusProblem`, and the `unperformed` line in the summary prompt |
+| 2.2's "or CONFIRMED NONE EXIST" — the half that had no way to be said, so callers passed the absence of a check as a layer | `layersSearched`, in `missingArgs` and again in `decideGate` |
 
 ## Provenance
 
@@ -1280,11 +1576,11 @@ re-run until green.
 
 | | |
 |---|---|
-| CLI at authoring time | 2.1.220 |
+| CLI at authoring time | 2.1.224 |
 | node | v22.13.1 |
 | bats | 1.14.0 (`brew install bats-core`; required, not optional) |
-| Layers 1–3 status | 243 pytest (+1 skipped) + 146 node + 36 bats tests passing |
-| Mutation gate | 131 mutations, 0 survived, 0 stale, each test command baseline-verified |
+| Layers 1–3 status | 324 pytest (+25 skipped) + 342 node + 36 bats tests passing |
+| Mutation gate | 138 mutations — 126 run, 0 survived, 0 stale, 12 deferred; each test command baseline-verified |
 | Layer 3 live capture | 3 runs, CLI 2.1.220, `blocked-attack-path` |
 | Layer 3 pass rate | **3/3** — all blocked at search.py:20 and :27, no PoC written |
 | Layer 4 eval | 8 sweeps. 2026-07-30 $6.23 delta −0.056 **invalid** (tools denied). 2026-08-04 $17.90 delta +0.131 — measured the skill's **prose**, `Workflow` never dispatched. 2026-08-04 $16.48 **void**, 22/30 runs lost to a usage limit. 2026-08-04 sonnet $28.79 5 cases, delta **+0.102**, 28/30 clean — first to measure the pipeline. 2026-08-05 sonnet $39.96 **7 cases, delta +0.170** (+0.295 over gradeable runs), 40/42 clean — three cases at 3/3 vs 0/3. 2026-08-06 CLI 2.1.222 $21.49 7 cases, delta **+0.008** — three `blocked-attack-path` with-plugin runs and three `already-fixed` baseline runs produced no answer. 2026-08-06 CLI 2.1.223 $3.05 `blocked-attack-path` alone, delta +0.000. 2026-08-06 CLI 2.1.223 $31.71 7 cases, delta **+0.170**, `overallScore` 0.781, 41/42 clean — the sweep the 2026-08-06 grader audit was regraded against. See Layer 4. |

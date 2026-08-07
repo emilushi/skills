@@ -4,6 +4,7 @@ description: A bounty report against v1.4.0 whose fix landed one layer up in the
   line is unchanged at HEAD, so only the git history settles whether it is still a finding.
 tags:
 - fp-check
+- static
 context:
   scaffold_script: scaffold.sh
 execution:

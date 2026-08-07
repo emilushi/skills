@@ -4,6 +4,7 @@ description: 'SQL concatenation that is unreachable: two validators reject the m
   needs. The case a single-pass reader gets wrong.'
 tags:
 - fp-check
+- static
 context:
   scaffold_script: scaffold.sh
 execution:

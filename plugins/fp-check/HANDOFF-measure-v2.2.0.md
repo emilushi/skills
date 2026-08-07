@@ -1,8 +1,10 @@
-# Handoff: measure fp-check 2.2.1, then decide whether the merge is worth keeping
+# Handoff: measure fp-check 2.5.0, then decide whether the merge is worth keeping
 
 **Written 2026-08-07.** You are picking up a plugin that has been measured twice
-and beaten its baseline neither time. Everything free is green, **the §2.1 probe
-has been run and acted on**, and the first job is §1 and the second is the sweep in §2.2.
+and beaten its baseline neither time. Everything free is green, §1 has landed, and
+**the probe in §2.1 has now been run four times — most recently against 2.3.0,
+where it failed and found why `integration-cap` loses all 3 points.** That fix is
+2.4.0. The first job is to re-run the probe against it; the second is the sweep.
 
 > **The probe was run on 2.2.0 and it failed, which is why this now says 2.2.1.**
 > `integration-cap` came back `DISMISSED at Stage 1's pre-gate (Brocard 2)`, with
@@ -14,8 +16,30 @@ has been run and acted on**, and the first job is §1 and the second is the swee
 > one with no downstream equivalent.
 >
 > Cost of finding that: **$1.15**. It is the third consecutive time the probe has
-> caught something that would have wasted the sweep. Run it again on 2.2.1 before
-> §2.2 — the same command, the same four checks.
+> caught something that would have wasted the sweep. Run it again before §2.2 —
+> the same command, the same four checks.
+>
+> **Then it was run again on 2.3.0, and failed again** — on a different mechanism,
+> and this time on the dispatch contract rather than a gate. `missingArgs` rejected
+> `layers: []`, so on a fixture with nothing validating the path the orchestrator
+> did as its message instructed and passed the ABSENCE of a check as a layer. The
+> agent asked to rule on it returned `BLOCKS` with the reason *"I labeled this
+> BLOCKS meaning the payload is NOT blocked/validated"*, the finding died before
+> the impact agent, and the orchestrator discarded the workflow and reported its
+> own uncapped Critical. **$5.10.** Full trace in [tests/README.md](tests/README.md).
+>
+> **Then 2.5.0 removed the brocard pre-gate entirely**, and `integration-cap`
+> scored **1.000** on the next probe — its first ever pass. The four brocard
+> agents are guidance in `references/dismissal-grounds.md` now. The cause was not
+> which brocard fired: a cheap agent asking a question the fixture cannot answer
+> poisons every gate downstream of it, and three probes spent on reordering them
+> changed nothing. **The cheap path is no longer cheap** — every finding pays the
+> full fan-out — and that trade is the one thing the sweep should be read for.
+>
+> **The version is 2.5.0.** Layer verdicts are `PAYLOAD_REACHES_SINK` /
+> `PAYLOAD_STOPPED_HERE` and deep-route proofs `FINDING_SURVIVES` /
+> `FINDING_REFUTED`; `layers: []` is dispatchable with `layersSearched`. The
+> `diff -r` in §2.1 is what catches you grading an older build from the cache.
 
 Read this file, then [tests/README.md](tests/README.md) — that one records every
 dead end this plugin has been down, including **five paid sweeps that were invalid
@@ -27,15 +51,29 @@ and each produced a plausible-looking number.** Do not skip it.
 
 | | |
 |---|---|
-| Version | **2.2.1**, branch `fp-check-triage-merge` in a worktree off `origin/main` |
-| Free layers | 318 node + 324 pytest + 36 bats, all green |
+| Version | **2.5.0**, branch `fp-check-triage-merge` in a worktree off `origin/main` |
+| Free layers | 313 node + 364 pytest + 36 bats, all green |
 | `make check` | passes except `python-tests`, which fails in `constant-time-analysis` for want of an aarch64 cross sysroot CI installs — **pre-existing, not this branch** (verified on a stashed tree) |
-| Mutation gate | **120 run, 0 survived, 0 stale, 12 deferred** |
+| Mutation gate | **128 run, 0 survived, 0 stale, 12 deferred** |
 | Measured | v1 (2026-08-06) mean delta **+0.170**; v2 (2026-08-07) **+0.151** |
 | Target to beat | concept-prover's **+0.170**, and 3/3 on `already-fixed`, `integration-cap`, `blocked-attack-path` |
 | Verdict so far | **has not beaten its baseline.** concept-prover is NOT retired |
 
-## 1. First job: build the downstream-users census
+## 1. ~~First job: build the downstream-users census~~ — DONE in 2.3.0
+
+**Built. The first job is now §2.1, the probe, against 2.4.0.** Everything below is the record of
+what was asked for; the acceptance list is met and the numbers in §0 are stale by
+one version. What landed, and the two places it departs from the sketch, is in
+[TODO-batch-and-users.md](TODO-batch-and-users.md) item 2 — read that rather than
+re-deriving it from this section.
+
+Two departures worth knowing before you touch Stage 2: the reachability agent has
+its own `REACHABILITY_SCHEMA` now (it had `SCOPE_SCHEMA`, which required a policy
+verdict and clause its prompt never asked for and nothing read), and a census that
+cannot reach the network is **reported unperformed rather than halting the stage**,
+which is `unsearched`'s shape rather than `offlineProblem`'s. The thing the
+instruction protected against — a census that searched nothing reading as "no
+users affected" — is prevented by `censusProblem` and by the summary wording.
 
 **Do this before the sweep, and do not expect it to change the sweep.** Those two
 statements are both important and they are not in tension — see "what this will
@@ -122,18 +160,31 @@ public record and a `GHSA-` id cannot be guessed (§6).
 
 ## 2. Then measure — but not before §1 is done
 
-Two steps, in order, and **only after §1 has landed**. The first is free. **The probe has been run against 2.2.0 and its finding is fixed in 2.2.1; re-run it against 2.2.1.**
+Two steps, in order. §1 has landed and **the probe has now been run against 2.3.0
+and failed**, so 2.4.0 is what needs re-probing. The first step is free.
 
-### 2.1 Trace probe (~$2, 10 min) — this is not optional
+### 2.1 Trace probe (~$5, 16 min) — this is not optional
 
-The last probe found two real defects for $0.32 and saved a $39 sweep. The one
-before it found that the plugin never activated at all.
+Four probes, four real defects, four saved sweeps. **The 2.3.0 one cost $5.10 and
+found why `integration-cap` loses all 3 points**, which no amount of reading had
+turned up: `missingArgs` rejected `layers: []`, so on a fixture with no validation
+anywhere the orchestrator did as its message instructed and passed the ABSENCE of
+a check as a layer; the agent asked to rule on it answered `BLOCKS` with the reason
+*"I labeled this BLOCKS meaning the payload is NOT blocked"*; the finding died
+before the impact agent; the orchestrator discarded the workflow and reported its
+own uncapped Critical. The full trace is in
+[tests/README.md](tests/README.md) under "The 2.3.0 probe". Both defects are fixed
+in 2.4.0 — the verdict enums now name their subject, and checkpoint 2.2's "or
+confirmed none exist" is reachable via `layersSearched`.
+
+**Re-probe 2.4.0 before the sweep.** The fix is exactly the kind that either works
+or moves the failure one step along, and $5 is the cheapest way to find out.
 
 ```bash
 export CLAUDE_CODE_WALNUT_SPIRE=1
 claude plugin marketplace add /Users/gros/ToB/tools/tob/skills-wt-fp-check
 claude plugin install fp-check@trailofbits
-diff -r ~/.claude/plugins/cache/trailofbits/fp-check/2.2.1 plugins/fp-check   # MUST be empty
+diff -r ~/.claude/plugins/cache/trailofbits/fp-check/2.5.0 plugins/fp-check   # MUST be empty
 claude plugin eval fp-check@trailofbits --case integration-cap --runs 1 \
   --ablation none --scaffold --keep-temp \
   --allow-tools Bash Write Skill Workflow Task TaskCreate TaskUpdate TaskList TaskGet \
@@ -147,11 +198,13 @@ Then read the trace — `tracePath` in the JSON — and confirm **all** of:
 |---|---|
 | `Skill` ≥ 1 and `Workflow` ≥ 1 | A path target does NOT register the skill. Target by NAME. Two probes scored `Skill 0` before this was understood |
 | `AskUserQuestion` == 0 | Every case pins both stage answers; if it appears, the pre-supply path is broken and the eval measures Stage 1 only |
-| `severityCorrection` appears | **The whole point of this run.** `capSeverity` has fired **0 times in 63 measured runs**. If it is still absent, stop and fix that before the sweep |
+| `severityCorrection` appears **in a result, not in source text** | **The whole point of this run.** `capSeverity` has fired **0 times in 64 measured runs**. On the 2.3.0 probe all 8 hits were in the workflow source the agent had read — grep the trace for the value, not the word |
+| No layer names the absence of a check | The 2.3.0 failure. A `layers[]` entry whose description says "no validation exists" means the orchestrator is still reading a stale contract |
 | The final answer says Medium, not Critical | `integration-cap` is the 3-point loss |
 
 `integration-cap` is the probe case deliberately: it is the single biggest
-shortfall and the one the 2.2.0 changes most directly target.
+shortfall, and 2.4.0's changes are aimed straight at the mechanism that was losing
+it.
 
 ### 2.2 The sweep
 
@@ -264,21 +317,27 @@ ordering fixes, the `applies` schema, and the eval-suite invariants.
 1. **Layer 3 does not run.** The capture records `concept-prover:verify-attack-path`;
    `test_regrade.py` skips on a condition it checks, and **12 mutations are
    deferred** behind it. One paid capture (`tests/capture-runs.sh`) re-arms both.
-2. **Stage 2 (online) has never run in a graded run** — all seven prompts pin
-   offline. It needs its own suite built on real public findings, where ground
-   truth is free because it is public record. Never mix it into the 7-case numbers.
-3. **Three capabilities did not survive the merge**, each now pinned by a live
-   guard in `tests/coverage.test.mjs` that fails if anyone claims otherwise:
+2. **Stage 2 (online) has never run in a graded run** — all seven static prompts
+   pin offline. **The suite it needs now exists in one case and has NOT been run:**
+   `online-known-duplicate`, tagged `online`, against a real published advisory in
+   python-dotenv where the deterministic grader keys on a `GHSA-` id that cannot
+   be guessed. Authored 2026-08-07; invariants green; **no measurement attached,
+   and it must not be quoted as if it had one** until it discriminates at n=3.
+   The two suites are separated by `--tag` and three invariants enforce it — see
+   "The online suite" in [tests/README.md](tests/README.md). Never mix the means.
+3. **Two capabilities did not survive the merge** — three, until 2.3.0 closed the
+   census — each pinned by a live guard in `tests/coverage.test.mjs` that fails if
+   anyone claims otherwise:
    - **batch triage** — every workflow takes one `finding`; the batch is the
      orchestrator's loop with no gate behind it. The description advertises
      scanner/agentic triage, which is inherently batch work
    - **the exploit-chain check** — "two `NOT_EXPLOITABLE` results whose blocking
      layers differ" is a comparison no workflow can make. This is a false-negative
      guard, which makes it the more dangerous loss
-   - **online-triage's downstream-users census** — the only role in any parent that
-     produced evidence about the world rather than the project. **This one is §1
-     of this document and is the first job**, so it should be closed before you
-     reach this list
+   - ~~**online-triage's downstream-users census**~~ — **closed in 2.3.0.** The
+     only role in any parent that produced evidence about the world rather than
+     the project. Its coverage guard now exercises the capability rather than
+     pinning its absence, and three mutations cover the gate
    Also gone and not deliberate: the **negative PoC** and the always-required
    **pseudocode PoC**. The hooks and the three agent definitions *were* deliberate.
 4. **19 mutations owed to `mutation-gate.sh`** — 10 from the eval-suite invariants,

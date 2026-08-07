@@ -125,6 +125,18 @@ def guard_lines(source: Path = SEARCH_PY) -> set[str]:
     return located
 
 
+# The vocabulary OF THE RECORDED RUN, which is a capture of
+# concept-prover:verify-attack-path. It is deliberately NOT fp-check 2.4.0's
+# vocabulary: fp-check renamed these to PAYLOAD_REACHES_SINK /
+# PAYLOAD_STOPPED_HERE (and the deep-route proofs to FINDING_SURVIVES /
+# FINDING_REFUTED) after a probe caught an agent returning `BLOCKS` with the
+# reason "I labeled this BLOCKS meaning the payload is NOT blocked".
+#
+# Rewriting these to the new names would falsify the recording — the capture
+# genuinely contains the old ones. **When tests/capture-runs.sh is finally run
+# against fp-check:triage-static, this set moves with it**, and so do the two
+# deferred mutations that name BLOCKS. Until then this module skips, which is
+# why the rename could not be caught here.
 LAYER_VERDICTS = {"PASSES", "BLOCKS", "UNCERTAIN"}
 SCOPE_VALUES = {"YES", "NO", "UNCERTAIN"}
 

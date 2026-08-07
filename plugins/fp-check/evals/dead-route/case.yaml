@@ -4,6 +4,7 @@ description: 'Shell injection in a handler that no route reaches: the routing ta
   to it. Unreachable for a structural reason rather than a validation one.'
 tags:
 - fp-check
+- static
 context:
   scaffold_script: scaffold.sh
 execution:

@@ -21,15 +21,32 @@ import json
 import sys
 from pathlib import Path
 
-EXPECTED_CASES = {
-    "already-fixed",
-    "blocked-attack-path",
-    "dead-route",
-    "inflated-impact",
-    "integration-cap",
-    "should-not-fire",
-    "wrong-parameter",
+# Two suites, and a result JSON belongs to exactly one of them. `--tag static`
+# is the seven-case mean quoted against concept-prover; `--tag online` is Stage 2,
+# whose ground truth is public record. They are never averaged together — the
+# static fixtures carry no public evidence for Stage 2 to read, and Stage 2's own
+# rule is to stop when offline, so its correct behaviour scores zero there.
+#
+# Split rather than unioned so that a run of ONE suite still has a complete-set
+# check. A single union would have made every `--tag static` result look like it
+# had skipped the online case, and the obvious fix for that — dropping the
+# completeness check — is what let this list go stale the first time.
+CASE_SUITES = {
+    "static": {
+        "already-fixed",
+        "blocked-attack-path",
+        "dead-route",
+        "inflated-impact",
+        "integration-cap",
+        "should-not-fire",
+        "wrong-parameter",
+    },
+    "online": {
+        "online-known-duplicate",
+    },
 }
+
+EXPECTED_CASES = {name for cases in CASE_SUITES.values() for name in cases}
 
 MIN_RUNS = 3
 
@@ -85,9 +102,31 @@ def main() -> int:
 
     cases = _get(result, "cases", default=[]) or []
     seen = {_get(c, "name", "case", default="") for c in cases}
-    missing = EXPECTED_CASES - seen
-    if missing:
-        problems.append(f"eval did not run: {', '.join(sorted(missing))}")
+
+    # Which suite this result is, decided by what it contains rather than by a
+    # flag the caller could get wrong.
+    present = {name: cases_ for name, cases_ in CASE_SUITES.items() if seen & cases_}
+    if len(present) > 1:
+        problems.append(
+            f"this result mixes the {' and '.join(sorted(present))} suites, whose means are "
+            f"not comparable and must never be averaged. Re-run with a single --tag"
+        )
+    elif not present:
+        problems.append(
+            f"no known case ran: saw {sorted(seen) or 'nothing'}. Every case name is "
+            f"unrecognised, so this result cannot be checked for completeness at all"
+        )
+    else:
+        suite, expected = next(iter(present.items()))
+        missing = expected - seen
+        if missing:
+            problems.append(f"the {suite} suite did not run: {', '.join(sorted(missing))}")
+    unknown = seen - EXPECTED_CASES - {""}
+    if unknown:
+        problems.append(
+            f"unrecognised case(s) {', '.join(sorted(unknown))}; add them to CASE_SUITES or "
+            f"this result is being checked against the wrong expectations"
+        )
 
     # A run that errored produced no answer, but its graders still scored it —
     # as zero. So a dead arm looks like a arm that answered badly, and the

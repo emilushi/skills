@@ -9,8 +9,9 @@ one is per checkpoint rather than a house rule:
   external precondition.
 - **Corrects**, and reports the correction: an over-rated severity at 1e.
 - **Carries**, and blocks a TRUE POSITIVE at the verdict instead of ending the
-  stage early: a brocard that answered NEEDS_MORE_INFO. That one used to halt,
-  and halting measured worse than carrying — see [brocards.md](brocards.md).
+  stage early: a deep-route proof that reports the finding impossible. A single
+  auxiliary proof does not outrank the traced path, so it is answered by the six
+  gates rather than allowed to end the stage.
 
 ## Which stage runs which checkpoint
 
@@ -22,7 +23,6 @@ the crosswalk between them, the stages in `SKILL.md`, and the six gates in
 | Stage | Checkpoints | fp-check gate it feeds | Enforced in code by |
 |---|---|---|---|
 | 1a Intake | 1.1, 1.2, 1.3 | 1 Process | `missingArgs` |
-| 1b Cheap pre-gate | brocards 2, 4, 5, 6 — see [brocards.md](brocards.md) | — | `triageBrocards` |
 | 1c Reachability | 2.1, 2.2 | 2 Reachability | `decideGate` |
 | 1c Threat model | 3.1, 3.2, 3.3 | 2 Reachability, 3 Real Impact | `decideGate` (the `threat` verdict) |
 | 1c Already-fixed | 5.1 challenge 4, on the cheap path | — | `upstreamFixStands`, `decideGate` |
@@ -51,7 +51,7 @@ not duplicated here:
 |-----|------|
 | 2.3 recovery behaviour by runtime | [recovery-mechanisms.md](recovery-mechanisms.md) |
 | 2.4b, 2.5, 3.1, 3.3 judgment calls | [validation-dimensions.md](validation-dimensions.md) |
-| 1b, and the guards against wrongly dismissing | [brocards.md](brocards.md) |
+| Why a report may not be a finding, and the guards against wrongly dismissing | [dismissal-grounds.md](dismissal-grounds.md) |
 | 1c, 1e, per bug class | [bug-class-verification.md](bug-class-verification.md) |
 | 1f, the 13 questions and the red-flag list | [false-positive-patterns.md](false-positive-patterns.md) |
 | 4.2 PoC construction rules | [poc-anti-patterns.md](poc-anti-patterns.md) |
@@ -143,23 +143,33 @@ type checking, bounds checking), its `file:line`, what it checks, and whether th
 attacker payload passes — with the code as evidence. The three verdicts are the
 layer schema's own, so use these words:
 
-- **PASSES** — explain how the payload survives it
-- **BLOCKS** — this stops the attack; the finding is NOT_EXPLOITABLE
+- **PAYLOAD_REACHES_SINK** — explain how the payload survives it
+- **PAYLOAD_STOPPED_HERE** — this stops the attack; the finding is NOT_EXPLOITABLE
 - **UNCERTAIN** — stop; the code must be traced before this can be answered
+
+The verdict is about the **payload**, and the names say so because the short ones
+did not. As `PASSES` / `BLOCKS` they read equally well as a property of the layer
+and as a property of the finding, and a traced run returned `BLOCKS` with the
+reason *"I labeled this BLOCKS meaning the payload is NOT blocked/validated"* —
+the label inverted against its own evidence, the finding died before the impact
+agent, and the severity cap never ran.
 
 **Pass criteria:**
 
-- At least 1 layer identified. "Confirmed none exist" is a *claim*, and it is
-  dispatched as one explicit layer for an agent to confirm — an empty `layers`
-  list is rejected by `missingArgs` before any agent runs, because a forgotten
-  field and a deliberate "nothing guards this path" are the same value and zero
-  layer agents would reach a verdict having inspected nothing
+- At least 1 layer identified, **or none confirmed** — both halves are reachable.
+  A layer must be a check that EXISTS, with a `file:line`. If nothing on the path
+  validates the payload, that is `layers: []` plus `layersSearched` naming the
+  files and functions read and what was not found; an empty list on its own is
+  still rejected, because a forgotten field and a deliberate "nothing guards this
+  path" are the same value. **Do not pass the absence of a check as a layer** — an
+  agent asked whether a layer that does not exist stops the payload cannot answer
+  coherently, and the contract used to demand exactly that
 - For each layer, determined pass/fail with evidence
 - ZERO "UNCERTAIN" layers — all verified
 - If any blocks: mark NOT_EXPLOITABLE
 - If all pass: document WHY, with code evidence
 
-**What the code does with it:** a BLOCKS verdict returns `NOT_EXPLOITABLE`, and
+**What the code does with it:** a PAYLOAD_STOPPED_HERE verdict returns `NOT_EXPLOITABLE`, and
 an UNCERTAIN one returns `NEEDS_MORE_INFO` — not the same thing, and not a bare
 halt. BLOCKED is reserved for "this analysis could not be run": a contract
 violation, or an agent that returned nothing. NEEDS_MORE_INFO means it ran and the
@@ -509,14 +519,20 @@ what the code returns for it:
 | Missing evidence — a contract violation, or an agent that returned nothing | Request the source, or fix the dispatch | `BLOCKED` |
 | Uncertain validation layer | Code trace required before this can be answered | `NEEDS_MORE_INFO` |
 | Recovery exists | The verified impact is the one that survives recovery, and it is what 1e records | continues on the surviving impact |
-| A brocard cannot decide | Carried, resolved from the code if possible, and blocks a TRUE POSITIVE at the verdict | `NEEDS_MORE_INFO` at 1g |
+| A deep-route proof reports the finding impossible | Carried to the six gates, which answer it with the traced path in hand, and blocks a TRUE POSITIVE at the verdict | `NEEDS_MORE_INFO` at 1g |
 | A Stage 3 challenge wins | Lowers the confidence band; challenge 4 winning overrides the band outright | `DO_NOT_SUBMIT` |
 | Placeholder detected | Complete the code; `poc-lint.sh` must exit 0 | `BUILD_FAILED`, or `BLOCKED` at the reviewer's re-run |
 
 **`NOT_EXPLOITABLE` is a Stage 1 status only.** Stage 3 has no verdict of that
 name — a challenge that stands there returns `DO_NOT_SUBMIT`.
 
-Every row above except "recovery exists" and "a brocard cannot decide" ends the
-stage. Neither of those two is a licence to proceed as though the check had
+Every row above except "recovery exists" and the blocking deep-route proof ends
+the stage. Neither of those two is a licence to proceed as though the check had
 passed: the first replaces the claimed impact with the surviving one, and the
-second is reported in `openQuestions` and denies a TRUE POSITIVE in code.
+second is carried in `blockingProofs` and denies a TRUE POSITIVE in code.
+
+**There is no cheap pre-gate row any more.** Stage 1b dispatched four brocard
+agents that could end the analysis on the shape of the claim alone; it was removed
+in 2.5.0 after 65 measured runs, and its content is guidance in
+[dismissal-grounds.md](dismissal-grounds.md) that the agents holding the traced
+path apply. The reasoning is in that file.

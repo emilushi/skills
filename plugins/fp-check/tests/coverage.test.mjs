@@ -72,9 +72,13 @@ const standardArgs = (over = {}) => ({
   ...over,
 })
 
-const BROCARD_PASS = { verdict: 'PASS', missingFact: '', evidence: 'the test does not apply here' }
-const LAYER_PASSES = { verdict: 'PASSES', location: 'billing/charge.py:40', evidence: 'no sign check exists; the payload survives' }
-const LAYER_BLOCKS = { verdict: 'BLOCKS', location: 'billing/charge.py:40', evidence: 'rates below zero are rejected here' }
+const LAYER_PASSES = { verdict: 'PAYLOAD_REACHES_SINK', location: 'billing/charge.py:40', evidence: 'no sign check exists; the payload survives' }
+const LAYER_BLOCKS = { verdict: 'PAYLOAD_STOPPED_HERE', location: 'billing/charge.py:40', evidence: 'rates below zero are rejected here' }
+// A proof is not a layer and no longer shares its enum: a layer is asked what
+// happens to the payload, a proof whether its own argument leaves the finding
+// alive. These fixtures used to be LAYER_PASSES, which fed a layer verdict to a
+// proof agent and read as correct because nothing validated the shape.
+const PROOF_SURVIVES = { applies: true, verdict: 'FINDING_SURVIVES', evidence: 'this proof does not dispose of the finding' }
 const RECOVERY = { recoveryExists: false, effectiveImpact: 'the balance is inflated', evidence: 'nothing recovers on this path' }
 const THREAT_OK = { inScope: 'YES', byDesign: false, byDesignIndicators: 0, evidence: 'billing is named in the declared scope' }
 const HISTORY_NONE = { fixed: 'NO', complete: false, reference: '', searched: 'git log -p billing/, CHANGELOG, issues', evidence: 'nothing found' }
@@ -100,7 +104,6 @@ const GATES_ALL_PASS = {
 }
 
 const staticAgents = (over = {}) => ({
-  brocard: BROCARD_PASS,
   layer: LAYER_PASSES,
   recovery: RECOVERY,
   'threat-model': THREAT_OK,
@@ -228,6 +231,39 @@ test('[concept-prover] the severity cap decides on the cheap path, and is report
   assert.match(promptFor(r, 'gates'), /Severity after the caps: Medium/)
 })
 
+// The traced shape of the 2.3.0 probe, end to end. `integration-cap`'s fixture has
+// NO validation anywhere between fetch_rate and ledger.debit, and until 2.4.0 the
+// dispatch contract told the orchestrator to send that absence as a layer. It did.
+// An agent was then asked whether a layer that does not exist stops the payload,
+// answered with the stopping verdict, and explained in `reason` that it meant the
+// opposite. `decideGate` read the label, returned NOT_EXPLOITABLE before the impact
+// agent, and `capSeverity` did not run — 0 firings in 64 measured runs. The
+// orchestrator discarded the workflow and reported its own uncapped Critical.
+//
+// So this asserts the whole chain the probe found broken: an audited empty
+// `layers` reaches the impact agent, and the cap decides.
+test('[concept-prover] a path with NO validation reaches the impact agent, and the cap still decides', async () => {
+  const r = await runScript('triage-static.js', {
+    args: standardArgs({
+      layers: [],
+      layersSearched:
+        'read billing/charge.py, client/rates.py and billing/ledger.py end to end; no sign, bounds or type check on the rate between fetch_rate and debit',
+    }),
+    agents: staticAgents({
+      impact: { ...IMPACT_INTERNAL, severity: 'Critical', rootCause: 'integration', externalPrecondition: 'the rate service returns a negative rate' },
+    }),
+  })
+  assert.ok(!labels(r).some((l) => l.startsWith('layer:')), 'a layer agent was dispatched for a path with no layers')
+  assert.ok(labels(r).includes('impact'), 'the impact agent was never reached, so the severity cap cannot have run')
+  assert.equal(r.result.severity, 'Medium', 'capSeverity did not decide: this is the 3-point loss integration-cap measures')
+  assert.match(r.result.severityCorrection, /lowered from Critical to Medium/)
+  // The impact and verdict agents must be told this was a caller's declaration and
+  // not a verified fan-out. "All 0 validation layers were independently verified as
+  // passable" is the vacuous pass arriving by the prompt instead of by the gate.
+  assert.match(promptFor(r, 'impact'), /NO validation layer stands between/)
+  assert.match(promptFor(r, 'impact'), /declared this rather than any agent verifying it/)
+})
+
 test('[concept-prover] the upstream-fix retraction decides, and needs a reference', async () => {
   const fixed = await runScript('triage-static.js', {
     args: standardArgs(),
@@ -331,7 +367,7 @@ test('[old fp-check] standard/deep routing is decided from the dispatch', async 
 
   const deep = await runScript('triage-static.js', {
     args: standardArgs({ route: 'deep' }),
-    agents: staticAgents({ 'api-contract': LAYER_PASSES, 'math-bounds': LAYER_PASSES, 'race-feasibility': LAYER_PASSES }),
+    agents: staticAgents({ 'api-contract': PROOF_SURVIVES, 'math-bounds': PROOF_SURVIVES, 'race-feasibility': PROOF_SURVIVES }),
   })
   assert.equal(deep.result.route, 'deep')
   for (const extra of ['api-contract', 'math-bounds', 'race-feasibility']) {
@@ -352,7 +388,7 @@ test('[old fp-check] bug-class routing escalates the four classes that need a pr
   for (const [bugClass, expected] of Object.entries(classes)) {
     const r = await runScript('triage-static.js', {
       args: standardArgs({ finding: { ...finding, bugClass } }),
-      agents: staticAgents({ 'api-contract': LAYER_PASSES, 'math-bounds': LAYER_PASSES, 'race-feasibility': LAYER_PASSES }),
+      agents: staticAgents({ 'api-contract': PROOF_SURVIVES, 'math-bounds': PROOF_SURVIVES, 'race-feasibility': PROOF_SURVIVES }),
     })
     assert.equal(r.result.route, expected, `bug class '${bugClass}' routed to ${r.result.route}`)
   }
@@ -361,7 +397,7 @@ test('[old fp-check] bug-class routing escalates the four classes that need a pr
   // non-escalating bug class.
   const three = await runScript('triage-static.js', {
     args: standardArgs({ layers: [1, 2, 3].map((i) => ({ name: `l${i}`, location: `f.py:${i}` })) }),
-    agents: staticAgents({ 'api-contract': LAYER_PASSES, 'math-bounds': LAYER_PASSES, 'race-feasibility': LAYER_PASSES }),
+    agents: staticAgents({ 'api-contract': PROOF_SURVIVES, 'math-bounds': PROOF_SURVIVES, 'race-feasibility': PROOF_SURVIVES }),
   })
   assert.equal(three.result.route, 'deep')
 })
@@ -372,7 +408,7 @@ test('[old fp-check] the 13 devil\'s-advocate questions are asked on deep, the 7
 
   const deep = await runScript('triage-static.js', {
     args: standardArgs({ route: 'deep' }),
-    agents: staticAgents({ 'api-contract': LAYER_PASSES, 'math-bounds': LAYER_PASSES, 'race-feasibility': LAYER_PASSES }),
+    agents: staticAgents({ 'api-contract': PROOF_SURVIVES, 'math-bounds': PROOF_SURVIVES, 'race-feasibility': PROOF_SURVIVES }),
   })
   assert.match(promptFor(deep, 'gates'), /All 13 devil's-advocate questions/)
 
@@ -388,8 +424,8 @@ test('[old fp-check] the algebraic bounds proof is written by an agent on the de
   const deepArgs = standardArgs({ finding: { ...finding, bugClass: 'integer overflow' } })
   const deepAgents = (over) =>
     staticAgents({
-      'api-contract': LAYER_PASSES,
-      'race-feasibility': { verdict: 'UNCERTAIN', evidence: 'concurrency is not part of this trigger' },
+      'api-contract': PROOF_SURVIVES,
+      'race-feasibility': { applies: false, verdict: 'UNCERTAIN', evidence: 'concurrency is not part of this trigger' },
       ...over,
     })
 
@@ -397,18 +433,18 @@ test('[old fp-check] the algebraic bounds proof is written by an agent on the de
   // asked whether it feels bounded. This is old fp-check's Phase 2.2.
   const passes = await runScript('triage-static.js', {
     args: deepArgs,
-    agents: deepAgents({ 'math-bounds': { verdict: 'PASSES', evidence: 'no relation bounds the subtraction' } }),
+    agents: deepAgents({ 'math-bounds': { applies: true, verdict: 'FINDING_SURVIVES', evidence: 'no relation bounds the subtraction' } }),
   })
   assert.match(promptFor(passes, 'math-bounds'), /IF validation_check_passes THEN bounds_guarantee_holds/)
-  assert.match(promptFor(passes, 'gates'), /math-bounds: PASSES/, 'the algebra never reached the agent that decides gateMathBounds')
+  assert.match(promptFor(passes, 'gates'), /math-bounds: FINDING_SURVIVES/, 'the algebra never reached the agent that decides gateMathBounds')
 
-  // A BLOCKS must either decide the finding itself or reach the verdict agent.
+  // A refuting proof must either decide the finding itself or reach the verdict agent.
   // Which of the two is a live design question in this plugin — it was terminal
   // and is being changed to carried — but "neither" is a proof that was paid for
   // and thrown away, and that is what this asserts against.
   const blocks = await runScript('triage-static.js', {
     args: deepArgs,
-    agents: deepAgents({ 'math-bounds': { verdict: 'BLOCKS', evidence: 'size >= MIN and MIN >= sizeof(hdr), so size - sizeof(hdr) cannot underflow' } }),
+    agents: deepAgents({ 'math-bounds': { applies: true, verdict: 'FINDING_REFUTED', evidence: 'size >= MIN and MIN >= sizeof(hdr), so size - sizeof(hdr) cannot underflow' } }),
   })
   const decided = blocks.result.status === 'NOT_EXPLOITABLE' && /math-bounds/.test(blocks.result.reason)
   const carried = labels(blocks).includes('gates') && /math-bounds/.test(promptFor(blocks, 'gates'))
@@ -527,82 +563,95 @@ test('[online-triage] venues beyond the cap are declared unchecked rather than d
   assert.match(promptFor(r, 'summary'), /venue-7/)
 })
 
-test('[online-triage] the downstream-users census is absent and unadvertised', async () => {
+test('[online-triage] the downstream-users census decides, and only where it should', async () => {
   // The parent's `triage-online-users` role — find the popular public consumers
   // and check whether any exhibits the buggy pattern — is what turns "a misusable
-  // API" into a severity. It did not survive the merge.
+  // API" into a severity, and it is the only role in any parent that produced
+  // evidence about the world rather than about the project. It did not survive the
+  // merge; this test used to pin that absence.
   //
-  // It used to be advertised anyway: meta.description claimed "downstream users"
-  // while the script dispatched no such agent, and references/brocards.md said
-  // outright that Stage 2 has no census. The description was the stale one.
+  // Restored in 2.3.0, gated in code on what Stage 2 already knows rather than on
+  // a third question at Step 0. Which makes the ordering below the thing to hold:
+  // the census must fire on the findings whose severity depends on a consumer, and
+  // must not be paid for on the ones directly exploitable in the target.
   assert.ok(
-    !/downstream users/i.test(ONLINE_SRC),
-    'triage-online.js advertises downstream users again, and no agent implements it',
+    /downstream users/i.test(ONLINE_SRC),
+    'triage-online.js no longer advertises the downstream-users census',
   )
-  const r = await runScript('triage-online.js', { args: onlineArgs(), agents: onlineAgents({ 'past-bugs': PAST_NOTHING }) })
-  assert.ok(
-    !labels(r).some((l) => /user/i.test(l)),
-    'a downstream-users agent now exists — rewrite this to exercise it',
-  )
+
+  // rootCause `integration`: the attack needs a failure on the client's side of
+  // the boundary, so who those clients are and what they do is the severity.
+  const clientSide = {
+    ...VERIFICATION,
+    impact: { impact: 'a caller-built filter reaches the query', rootCause: 'integration', classification: 'vulnerability' },
+  }
+  const ran = await runScript('triage-online.js', {
+    args: onlineArgs({ verification: clientSide }),
+    agents: onlineAgents({ 'past-bugs': PAST_NOTHING }),
+  })
+  assert.ok(labels(ran).includes('downstream-users'), 'the census agent is not dispatched on an integration root cause')
+  assert.equal(ran.result.census.state, 'performed')
+  assert.match(promptFor(ran, 'summary'), /Downstream-consumer census/)
+
+  // And the negative half, which is the reason this is a gate and not one more
+  // agent in the History phase: VERIFICATION is internal, a vulnerability, driven
+  // by an in-repo caller, so the census answers a question nobody asked.
+  const skipped = await runScript('triage-online.js', {
+    args: onlineArgs(),
+    agents: onlineAgents({ 'past-bugs': PAST_NOTHING }),
+  })
+  assert.ok(!labels(skipped).includes('downstream-users'), 'the census is paid for on a directly exploitable bug')
+  // Carried, not merely logged: `beyondCap` is the precedent for a skipped step
+  // that reached the summary as an absence and read as a clean result.
+  assert.equal(skipped.result.census.state, 'not-applicable')
+  assert.ok(skipped.result.census.why.trim(), 'the skip is carried with no reason')
 })
 
 // ===================================================================
 // the merge itself: ordering, not presence
 // ===================================================================
 
-test('[merge] the brocard pre-gate is dispatched ahead of every mechanism the merge inherited', async () => {
-  // Not a defect on its own — a cheap test that can end the analysis for cents
-  // is the point of a pre-gate. It is pinned here because it decides which
-  // mechanism gets to decide: on the measured 7-case sweep the pre-gate returned
-  // DISMISSED on findings concept-prover had settled with a blocking layer or an
-  // already-fixed retraction, and on those runs neither of those gates ran at
-  // all. The ordering is the mechanism-selection rule of the merged plugin.
+test('[merge] the brocard pre-gate is gone, and no agent decides on the shape of the claim', async () => {
+  // This used to pin the ordering: the four brocards were the first four agents
+  // dispatched, and being cheap and first they won the race on findings the
+  // specialised gates were built for. Measured across 63 with-plugin runs, a
+  // brocard DISMISS decided 12 of them while `upstreamFixStands`, `capSeverity`,
+  // `missingPrecondition` and `decideVerdict` fired zero times between them.
+  //
+  // Removed in 2.5.0 rather than reordered again. The four tests are guidance in
+  // references/dismissal-grounds.md, applied by the agents that hold the traced
+  // path — which is where they were always answerable. What this pins is that the
+  // removal is real on both sides: no agent, and the guidance actually exists and
+  // is reachable from the agent that decides classification.
   const r = await runScript('triage-static.js', { args: standardArgs(), agents: staticAgents() })
-  const order = labels(r)
-  const lastBrocard = order.reduce((acc, l, i) => (l.startsWith('brocard:') ? i : acc), -1)
-  assert.equal(lastBrocard, 3, 'the four brocards are no longer the first four agents dispatched')
-  for (const later of ['layer:sign-check', 'recovery', 'threat-model', 'history', 'impact', 'gates']) {
-    assert.ok(order.indexOf(later) > lastBrocard, `${later} is dispatched before the pre-gate; the ordering note in this file is stale`)
+  assert.ok(
+    !labels(r).some((l) => l.startsWith('brocard:')),
+    'a brocard agent is dispatched again; if that is deliberate, this test and dismissal-grounds.md are both stale',
+  )
+  assert.ok(!/BROCARD_SCHEMA|triageBrocards/.test(STATIC_SRC), 'the brocard gate machinery is back in the script')
+
+  // The guidance side. A removal that deletes the mechanism and loses the content
+  // is not what was decided, and a dangling reference in a prompt is invisible
+  // until an agent reports the file is missing — which has happened here before.
+  const grounds = readFileSync(
+    new URL('../skills/fp-check/references/dismissal-grounds.md', import.meta.url),
+    'utf8',
+  )
+  for (const ground of [/already hold/i, /specification/i, /documentation describes/i, /cure is worse/i]) {
+    assert.match(grounds, ground, 'a dismissal ground was lost with the pre-gate rather than moved to the guidance')
   }
+  assert.match(
+    promptFor(r, 'impact'),
+    /dismissal-grounds\.md/,
+    'the agent that decides classification is not pointed at the grounds, so the guidance reaches nobody',
+  )
 })
 
-test('[merge] a brocard DISMISS is never silently dropped, whichever brocard raises it', async () => {
-  // Brocards 4 and 5 duplicate the recovery/threat-model and already-fixed
-  // mechanisms respectively, on strictly less evidence. Whether such a DISMISS
-  // ends the stage or is deferred to the gate that knows more is a live design
-  // question here. What must not happen either way is that it disappears: the
-  // finding comes back TRUE_POSITIVE with no trace of a test that dismissed it.
-  const keys = ['from-the-heavens', 'standard-behavior', 'documented-behavior', 'cure-worse']
-  for (const key of keys) {
-    const marker = `sentinel-dismissal-${key}`
-    const r = await runScript('triage-static.js', {
-      args: standardArgs(),
-      agents: staticAgents({ [`brocard:${key}`]: { verdict: 'DISMISS', missingFact: '', evidence: marker } }),
-    })
-    const terminal = r.result.status === 'DISMISSED'
-    const surfaced = JSON.stringify(r.result).includes(marker)
-    const relayedToAGate = labels(r).some((l) => ['impact', 'gates'].includes(l) && promptFor(r, l).includes(marker))
-    assert.ok(
-      terminal || (surfaced && relayedToAGate),
-      `a DISMISS from brocard '${key}' was neither terminal nor carried to a downstream gate (status ${r.result.status})`,
-    )
-    if (!terminal) {
-      assert.notEqual(r.result.status, 'TRUE_POSITIVE', `brocard '${key}' dismissed the finding and it still came back TRUE_POSITIVE`)
-    }
-  }
-})
-
-test('[merge] a carried brocard question blocks a TRUE POSITIVE even with six passing gates', async () => {
-  const r = await runScript('triage-static.js', {
-    args: standardArgs(),
-    agents: staticAgents({
-      'brocard:cure-worse': { verdict: 'NEEDS_MORE_INFO', missingFact: 'the dependency graph of the fix', evidence: '' },
-    }),
-  })
-  assert.equal(r.result.status, 'NEEDS_MORE_INFO')
-  assert.match(r.result.reason, /all six gates passed/)
-  assert.match(r.result.reason, /dependency graph of the fix/)
-  // And that is a fact to answer, not a bug to demonstrate: Stage 3 refuses it.
+// The half of the old carried-question test that still holds: Stage 3 refuses a
+// finding Stage 1 did not confirm. That is not about brocards — NEEDS_MORE_INFO
+// arrives from the six gates and from an UNCERTAIN layer too — and it is the gate
+// that stops a PoC being built for an unconfirmed finding.
+test('[merge] Stage 3 refuses a finding Stage 1 returned as NEEDS MORE INFO', async () => {
   const poc = await runScript('triage-poc.js', {
     args: pocArgs({ verification: { ...VERIFICATION, status: 'NEEDS_MORE_INFO' } }),
     agents: pocAgents(),
@@ -685,9 +734,18 @@ const POLICY = {
   outOfScopeClasses: 'self-XSS',
   evidence: 'read the policy',
 }
-const REACHABILITY = { verdict: 'in-scope', clause: '', severity: 'Medium', eligibilityCaveats: 'requires a compromised rate service', evidence: 'charge() is called from the public order pipeline' }
+const REACHABILITY = { driver: 'in-repo-caller', eligibilityCaveats: 'requires a compromised rate service', evidence: 'charge() is called from the public order pipeline' }
 const INSCOPE = { verdict: 'in-scope', clause: 'SECURITY.md: "billing integrity is in scope"', severity: 'Medium', evidence: 'billing integrity is named' }
 const PAST_NOTHING = { result: 'nothing', coverage: 'searched 4 pages of results', duplicate: false, evidence: 'nothing similar' }
+const CENSUS = {
+  reachedNetwork: true,
+  result: 'no-confirmed-users',
+  pattern: 'a client passing an unvalidated rate through to charge()',
+  coverage: 'the 40 dependents on the package index, searched for charge( and fetch_rate(',
+  confirmed: '',
+  severityEffect: 'lower',
+  evidence: 'every dependent read validates the rate first',
+}
 const SUMMARY = { finalSeverity: 'Medium', scopeVerdict: 'in-scope', reasoning: 'the policy names billing integrity', confidence: 'medium', openQuestions: 'the rate service is not described in the policy', evidence: 'see above' }
 
 function onlineArgs(over = {}) {
@@ -702,5 +760,13 @@ function onlineArgs(over = {}) {
 }
 
 function onlineAgents(over = {}) {
-  return { policy: POLICY, reachability: REACHABILITY, inscope: INSCOPE, 'past-bugs': PAST_NOTHING, summary: SUMMARY, ...over }
+  return {
+    policy: POLICY,
+    reachability: REACHABILITY,
+    inscope: INSCOPE,
+    'past-bugs': PAST_NOTHING,
+    'downstream-users': CENSUS,
+    summary: SUMMARY,
+    ...over,
+  }
 }

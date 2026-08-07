@@ -38,8 +38,7 @@ const VERIFY_ARGS = {
   scope: 'the ledger module',
 }
 
-const PASSING_LAYER = { verdict: 'PASSES', evidence: 'quoted code' }
-const BROCARD_PASS = { verdict: 'PASS', missingFact: '', evidence: 'the capability is lower than the impact' }
+const PASSING_LAYER = { verdict: 'PAYLOAD_REACHES_SINK', evidence: 'quoted code' }
 const UNFIXED = {
   fixed: 'NO',
   reference: '',
@@ -70,10 +69,9 @@ const VERIFIED = {
 }
 
 // Keyed by the label PREFIX where labels are per-item: runScript falls back to
-// `agents[label.split(':')[0]]`, so one `brocard` entry answers all four and one
+// `agents[label.split(':')[0]]`, so one entry answers a whole fan-out and one
 // `layer` entry answers every layer agent.
 const verifyAgents = (over = {}) => ({
-  brocard: BROCARD_PASS,
   layer: PASSING_LAYER,
   recovery: RECOVERY,
   'threat-model': IN_SCOPE,
@@ -94,10 +92,10 @@ test('the happy path reaches TRUE_POSITIVE through the impact and gate agents', 
   assert.equal(result.severity, 'High', 'an internal root cause is not capped')
 })
 
-test('a BLOCKS verdict halts before the impact agent is ever spent', async () => {
+test('a stopped payload halts before the impact agent is ever spent', async () => {
   const { result, calls } = await runScript('triage-static.js', {
     args: VERIFY_ARGS,
-    agents: verifyAgents({ layer: { verdict: 'BLOCKS', evidence: 'rejects negatives' } }),
+    agents: verifyAgents({ layer: { verdict: 'PAYLOAD_STOPPED_HERE', evidence: 'rejects negatives' } }),
   })
   assert.equal(result.status, 'NOT_EXPLOITABLE')
   assert.ok(
@@ -170,7 +168,7 @@ test('a recovery agent volunteering inScope cannot displace the threat verdict',
 test('a threat agent volunteering a verdict key is not counted as a layer', async () => {
   const { result } = await runScript('triage-static.js', {
     args: VERIFY_ARGS,
-    agents: verifyAgents({ 'threat-model': { ...IN_SCOPE, verdict: 'PASSES' } }),
+    agents: verifyAgents({ 'threat-model': { ...IN_SCOPE, verdict: 'PAYLOAD_REACHES_SINK' } }),
   })
   assert.equal(result.status, 'TRUE_POSITIVE')
   assert.equal(result.layers.length, 1, 'exactly one layer agent was dispatched')

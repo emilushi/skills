@@ -136,6 +136,31 @@ tests showing +0.60 and came in at +0.07 and −0.20.
 
 # 2. `triage-online-users` — the downstream-consumer census
 
+> **LANDED in 2.3.0.** Built as option C. `needsUserCensus` and `censusProblem`
+> are pure and unit-tested in `tests/online.test.mjs`; the dispatch, the skip and
+> the blind-census path are wire-tested there and in `tests/coverage.test.mjs`,
+> whose guard now exercises the capability instead of pinning its absence. Three
+> mutations cover it — two in the direction that loses it silently.
+>
+> Two things went differently from the sketch below, both recorded in the script:
+>
+> - The reachability agent got **its own schema**. It had `SCOPE_SCHEMA`, which is
+>   the `inscope` agent's shape — it was forced to answer with a policy `verdict`
+>   and a quoted `clause` its prompt never asked for, and nothing read either. So
+>   there was no field to gate on. `REACHABILITY_SCHEMA` requires `driver`
+>   (`in-repo-caller` / `client-code` / `unknown`), which is the fact the predicate
+>   turns on, and requires `eligibilityCaveats`, which two prompts already read.
+> - **A blind census is reported, not fatal.** "The same halt `offlineProblem`
+>   implements" would kill a completed policy read, scope verdict and past-bug
+>   fan-out over one agent that could not reach a code index. `unsearched` is the
+>   precedent for this shape and this follows it: `census.state` is `unperformed`,
+>   the summary is told downstream usage is UNCHECKED rather than clear, and it
+>   belongs in `openQuestions`. What the instruction was protecting against — a
+>   census that searched nothing reading as "no users affected" — is what
+>   `censusProblem` and the summary wording prevent.
+>
+> The rest of this section is kept as the record of why C rather than A, B or D.
+
 ## What is missing
 
 online-triage's `triage-online-users` role: when severity depends on how

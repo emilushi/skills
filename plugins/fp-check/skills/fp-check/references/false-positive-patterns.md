@@ -85,7 +85,7 @@ list, so the two cannot drift apart.
 Both routes finish with 12 and 13, which argue *for* the finding. They are not
 optional and they carry equal weight: a triage tool that only guards one direction
 drifts toward it, and losing a real bug costs more than reporting a doubtful one.
-The dismissal-side guards in [brocards.md](brocards.md) extend them.
+The dismissal-side guards in [dismissal-grounds.md](dismissal-grounds.md) extend them.
 
 Assume you are biased toward finding bugs and toward rating them critical. These
 questions exist to work against that bias, not to be recited.

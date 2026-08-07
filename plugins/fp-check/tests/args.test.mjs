@@ -155,7 +155,45 @@ test('the cap is a parameter, so the gate and the dispatch cap cannot drift', ()
 // the orchestrator cannot ask the user once dispatched.
 test('an empty layers list is rejected, and the message says what to send instead', () => {
   const [problem] = missingArgs({ ...GOOD, layers: [] }).filter((p) => p.startsWith('layers'))
-  assert.match(problem, /single explicit layer/)
+  assert.match(problem, /layersSearched/)
+})
+
+// The second half of checkpoint 2.2 — "identified at least 1 layer OR CONFIRMED
+// NONE EXIST" — which had no way to be said. The old message told the caller to
+// pass the absence AS a layer, and the 2.3.0 probe measured what that costs: on
+// `integration-cap`, where nothing on the path validates anything, the
+// orchestrator did as instructed, an agent had to rule on whether a layer that
+// does not exist stops the payload, and it answered with the stopping verdict and
+// a reason saying it meant the opposite. The finding died before the impact agent
+// and the severity cap never ran.
+test('layers: [] is accepted when the caller says what it read and did not find', () => {
+  const declared = {
+    ...GOOD,
+    layers: [],
+    layersSearched: 'read charge.py, rates.py and ledger.py end to end; no sign, bounds or type check on the rate anywhere between fetch_rate and debit',
+  }
+  assert.deepEqual(missingArgs(declared), [], 'an audited "nothing validates this path" must be dispatchable')
+})
+
+// The declaration is the whole difference between "confirmed none exist" and a
+// forgotten field, so it is read the same way every other null-result field in
+// this plugin is: affirmatively, and not satisfied by blank space.
+test('a blank declaration does not buy the empty-layers path', () => {
+  for (const layersSearched of [undefined, null, '', '   ', 0, true, ['charge.py']]) {
+    const problems = missingArgs({ ...GOOD, layers: [], layersSearched })
+    assert.ok(
+      problems.some((p) => p.startsWith('layers')),
+      `layersSearched ${JSON.stringify(layersSearched)} must not satisfy the declaration`,
+    )
+  }
+})
+
+test('a blank declaration alongside real layers is reported rather than ignored', () => {
+  for (const layersSearched of ['', '   ']) {
+    const problems = missingArgs({ ...GOOD, layersSearched })
+    assert.ok(problems.some((p) => p.startsWith('layersSearched')), JSON.stringify(layersSearched))
+  }
+  assert.deepEqual(missingArgs({ ...GOOD, layersSearched: 'read charge.py' }), [], 'a filled one is simply extra context')
 })
 
 test('entirely absent args objects do not throw', () => {
@@ -277,7 +315,7 @@ test('whitespace counts as missing in both validators, not as present', () => {
   ]) {
     assert.ok(fn({ ...good, [path]: '   ' }).includes(path), `${path} of spaces must be rejected`)
   }
-  // triage-static interpolates every one of these into the brocard, layer,
+  // triage-static interpolates every one of these into the layer,
   // recovery and threat-model prompts. A blank one reaches an agent as empty space where
   // it expects a fact — the same failure as `undefined`, which is the thing
   // this validator was written for.

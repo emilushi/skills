@@ -87,6 +87,10 @@ SCAFFOLD_SOURCES = {
     # coercion is simply not a failure mode this plugin improves on, and a case
     # that cannot separate the arms costs ~$3 a sweep to measure nothing.
     "wrong-parameter": (("scanner/tasks.py", "fixtures/case8_scanner/scanner/tasks.py"),),
+    # The first case whose ground truth is public record rather than authored
+    # here: a real bug in a real project, disclosed and fixed upstream. Excerpted
+    # from python-dotenv 1.2.1, BSD-3-Clause, attributed in the file header.
+    "online-known-duplicate": (("dotenv/main.py", "fixtures/case9_dotenv/dotenv/main.py"),),
 }
 
 
@@ -419,6 +423,66 @@ def test_every_prompt_pins_both_stage_answers(case: Path):
         f"failure as above: it falls through to the default (no) and the online stage "
         f"never runs in any graded run."
     )
+
+
+def test_online_cases_are_tagged_and_pinned_consistently(case: Path):
+    """The two suites must not silently merge into one mean.
+
+    Stage 2 has never run in a graded run, and it cannot be measured by the seven
+    static cases: their premise is synthetic code with no public record, and
+    Stage 2's own rule is to stop when offline, so its correct behaviour there
+    scores zero. The handoff is explicit that these numbers are never mixed.
+
+    Nothing enforced that. `claude plugin eval <plugin>` runs every case.yaml it
+    finds, so adding an online case to evals/ silently changed what the documented
+    sweep command measures — and the resulting mean would still have looked
+    perfectly plausible, which is this suite's most expensive recurring failure.
+
+    So the tag IS the separation, and it is held to the prompt: `--tag static`
+    and `--tag online` select two disjoint suites, and a case whose tag disagrees
+    with the answer its prompt pins fails here rather than in a $40 sweep.
+    """
+    doc = load_case(case)
+    tags = set(doc.get("tags") or [])
+    prompt = doc.get("execution", {}).get("prompt", "")
+    _, _, online_yes, online_no = stage_answers(prompt)
+
+    suite = tags & {"static", "online"}
+    assert len(suite) == 1, (
+        f"{case.name}: tags {sorted(tags)} must carry exactly one of 'static' or 'online'. "
+        f"Without it the case joins whichever sweep runs next and the mean stops meaning "
+        f"anything."
+    )
+    if suite == {"online"}:
+        assert online_yes and not online_no, (
+            f"{case.name}: tagged 'online' but its prompt does not send the run online. "
+            f"Stage 2 would never be dispatched and the case would measure the static "
+            f"stage under a name that says otherwise."
+        )
+    else:
+        assert online_no and not online_yes, (
+            f"{case.name}: tagged 'static' but its prompt sends the run online. Stage 2 "
+            f"fails closed without network access, so this either halts or measures "
+            f"something the seven-case mean cannot be compared against."
+        )
+
+
+def test_both_suites_are_non_empty():
+    """Zero guard for the split above.
+
+    A tag filter that selects nothing exits green having run no case, which reads
+    exactly like a passing sweep. Retiring either suite should be a deliberate
+    deletion that fails here, not a quiet drift to zero.
+    """
+    by_tag = {"static": [], "online": []}
+    for c in CASES:
+        for tag in set(load_case(c).get("tags") or []) & by_tag.keys():
+            by_tag[tag].append(c.name)
+    for tag, names in by_tag.items():
+        assert names, (
+            f"no case is tagged '{tag}', so `--tag {tag}` selects nothing and reports a "
+            f"clean run having measured nothing"
+        )
 
 
 def test_the_pinned_answers_are_plugin_neutral(case: Path):
@@ -1036,6 +1100,29 @@ def test_no_regex_grader_is_satisfied_by_the_prompt_alone(case: Path):
 # case exists to catch, plus (where it bites) an answer that reaches the right
 # conclusion without the evidence the grader requires.
 GRADER_PROBES: dict[tuple[str, str], dict[str, tuple[str, ...]]] = {
+    ("online-known-duplicate", "cites-the-published-advisory"): {
+        "must_match": (
+            "Do not file this. It is already public as GHSA-mf9w-mj56-hr94, fixed in 1.2.2.",
+            "This is CVE-2026-28684 — reported in April and patched upstream.",
+            # Lowercase, because `flags: i` is on the grader and a run that
+            # writes the id in prose rather than as a heading is not wrong.
+            "already reported: ghsa-mf9w-mj56-hr94",
+        ),
+        "must_not_match": (
+            # The exact shape the case exists to catch: correct on the code,
+            # confident, and it never went and looked. Everything here is
+            # reachable by guessing that a popular library's bug is probably
+            # known — which is why the bare words are not accepted.
+            "Confirmed: rewrite() follows the symlink and shutil.move copies across "
+            "filesystems. File it upstream.",
+            "This looks like a known issue — it is probably already reported as a duplicate "
+            "in the project's advisory database.",
+            # A neighbouring identifier from the same project must not pass: the
+            # grader has to key on THIS advisory, not on the shape of an id.
+            "Reported upstream as GHSA-mf9w-mj56-0000.",
+            "See CVE-2026-28685 for the related issue.",
+        ),
+    },
     ("already-fixed", "cites-the-fix"): {
         "must_match": (
             'Commit `99a4704` ("fix(auth): constant-time token comparison", PR #412, released '

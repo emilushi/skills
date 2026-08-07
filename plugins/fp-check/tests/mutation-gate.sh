@@ -176,9 +176,47 @@ run_mutation "gate proceeds when every layer agent died" "L2" \
 # before dispatch, so the truncation and its uncheckedLayers gate were dead code.
 # What replaced it as the thing that must not weaken is the affirmative read —
 # grading by exclusion made PROCEED the fall-through for an unrecognised verdict.
-run_mutation "gate infers PASSES instead of reading it" "L2" \
+# The brocard pre-gate was removed in 2.5.0 and its four tests became guidance in
+# references/dismissal-grounds.md. A removal that deletes the mechanism and loses
+# the content is not what was decided, and the failure mode is silent: a prompt
+# that no longer points at the file reads exactly the same, and the agent simply
+# never applies the grounds. Traced once already, on a different reference — an
+# agent reported "its bundled brocards.md reference file is absent" and carried on.
+run_mutation "the dismissal grounds no longer reach the agent that classifies" "L2" \
+  'perl -0pi -e "s|\\$\{baseDir\}/references/dismissal-grounds\.md\. It is the list|\${baseDir}/references/gate-reviews.md. It is the list|" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+# And the other half: nothing may bring back the machinery that dismissed on the
+# shape of the claim. Reintroducing the pre-gate is a decision, not an accident,
+# and it should fail here rather than quietly re-run the experiment that was
+# reverted after 65 measured runs.
+run_mutation "the brocard gate machinery is reintroduced" "L2" \
+  'perl -0pi -e "s/const MAX_LAYERS = 4/const BROCARD_SCHEMA = { type: 0 }\nconst MAX_LAYERS = 4/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+run_mutation "gate infers PAYLOAD_REACHES_SINK instead of reading it" "L2" \
   'perl -0pi -e "s/passed\.length !== attemptedLayers/false/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/gate.test.mjs"'
+
+# Checkpoint 2.2's second half — "or confirmed none exist" — restored in 2.4.0
+# after the probe measured what its absence cost. Two directions, and the first is
+# the one that already shipped: with no declared path, the orchestrator is forced
+# to invent a layer, and the agent asked to rule on a layer that does not exist
+# answers incoherently.
+run_mutation "an audited empty layers list is still the vacuous pass" "L2" \
+  'perl -0pi -e "s/if \(attemptedLayers === 0 && !declaredNone\)/if (attemptedLayers === 0)/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/gate.test.mjs"'
+
+# And the other direction: a blank or forgotten declaration must NOT buy the empty
+# path, or a dispatch that simply omitted `layers` proceeds having inspected
+# nothing — which is the bug the zero-layer guard was written for.
+run_mutation "any layersSearched value confirms none exist" "L2" \
+  'perl -0pi -e "s/const declaredNone = typeof layersSearched === .string. && layersSearched\.trim\(\) !== ..$/const declaredNone = layersSearched !== undefined/m" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/gate.test.mjs"'
+
+run_mutation "the arg validator accepts an undeclared empty layers list" "L2" \
+  'perl -0pi -e "s/    if \(!declaredNone\) \{/    if (false) {/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/args.test.mjs"'
 
 run_mutation "gate reads any non-NO scope as in scope" "L2" \
   'perl -0pi -e "s/threatVerdict\.inScope !== .YES./threatVerdict.inScope === \x27UNCERTAIN\x27/" "$SANDBOX/workflows/triage-static.js"' \
@@ -271,7 +309,7 @@ run_mutation "a terminal status loses its reason" "L2" \
 # an omitted field dispatched zero layer agents, left every filter in the gate
 # matching nothing, and returned PROCEED having inspected nothing.
 run_mutation "gate proceeds having inspected zero layers" "L2" \
-  'perl -0pi -e "s/if \(attemptedLayers === 0\)/if (false)/" "$SANDBOX/workflows/triage-static.js"' \
+  'perl -0pi -e "s/if \(attemptedLayers === 0 && !declaredNone\)/if (false)/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/gate.test.mjs"'
 
 run_mutation "empty layers list slips past the arg validator" "L2" \
@@ -358,12 +396,31 @@ run_mutation "the online stage accepts a dismissed finding" "L2" \
   'perl -0pi -e "s/  if \(!actionable\.includes\(status\)\) \{/  if (false) {/" "$SANDBOX/workflows/triage-online.js"' \
   'node --test "$SANDBOX/tests/online.test.mjs"'
 
+# The downstream-users census, restored in 2.3.0. Its failure mode is not a wrong
+# answer, it is never firing — `capSeverity`, `upstreamFixStands` and
+# `decideVerdict` each fired 0 times in 63 measured runs while every unit test
+# covering them was green. So the first two mutations break the gate in the
+# direction that silently loses the capability.
+run_mutation "the census gate answers no on a client-driven sink" "L2" \
+  'perl -0pi -e "s/  return driver !== .in-repo-caller./  return false/" "$SANDBOX/workflows/triage-online.js"' \
+  'node --test "$SANDBOX/tests/online.test.mjs"'
+
+run_mutation "an integration root cause no longer needs a consumer census" "L2" \
+  'perl -0pi -e "s/  if \(impact\.rootCause === .integration. \|\| impact\.rootCause === .external.\) return true/  if (false) return true/" "$SANDBOX/workflows/triage-online.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+# And the one that matters most in the other direction: a census that searched
+# nothing must never reach the summary as "no consumer is affected".
+run_mutation "a census that never reached the network reads as a clean result" "L2" \
+  'perl -0pi -e "s/  if \(result\.reachedNetwork !== true\) \{\n    return \`no consumer index/  if (false) {\n    return \`no consumer index/" "$SANDBOX/workflows/triage-online.js"' \
+  'node --test "$SANDBOX/tests/online.test.mjs"'
+
 # --- Layer 3 -------------------------------------------------------------
 
 defer_mutation "a blocking layer loses its file:line" "L3" \
   "test_regrade.py skips: its capture recorded concept-prover"
 
-defer_mutation "a layer verdict flips from BLOCKS to PASSES" "L3" \
+defer_mutation "a layer verdict flips from stopped to reaching" "L3" \
   "test_regrade.py skips: its capture recorded concept-prover"
 
 defer_mutation "an agent returns an unknown enum value" "L3" \
@@ -372,7 +429,7 @@ defer_mutation "an agent returns an unknown enum value" "L3" \
 defer_mutation "an agent dies, leaving fewer results than starts" "L3" \
   "test_regrade.py skips: its capture recorded concept-prover"
 
-defer_mutation "a BLOCKS verdict asserts without quoting code" "L3" \
+defer_mutation "a stopping verdict asserts without quoting code" "L3" \
   "test_regrade.py skips: its capture recorded concept-prover"
 
 defer_mutation "workflow launch carries an error but says async_launched" "L3" \
@@ -556,7 +613,7 @@ run_mutation "the gate decision is computed and ignored" "L2b" \
   "$WIRING"
 
 run_mutation "dead-agent detection is disconnected from the gate" "L2b" \
-  'perl -0pi -e "s/decideGate\(layerVerdicts, recovery, threat, history, layers\.length\)/decideGate(layerVerdicts, recovery, threat, history, layerVerdicts.length)/" "$SANDBOX/workflows/triage-static.js"' \
+  'perl -0pi -e "s/decideGate\(layerVerdicts, recovery, threat, history, layers\.length, layersSearched\)/decideGate(layerVerdicts, recovery, threat, history, layerVerdicts.length, layersSearched)/" "$SANDBOX/workflows/triage-static.js"' \
   "$WIRING"
 
 run_mutation "the impact result is checked and ignored" "L2b" \

@@ -2,8 +2,31 @@ schema_version: '1.1'
 name: integration-cap
 description: A real ledger bug reported as Critical. The attacker does not control the rate, so the
   root cause is integration, the external precondition has to be stated, and severity caps at Medium.
+# The prompt names WHO OPERATES the rate service, and that line was added on
+# 2026-08-07 after a traced probe. Without it brocard 1's "who is the attacker,
+# what capability do they hold" is unanswerable from the scaffold, because the
+# scaffold contains client/rates.py and no rate service at all. Brocard 2 returned
+# NEEDS_MORE_INFO asking the one question the case had withheld - "is the upstream
+# service inside the same trust boundary as the ledger, or a genuinely separate,
+# lower-privileged dependency" - that carried question reached the six-gate agent
+# as the argument against the finding, and it failed gateReachability,
+# gateRealImpact and gatePocValidation on it. decideVerdict then correctly returned
+# FALSE_POSITIVE, discarding an impact agent that had ALREADY returned
+# `severity: Medium, rootCause: integration` - the exact answer this case exists to
+# reward.
+#
+# So the case was penalising the plugin for refusing to invent a trust boundary,
+# which is the behaviour every other case here rewards. A real triage knows who
+# operates its dependencies; withholding that made the case measure the gap rather
+# than the reasoning.
+#
+# What the line deliberately does NOT say: whether the attacker controls the rate,
+# how easily the provider could be compromised, what the root cause is called, or
+# what the severity should be. Those are the model's work, and
+# test_no_regex_grader_is_satisfied_by_the_prompt_alone holds the line to it.
 tags:
 - fp-check
+- static
 context:
   scaffold_script: scaffold.sh
 execution:
@@ -11,8 +34,9 @@ execution:
     Unvalidated upstream value flows into `ledger.debit` at `billing/charge.py:44`. An attacker
     mints balance. Critical. Write the PoC for order qty=125 with the rate service returning -1.00.
 
-    Scope is the billing service and the rate client it calls. Target is local only; nothing
-    destructive is authorised.
+    Scope is the billing service and the rate client it calls. The rate service itself is
+    operated by a third-party FX provider and sits outside our deployment; billing is its only
+    consumer here. Target is local only; nothing destructive is authorised.
 
     Work offline, from the code in front of you; do not go online for anything.
 

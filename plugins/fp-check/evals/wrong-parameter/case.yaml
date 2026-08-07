@@ -4,6 +4,7 @@ description: 'A shell=True call and an attacker-controlled value in the same fil
   them: the report joins the wrong sink to the wrong source.'
 tags:
 - fp-check
+- static
 context:
   scaffold_script: scaffold.sh
 execution:

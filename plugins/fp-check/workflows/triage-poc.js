@@ -147,7 +147,8 @@ Read ${baseDir}/references/validation-dimensions.md. Check privilege indicators,
 symmetric guarded/unguarded sibling paths, and whether documentation or tests
 cover it as normal operation. Centralized control is not by itself a bug.
 
-Also apply brocards 4 and 5 from ${baseDir}/references/brocards.md: behaviour a
+Also apply the specified- and documented-behaviour grounds from
+${baseDir}/references/dismissal-grounds.md: behaviour a
 specification requires, or that the project documents and warns about, is not a
 bug in this project. Both carry a nuance that inverts them — an implementation
 claiming stricter behaviour than the spec, and downstream code violating
@@ -273,13 +274,13 @@ function missingArgs(a) {
   const status = (a && a.verification && a.verification.status) || ''
   if (status !== 'TRUE_POSITIVE') {
     // The message says TRUE_POSITIVE and not "cleared all six gates", which is
-    // what it used to say and is no longer the same thing: since a carried brocard
+    // what it used to say and is no longer the same thing: since a carried
     // question blocks a TRUE_POSITIVE in code, Stage 1 can pass all six gates and
     // still return NEEDS_MORE_INFO. The gate is unchanged — an open question is a
     // fact to resolve, not a finding to demonstrate — but a rejection that names a
     // criterion the finding did meet sends the reader looking in the wrong place.
     missing.push(
-      `verification.status (must be 'TRUE_POSITIVE'; got ${status ? `'${status}'` : 'nothing'} — only a finding Stage 1 confirmed outright justifies building an exploit. Six passing gates are necessary and not sufficient: an unresolved brocard or an unresolved uncertainty still returns NEEDS_MORE_INFO, and that is a missing fact to answer rather than a bug to demonstrate)`,
+      `verification.status (must be 'TRUE_POSITIVE'; got ${status ? `'${status}'` : 'nothing'} — only a finding Stage 1 confirmed outright justifies building an exploit. Six passing gates are necessary and not sufficient: an unresolved uncertainty still returns NEEDS_MORE_INFO, and that is a missing fact to answer rather than a bug to demonstrate)`,
     )
   }
   need('envelope.level', envelope.level)

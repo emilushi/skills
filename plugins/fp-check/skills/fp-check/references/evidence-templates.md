@@ -26,7 +26,7 @@ Given: [every constant, with its definition site]
   N. Therefore: [the vulnerable condition is reachable | impossible]  (Q.E.D.)
 ```
 
-Worked example, and the shape of a **BLOCKS** verdict:
+Worked example, and the shape of a **FINDING_REFUTED** verdict:
 
 ```
 Given: validation at packet.c:98 ensures (input_size >= MIN_SIZE)

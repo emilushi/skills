@@ -8,6 +8,7 @@ description: A real, reachable panic claimed as a remote process crash. net/http
   so the true impact is a dropped connection for the attacker while the process keeps serving.
 tags:
 - fp-check
+- static
 context:
   scaffold_script: scaffold.sh
 execution:

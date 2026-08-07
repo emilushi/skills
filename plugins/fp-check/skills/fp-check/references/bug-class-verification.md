@@ -43,7 +43,7 @@ Buffer overflow, heap overflow, stack overflow, out-of-bounds read/write, use-af
 
 - **A Go data race is not memory-safe.** Go's memory model gives racing programs undefined behaviour, and a torn write to an interface value or a slice header is real type confusion with a real OOB read behind it. So a Go memory-safety finding whose trigger is a race is not disposed of by "no `unsafe.Pointer` here" — it is a concurrency finding, and the deep route's race-feasibility proof is what decides it.
 - **The `unsafe` block need not be the one you are looking at.** A safe wrapper that computes a length or an index which an `unsafe` block downstream trusts is where most real Rust findings live. Trace the value, not the block.
-- **An attacker who supplies the `ctypes` call already has code execution**, so that is brocard 2's dismissal, not this one. What is *not* dismissed is attacker-controlled **data** reaching an existing native boundary — a size, an offset, a length passed to a C extension.
+- **An attacker who supplies the `ctypes` call already has code execution**, so that is the attacker-already-holds-it ground in [dismissal-grounds.md](dismissal-grounds.md), not this one. What is *not* dismissed is attacker-controlled **data** reaching an existing native boundary — a size, an offset, a length passed to a C extension.
 
 If none of those apply and the path is entirely in the safe subset, reject the memory corruption claim unless it involves a compiler bug or soundness hole.
 

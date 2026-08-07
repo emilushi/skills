@@ -41,7 +41,7 @@ What follows is the shape to report once you have the verdict.
 | Verdict | Reached when | Report as |
 |---|---|---|
 | **TRUE POSITIVE** | all six gates pass, with a stated reason | `BUG #N TRUE POSITIVE — <description>`, with the severity |
-| **FALSE POSITIVE** | any gate fails, a brocard dismisses it, a layer blocks it, or it is by design | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
+| **FALSE POSITIVE** | any gate fails, a layer stops the payload, or it is by design | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
 | **NEEDS MORE INFO** | the review ran and the evidence does not decide | `BUG #N NEEDS MORE INFO — <the missing fact>` |
 
 `ALREADY_FIXED` and `DUPLICATE` are reported as retractions with their reference,
