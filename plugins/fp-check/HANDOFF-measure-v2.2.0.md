@@ -1,8 +1,8 @@
 # Handoff: measure fp-check 2.2.1, then decide whether the merge is worth keeping
 
 **Written 2026-08-07.** You are picking up a plugin that has been measured twice
-and beaten its baseline neither time. Everything free is green, **the §1.1 probe
-has been run and acted on**, and the next thing it needs is the sweep in §1.2.
+and beaten its baseline neither time. Everything free is green, **the §2.1 probe
+has been run and acted on**, and the first job is §1 and the second is the sweep in §2.2.
 
 > **The probe was run on 2.2.0 and it failed, which is why this now says 2.2.1.**
 > `integration-cap` came back `DISMISSED at Stage 1's pre-gate (Brocard 2)`, with
@@ -15,7 +15,7 @@ has been run and acted on**, and the next thing it needs is the sweep in §1.2.
 >
 > Cost of finding that: **$1.15**. It is the third consecutive time the probe has
 > caught something that would have wasted the sweep. Run it again on 2.2.1 before
-> §1.2 — the same command, the same four checks.
+> §2.2 — the same command, the same four checks.
 
 Read this file, then [tests/README.md](tests/README.md) — that one records every
 dead end this plugin has been down, including **five paid sweeps that were invalid
@@ -35,11 +35,96 @@ and each produced a plausible-looking number.** Do not skip it.
 | Target to beat | concept-prover's **+0.170**, and 3/3 on `already-fixed`, `integration-cap`, `blocked-attack-path` |
 | Verdict so far | **has not beaten its baseline.** concept-prover is NOT retired |
 
-## 1. Do this before spending anything
+## 1. First job: build the downstream-users census
 
-Two steps, in order. The first is free. **The probe has been run against 2.2.0 and its finding is fixed in 2.2.1; re-run it against 2.2.1.**
+**Do this before the sweep, and do not expect it to change the sweep.** Those two
+statements are both important and they are not in tension — see "what this will
+not do" below.
 
-### 1.1 Trace probe (~$2, 10 min) — this is not optional
+The capability is item 2 of [TODO-batch-and-users.md](TODO-batch-and-users.md);
+read that section for the four options and why the recommendation is what it is.
+The decision is already made, so you are implementing, not designing:
+
+> **Option C — gate it in code on what Stage 2 already knows.** Not a third
+> question at Step 0.
+
+### Why C and not a question
+
+Whether severity depends on downstream usage is a **finding of the reachability
+analysis**, not something the user knows when they start. And §5.1a of the
+original handoff is emphatic: every extra question is one more thing a
+non-interactive harness silently defaults to `no`, so a third toggle would mean
+the census never runs in any graded run — which is the failure mode this plugin
+has now produced three separate times (`capSeverity`, `upstreamFixStands`,
+`decideVerdict`, 0 firings each across 63 runs). Three toggles is also eight
+configurations, and the suite already struggles to attribute two.
+
+### What to build
+
+In `workflows/triage-online.js`:
+
+1. **`needsUserCensus(verification, reachability, scope)`** — pure, unit-tested,
+   inline (a module const cannot be extracted by `loadFn`; see the same constraint
+   on `selectRoute`'s keyword list). It should return true when the bug requires an
+   unsafe usage by a client rather than being directly exploitable in the target:
+   an `integration` or `external` root cause, a `hardening_gap` in an exported
+   surface, or a reachability finding that no in-repo caller drives the sink — and
+   the scope verdict is not `out-of-scope`.
+2. **A census agent**, dispatched only when that returns true. Its job is the
+   parent's: derive the client-side pattern from the reachability findings, find
+   the popular public consumers, and keep only **confirmed** hits — a real
+   occurrence with a link and enough context to tell it from a string match.
+3. **A schema with `result` as an enum** (`no-confirmed-users` /
+   `affected-users-found`), the queries actually run, and the coverage. Absence of
+   hits is **not** proof no users are affected, and the summary must not read it
+   that way.
+4. **Log the skip and why.** A silent skip is how `beyondCap` went wrong; that bug
+   is already in this file's §5.
+
+### Make it fail closed
+
+The rule this stage already lives by: no claim about the world without having
+looked. If the census runs and cannot reach the network, that is the same halt
+`offlineProblem` already implements — do not let it degrade into "no users found".
+
+### Acceptance
+
+- `tests/online.test.mjs` — unit tests for `needsUserCensus` on both sides, plus a
+  `runScript` test proving the agent is dispatched when it should be and **not**
+  when it should not.
+- `tests/coverage.test.mjs` — flip the guard
+  `[online-triage] the downstream-users census is absent and unadvertised` to
+  exercise the capability instead of pinning its absence. **The test tells you so
+  itself**, in its own assertion messages.
+- `references/brocards.md` line ~119 says outright "Stage 2 has no
+  downstream-consumer census". Update it, and close brocard 5's loop while you are
+  there: its nuance says downstream usage violating documented guidance is a valid
+  finding **against the downstream project**, and until now Stage 1 raised a
+  question Stage 2 could not answer.
+- `meta.description` may advertise it again **only once the agent exists** — the
+  coverage guard fails if you re-advertise without implementing.
+- Bump to **2.3.0**: new capability, and `plugin.json` and `marketplace.json` must
+  agree or the validator fails.
+
+### What this will not do
+
+**It will not move a single number in the 7-case suite.** Stage 2 has never run in
+a graded run — all seven prompts pin "work offline", and the suite cannot measure
+it: its premise is public evidence the synthetic fixtures do not have, and its own
+rule is to stop when offline, so the correct behaviour would score zero.
+
+That is precisely why it goes first. Doing it *after* the sweep would mean the
+measured artifact is not the shipped one; doing it before means the sweep grades
+the final shape. Do not let anyone read a flat sweep result as evidence the census
+did not work — it is not in the measurement's reach at all. Measuring Stage 2 needs
+its own suite on **real public findings**, where ground truth is free because it is
+public record and a `GHSA-` id cannot be guessed (§6).
+
+## 2. Then measure — but not before §1 is done
+
+Two steps, in order, and **only after §1 has landed**. The first is free. **The probe has been run against 2.2.0 and its finding is fixed in 2.2.1; re-run it against 2.2.1.**
+
+### 2.1 Trace probe (~$2, 10 min) — this is not optional
 
 The last probe found two real defects for $0.32 and saved a $39 sweep. The one
 before it found that the plugin never activated at all.
@@ -68,7 +153,7 @@ Then read the trace — `tracePath` in the JSON — and confirm **all** of:
 `integration-cap` is the probe case deliberately: it is the single biggest
 shortfall and the one the 2.2.0 changes most directly target.
 
-### 1.2 The sweep
+### 2.2 The sweep
 
 ```bash
 claude plugin eval fp-check@trailofbits \
@@ -87,7 +172,7 @@ Expect **~$40 and ~3 hours**, strictly sequential. Every flag is load-bearing;
 the traces were gone exactly when a result needed attributing. It costs disk and
 nothing else.
 
-### 1.3 Before you read any aggregate
+### 2.3 Before you read any aggregate
 
 ```bash
 uv run --no-project python plugins/fp-check/tests/validate_eval_result.py /tmp/sweep/result.json
@@ -101,7 +186,7 @@ fields and no-answer runs (`judgeVotes: null` with empty evidence) yourself.
 Report the mean **both ways** — as the CLI computes it, and excluding ungradeable
 runs. Quote the per-case table, never the mean alone.
 
-## 2. What changed in 2.2.0/2.2.1 and what it should do
+## 3. What changed in 2.2.0/2.2.1 and what it should do
 
 Three subagents fixed 17 bugs after v2. The measured problem they were aimed at:
 
@@ -138,7 +223,7 @@ rather than a complaint about the caller.
 **Monotonicity holds by construction: the softest thing a deferral can reach is
 `NEEDS_MORE_INFO`.** No change made it easier to report a finding as real.
 
-## 3. How to read the result
+## 4. How to read the result
 
 ### If the mean beats +0.170 and the three cases hit 3/3
 
@@ -163,7 +248,7 @@ ordering fixes, the `applies` schema, and the eval-suite invariants.
 
 **Do not keep the merge because it took a long time to build.**
 
-## 4. Traps that have each cost real money
+## 5. Traps that have each cost real money
 
 | Trap | Consequence |
 |---|---|
@@ -174,7 +259,7 @@ ordering fixes, the `applies` schema, and the eval-suite invariants.
 | A grader passable by the plugin's own vocabulary | `names-the-integration-root-cause` accepted the bare token `integration`, which `capSeverity`'s note contains. 0 of 18 baseline runs ever emitted it. Fixed, but the class recurs |
 | Running the mutation gate during a sweep | Contention made a mutation's baseline check fail and read as a coverage gap |
 
-## 5. Known gaps — inherit these, do not rediscover them
+## 6. Known gaps — inherit these, do not rediscover them
 
 1. **Layer 3 does not run.** The capture records `concept-prover:verify-attack-path`;
    `test_regrade.py` skips on a condition it checks, and **12 mutations are
@@ -191,8 +276,9 @@ ordering fixes, the `applies` schema, and the eval-suite invariants.
      layers differ" is a comparison no workflow can make. This is a false-negative
      guard, which makes it the more dangerous loss
    - **online-triage's downstream-users census** — the only role in any parent that
-     produced evidence about the world rather than the project. Brocard 5's nuance
-     still raises a question Stage 2 can no longer answer
+     produced evidence about the world rather than the project. **This one is §1
+     of this document and is the first job**, so it should be closed before you
+     reach this list
    Also gone and not deliberate: the **negative PoC** and the always-required
    **pseudocode PoC**. The hooks and the three agent definitions *were* deliberate.
 4. **19 mutations owed to `mutation-gate.sh`** — 10 from the eval-suite invariants,
@@ -205,7 +291,7 @@ ordering fixes, the `applies` schema, and the eval-suite invariants.
    to nothing. A cheap guard (reject a non-absolute path, or one not ending
    `skills/fp-check`) would have caught the traced `2.0.1`-vs-`2.0.2` guess.
 
-## 6. Housekeeping if you install the plugin
+## 7. Housekeeping if you install the plugin
 
 Adding this worktree as a marketplace **replaces** the `trailofbits` entry, which
 normally points at `/Users/gros/ToB/tools/tob/skills`. Restore it when done:
@@ -215,12 +301,13 @@ claude plugin uninstall fp-check@trailofbits
 claude plugin marketplace add /Users/gros/ToB/tools/tob/skills
 ```
 
-## 7. Reading order
+## 8. Reading order
 
 | File | Why |
 |---|---|
 | [tests/README.md](tests/README.md) | The most valuable file here. Every invalid sweep, every grader that measured nothing, what each gate enforces |
 | [tests/coverage.test.mjs](tests/coverage.test.mjs) | Which parent mechanism is present, reachable, and observed firing |
+| [TODO-batch-and-users.md](TODO-batch-and-users.md) | §1's design rationale, and the batch/exploit-chain workflow that is the job after the sweep |
 | `git log --oneline origin/main..HEAD` | Ten commits, each one measurable on its own |
 | [skills/fp-check/SKILL.md](skills/fp-check/SKILL.md) | The dispatch contract you will be reading anyway |
 
