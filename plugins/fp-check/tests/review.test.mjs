@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-import { loadFn, script } from './extract.mjs'
+import { loadFn, runScript, script } from './extract.mjs'
 
 const REVIEW = script('triage-poc.js')
 const confidenceBand = loadFn(REVIEW, 'confidenceBand')
@@ -10,6 +13,13 @@ const severityCapViolation = loadFn(REVIEW, 'severityCapViolation')
 const alreadyFixedStands = loadFn(REVIEW, 'alreadyFixedStands')
 const artifactProblem = loadFn(REVIEW, 'artifactProblem')
 const reportProblem = loadFn(REVIEW, 'reportProblem')
+const settledByStageOne = loadFn(REVIEW, 'settledByStageOne')
+
+const REVIEW_SRC = readFileSync(REVIEW, 'utf8')
+const SKILL_MD = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'skills', 'fp-check', 'SKILL.md'),
+  'utf8',
+)
 
 const KEYS = ['reachable', 'recoverable', 'by-design', 'already-fixed', 'real-deployment']
 const won = (key) => ({ key, winner: 'REBUTTAL', challenge: `c:${key}` })
@@ -323,4 +333,243 @@ test('the band scales with the challenge count instead of hardcoding it', () => 
   assert.equal(confidenceBand(6, 6).label, 'HIGH', 'a sixth challenge must not make HIGH unreachable')
   assert.equal(confidenceBand(5, 6).label, 'MEDIUM', 'and one lost is no longer HIGH')
   assert.equal(confidenceBand(5).label, 'HIGH', 'the default still matches todays five')
+})
+
+// ------------------------------------- Stage 1 settled it: no exploit is owed
+//
+// The measured failure this covers is not a code bug. Stage 3 refused correctly;
+// the orchestrator, still holding a user request for a PoC, then built the
+// exploit by hand and its final answer hedged — reproducing, verbatim, the
+// sentence the no-plugin baseline arm produces on the same case. Refusal has no
+// degraded mode, so when the user has asked for a PoC the model sides with the
+// user and reverts to unguarded behaviour wholesale.
+//
+// Nothing below relaxes the gate. The exploit is refused exactly as before; what
+// changed is that the refusal now reads as an ANSWER ABOUT THE FINDING rather
+// than as a complaint about the caller's arguments, and it names the deliverable
+// that replaces the PoC.
+
+const SETTLED = [
+  'FALSE_POSITIVE',
+  'DISMISSED',
+  'NOT_EXPLOITABLE',
+  'NOT_VULNERABLE',
+  'ALREADY_FIXED',
+  'OUT_OF_SCOPE',
+]
+
+// Read out of the script rather than trusted: this list is the join between the
+// gate and the reporting table in SKILL.md, and a status added to one of the
+// three without the other two is exactly the drift that produces a verdict with
+// no documented way to say it.
+test('the settled list these tests grade is the list the script branches on', () => {
+  const literal = /const settled = \[([\s\S]*?)\]/.exec(REVIEW_SRC)
+  assert.ok(literal, 'settledByStageOne no longer declares a `settled` array; this section is stale')
+  const inScript = [...literal[1].matchAll(/'([A-Z_]+)'/g)].map((m) => m[1])
+  assert.ok(inScript.length > 0, 'the array literal is empty; this test is grading nothing')
+  assert.deepEqual(new Set(inScript), new Set(SETTLED))
+})
+
+test('every terminal Stage 1 verdict is recognised as settled, with its reason', () => {
+  for (const status of SETTLED) {
+    const s = settledByStageOne({ verification: { status, reason: 'blocked at the allowlist' } })
+    assert.ok(s, `${status} is a verdict and must be recognised as one`)
+    assert.equal(s.status, status)
+    assert.equal(s.reason, 'blocked at the allowlist')
+  }
+})
+
+test('TRUE_POSITIVE is not settled — it is the one status that builds', () => {
+  assert.equal(settledByStageOne({ verification: { status: 'TRUE_POSITIVE' } }), null)
+})
+
+// The distinction the whole section rests on. NEEDS_MORE_INFO is a fact still to
+// establish and BLOCKED is an analysis that could not run; neither is an answer,
+// and SKILL.md's own history records that rounding either to FALSE POSITIVE
+// killed a real finding. They must keep the arg gate's "go back and fix it"
+// message rather than acquiring a reporting template.
+test('NEEDS_MORE_INFO and BLOCKED are not settled: they are re-run, not reported', () => {
+  for (const status of ['NEEDS_MORE_INFO', 'BLOCKED']) {
+    assert.equal(
+      settledByStageOne({ verification: { status } }),
+      null,
+      `${status} is not a verdict and must not be reportable as one`,
+    )
+  }
+})
+
+test('an unrecognised status falls through to the arg gate rather than settling', () => {
+  for (const status of ['', 'PROCEED', 'REPORTED', 'not_exploitable', 'TRIAGED', 'anything']) {
+    assert.equal(
+      settledByStageOne({ verification: { status } }),
+      null,
+      `${JSON.stringify(status)} must not be treated as a verdict`,
+    )
+  }
+})
+
+test('a surrounding-whitespace status is still the verdict it names', () => {
+  const s = settledByStageOne({ verification: { status: '  ALREADY_FIXED\n' } })
+  assert.ok(s)
+  assert.equal(s.status, 'ALREADY_FIXED', 'the trimmed name is what SKILL.md is keyed on')
+})
+
+test('an absent verification neither throws nor settles', () => {
+  for (const a of [undefined, null, {}, { verification: null }, { verification: {} }, 'nonsense']) {
+    assert.equal(settledByStageOne(a), null)
+  }
+})
+
+// Trimmed for the reason every other relayed string in this script is trimmed:
+// `reason: '   '` is truthy and would reach the orchestrator as a verdict that
+// explains itself with blank space.
+test('a whitespace reason becomes empty rather than being relayed as one', () => {
+  for (const reason of [undefined, '', '   ', '\n\t']) {
+    assert.equal(settledByStageOne({ verification: { status: 'DISMISSED', reason } }).reason, '')
+  }
+})
+
+// ------------------------------------------------- the same gate, wired up
+
+const SETTLED_ARGS = {
+  baseDir: '/plugin/skills/fp-check',
+  finding: { summary: '`==` on session tokens is a timing oracle', sink: 'session.py:88' },
+  verification: {
+    status: 'ALREADY_FIXED',
+    reason: 'already fixed by #412 — the caller reduces both operands to a keyed HMAC digest',
+    impact: { impact: 'token forgery', rootCause: 'internal', classification: 'vulnerability' },
+    severity: 'High',
+    history: { fixed: 'YES', searched: 'git log -p -- session.py auth.py, CHANGELOG' },
+  },
+  envelope: { hosts: [], level: 1, destructive: false },
+  candidates: [{ description: 'timing oracle', entryPoint: 'POST /login', payload: 'a'.repeat(32) }],
+}
+
+const BUILT_POC = {
+  built: true,
+  executed: true,
+  lintPassed: true,
+  pocType: 'standalone',
+  path: 'poc/x.py',
+  absolutePath: '/wt/poc/x.py',
+  command: 'python3 /wt/poc/x.py',
+  output: 'forged',
+  invokedSymbol: 'SessionStore.validate',
+}
+
+test('a settled finding spends nothing and is not reported as a bad dispatch', async () => {
+  for (const status of SETTLED) {
+    const { result, calls } = await runScript('triage-poc.js', {
+      args: { ...SETTLED_ARGS, verification: { ...SETTLED_ARGS.verification, status } },
+      agents: { build: BUILT_POC },
+    })
+    assert.equal(result.status, 'BLOCKED', `${status} must not buy a build`)
+    assert.equal(calls.length, 0, 'nothing may be spent on a finding Stage 1 already settled')
+    assert.equal(result.settledBy, status, 'the orchestrator branches on this field')
+    assert.match(result.reason, new RegExp(status), 'the reason must name the verdict it relays')
+    // The old message. It sent the orchestrator back to correct a dispatch that
+    // was correct, and when that failed it built the exploit by hand instead.
+    assert.doesNotMatch(
+      result.reason,
+      /unusable arg shape|forward triage-static/i,
+      'a settled finding is not a defective dispatch and must not be described as one',
+    )
+    assert.ok(result.deliverable && result.deliverable.trim(), 'the refusal must name what replaces the PoC')
+  }
+})
+
+test('the relayed reason carries Stage 1s own evidence, not just its status', async () => {
+  const { result } = await runScript('triage-poc.js', { args: SETTLED_ARGS, agents: {} })
+  assert.match(result.reason, /#412/, "Stage 1's reason is the deciding evidence and must survive")
+})
+
+// A dispatch carrying only a settled verification is the shape the arg gate
+// handles worst: it answers with a dozen field names and buries the one fact
+// that matters. The verdict outranks them because nothing below it runs either
+// way.
+test('a settled verdict outranks a malformed dispatch', async () => {
+  const { result, calls } = await runScript('triage-poc.js', {
+    args: { verification: { status: 'NOT_EXPLOITABLE', reason: 'blocked at ALLOWED_TERM' } },
+    agents: { build: BUILT_POC },
+  })
+  assert.equal(result.settledBy, 'NOT_EXPLOITABLE')
+  assert.match(result.reason, /ALLOWED_TERM/)
+  assert.equal(calls.length, 0)
+})
+
+// The converse, and the guard that the new branch did not swallow the arg gate:
+// a status that is NOT a verdict must still get the message that sends the
+// caller back.
+test('a malformed dispatch Stage 1 did not settle still reports its missing fields', async () => {
+  for (const status of ['TRUE_POSITIVE', 'NEEDS_MORE_INFO']) {
+    const { result, calls } = await runScript('triage-poc.js', {
+      args: { verification: { status } },
+      agents: { build: BUILT_POC },
+    })
+    assert.equal(result.status, 'BLOCKED')
+    assert.equal(result.settledBy, undefined, 'this one IS a bad dispatch')
+    assert.match(result.reason, /unusable arg shape/)
+    assert.equal(calls.length, 0)
+  }
+})
+
+// --------------------------------------------- SKILL.md has to be able to say it
+//
+// A gate that produces a verdict the orchestrator has no documented way to
+// report is a gate that gets talked around. These tie the prose to the code.
+
+function skillSection(titleMatcher) {
+  const section = SKILL_MD.split(/^## /m).find((part) => titleMatcher.test(part.split('\n')[0]))
+  assert.ok(section, `SKILL.md has no "## " section whose heading matches ${titleMatcher}`)
+  return section
+}
+
+test('SKILL.md documents every status triage-poc can return', () => {
+  const returned = new Set([...REVIEW_SRC.matchAll(/status: '([A-Z_]+)'/g)].map((m) => m[1]))
+  assert.ok(returned.size >= 5, `only found ${returned.size} returned statuses; this scan is stale`)
+  for (const status of returned) {
+    assert.ok(
+      SKILL_MD.includes(`\`${status}\``),
+      `triage-poc can return ${status} and SKILL.md never mentions it, so the orchestrator ` +
+        `has no documented way to report it. ALREADY_FIXED and NEEDS_MORE_INFO were both live ` +
+        `and both absent from the Stage 3 returns list.`,
+    )
+  }
+})
+
+test('SKILL.md gives every settled verdict an opening line to report it with', () => {
+  const section = skillSection(/asked for a PoC/i)
+  for (const status of SETTLED) {
+    assert.ok(
+      section.includes(`\`${status}\``),
+      `Stage 3 refuses on ${status} and the refusal section does not say how to report it`,
+    )
+  }
+})
+
+test('the refusal section forbids hand-building and bounds the negative PoC', () => {
+  const section = skillSection(/asked for a PoC/i)
+  assert.match(section, /by hand/i, 'hand-building after a refusal is the failure mode; name it')
+  assert.match(section, /negative PoC/i, 'the legitimate alternative has to be named to be used')
+  assert.match(
+    section,
+    /entry point/i,
+    'an unbounded negative PoC is an exploit; it has to be pinned to the entry point',
+  )
+  assert.match(section, /settledBy/, 'the field the orchestrator branches on must be documented')
+})
+
+test('the retraction wording leaves no room to hedge', () => {
+  const section = skillSection(/asked for a PoC/i)
+  assert.match(section, /do not pay/i)
+  // The measured hedge, kept as the counter-example. It is verbatim what the arm
+  // with no plugin answers, and three runs that had FOUND the fix still wrote it.
+  // Seam-tolerant, per this suite's own lesson about literal multi-word phrases:
+  // every inter-word position in prose is a place a line wrap or an emphasis
+  // marker can land, and the first draft of this assertion failed on a newline.
+  assert.match(
+    section,
+    /already[-\s*_`]+fixed[-\s*_`]+on[-\s*_`]+current[-\s*_`]+HEAD/i,
+    'the baseline sentence is the thing being ruled out; deleting the example deletes the rule',
+  )
 })

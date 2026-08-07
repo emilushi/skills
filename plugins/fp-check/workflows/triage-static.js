@@ -66,6 +66,46 @@ const LAYER_SCHEMA = {
   },
 }
 
+// The deep-route proofs. Same verdict enum as a layer, plus the one field that
+// tells them apart from one: `applies`.
+//
+// A layer is ON the attack path and is always applicable — it either stops the
+// payload or it does not. A proof is an auxiliary argument, and two of the three
+// are asked a question that frequently does not apply at all: there is no
+// algebra in a logic bug and no threading model in a synchronous one. The escape
+// used to be a line of prompt telling the agent to answer UNCERTAIN in that case,
+// and a prompt is not an enforcement mechanism — an agent asked "is concurrent
+// access actually possible?" about a finding with no concurrency in it answers
+// the question it was asked, truthfully, with BLOCKS.
+//
+// Measured: `integration-cap` scored 0/3 on the latest sweep, and two of those
+// three runs came back NOT_EXPLOITABLE from this path with every one of the other
+// twelve sub-agents saying the finding was real and unblocked. One run's answer
+// says so in terms — *"the top-line label was self-contradicting against its own
+// reasoning text"* — and the orchestrator then discarded the whole workflow and
+// reported its own uncapped Critical. The severity cap the case exists to
+// exercise never ran.
+//
+// `applies` is required so the model is asked, and read as `applies === true` so
+// an omitted or non-boolean answer cannot block — the same `!== true` idiom
+// `upstreamFixStands` uses on `complete`, for the same reason. The direction is
+// deliberate: a proof that cannot say it applies fails toward more analysis.
+const PROOF_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['applies', 'verdict', 'evidence'],
+  properties: {
+    applies: {
+      type: 'boolean',
+      description: 'false when this question is not applicable to this finding at all; a proof that does not apply cannot answer it',
+    },
+    verdict: { enum: ['PASSES', 'BLOCKS', 'UNCERTAIN'] },
+    location: { type: 'string' },
+    evidence: { type: 'string' },
+    reason: { type: 'string' },
+  },
+}
+
 const RECOVERY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -353,6 +393,39 @@ const route = selectRoute(args)
 
 phase('Brocards')
 
+// `defersTo` names a downstream mechanism that asks the SAME question with more
+// evidence and answers it better. A DISMISS from a brocard that has one does not
+// end the stage: it is carried, the specialised gate runs, and the specialised
+// gate's answer is what the user gets.
+//
+// This is the fix for the merge's largest measured regression. The brocard
+// pre-gate is a first-position gate NEITHER parent had — concept-prover's
+// verify-attack-path.js has no brocards at all — and being both cheap and first
+// it won the race on findings the specialised gates were built for. Measured
+// across 63 with-plugin runs of the seven eval cases: a brocard DISMISS decided
+// 12 of them, while `upstreamFixStands`, `capSeverity`, `missingPrecondition`
+// and `decideVerdict` fired ZERO times between them. Three of the seven cases
+// exist to exercise exactly those four.
+//
+// The two concrete losses, both readable in the recorded answers:
+//   - `already-fixed`: brocard 5 dismissed as "already-fixed/documented
+//     behavior" and `upstreamFixStands` never ran, so the answer was a brocard's
+//     prose instead of "already fixed by #412 — <commit>. Retract."
+//   - `inflated-impact`: brocard 4 dismissed as "no vulnerability from standard
+//     behavior" on a case whose grader says in terms that the panic is REAL and
+//     must not be dismissed; the recovery agent, whose whole job is to downgrade
+//     the impact rather than deny the bug, never decided.
+//
+// Brocards 2 and 6 keep the short-circuit, and that is deliberate rather than
+// timid: nothing downstream tests "the attacker already holds this capability"
+// or "the cure is worse than the disease", so deferring them would buy a full
+// fan-out and no better answer. The cheap path stays cheap for what the pre-gate
+// genuinely disposes of on its own.
+//
+// A deferred DISMISS is NOT discarded — `decideVerdict` blocks a TRUE_POSITIVE on
+// one in code. So the worst this can do is turn a DISMISSED into a
+// NEEDS_MORE_INFO that carries the brocard's own reasoning, which is more willing
+// to keep analysing and never more willing to report a finding as real.
 const BROCARDS = [
   {
     key: 'from-the-heavens',
@@ -370,6 +443,12 @@ is not code execution with the sandbox's privileges.`,
   {
     key: 'standard-behavior',
     title: 'Brocard 4 — no vulnerability from standard behavior',
+    // Overlaps the recovery check and the threat-model agent's design-intent
+    // question, and the overlap is where it goes wrong: "the framework recovers
+    // this panic" is standard behaviour that DOWNGRADES the impact, not a
+    // specification that makes the bug imaginary. Stage 1d states the impact
+    // that survives; this test cannot.
+    defersTo: 'the recovery check (Stage 1d) and the threat-model agent, which decide impact and design intent on the code rather than on the shape of the claim',
     prompt: `Is this behaviour a correct implementation of a specification? If the spec
 requires or permits it, the vulnerability is in the standard, not this code —
 DISMISS and say which standard.
@@ -383,6 +462,11 @@ its own promise, and the spec permitting 1.2 is no defence.`,
   {
     key: 'documented-behavior',
     title: 'Brocard 5 — no vulnerability from documented behavior',
+    // Overlaps the already-fixed history search, and the two are told apart by
+    // one fact this test does not have: a CHANGELOG entry describing a FIX is
+    // not documentation telling you to live with the behaviour. Both dismiss;
+    // only the history agent produces the commit reference the retraction needs.
+    defersTo: 'the already-fixed history search, which distinguishes documentation you must live with from a fix that landed, and cites the commit',
     prompt: `Does this project's own documentation describe this behaviour, and warn against
 the misuse? If so, DISMISS the report against THIS project.
 
@@ -456,25 +540,51 @@ const brocardVerdicts = brocardRaw.filter(Boolean)
 // the first in canonical order is what that means. All four still run — four
 // low-effort agents cost less than the wall-clock of sequencing them — so a
 // DISMISS reported here does not hide the others' verdicts.
-function triageBrocards(verdicts, expectedKeys) {
+//
+// `expected` is a list of DESCRIPTORS — `{ key, defersTo }` — not a list of keys.
+// A descriptor with a non-empty `defersTo` names a downstream mechanism that
+// answers the same question better, and its DISMISS is deferred rather than
+// terminal. A malformed entry carrying no `key` matches no verdict and falls
+// through to the unevaluated branch, which blocks a TRUE_POSITIVE: a caller that
+// gets this wrong fails toward more analysis, not toward a dismissal it did not
+// earn.
+function triageBrocards(verdicts, expected) {
   const byKey = new Map((verdicts || []).filter(Boolean).map((v) => [v.key, v]))
+  const specs = (expected || []).filter(Boolean)
 
-  // A DISMISS is the ONLY terminal outcome, and it is read before anything else.
-  // Each brocard is an independent falsifiable test and any one dismissing is
-  // sufficient, so no later evidence can unmake it and no sibling's silence
-  // matters — the same rule `decideGate` applies when a blocking layer outranks a
-  // dead recovery agent.
-  for (const key of expectedKeys) {
-    const v = byKey.get(key)
-    if (v && v.verdict === 'DISMISS') {
+  // A DISMISS from a brocard with no downstream equivalent is the ONLY terminal
+  // outcome, and it is read before anything else. Each brocard is an independent
+  // falsifiable test and any one dismissing is sufficient, so no later evidence
+  // can unmake it and no sibling's silence matters — the same rule `decideGate`
+  // applies when a blocking layer outranks a dead recovery agent.
+  for (const spec of specs) {
+    const v = byKey.get(spec.key)
+    if (v && v.verdict === 'DISMISS' && !String(spec.defersTo || '').trim()) {
       return {
         dismissal: {
           status: 'DISMISSED',
           reason: `${v.title}: ${String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence'}`,
         },
+        deferred: [],
         unresolved: [],
       }
     }
+  }
+
+  // Deferred dismissals. Collected in declaration order, all of them rather than
+  // only the first: two brocards dismissing for two different reasons is two
+  // things the downstream gates have to answer, and reporting one of them would
+  // silently drop the other.
+  const deferred = []
+  for (const spec of specs) {
+    const v = byKey.get(spec.key)
+    if (!v || v.verdict !== 'DISMISS') continue
+    deferred.push({
+      key: spec.key,
+      title: v.title || spec.key,
+      what: String(v.evidence || '').trim() || 'agent reported DISMISS with no evidence',
+      defersTo: String(spec.defersTo || '').trim(),
+    })
   }
 
   // Everything else is CARRIED, not terminal. This is the fix for the most
@@ -496,25 +606,28 @@ function triageBrocards(verdicts, expectedKeys) {
   // the agent holding all the evidence rather than by the cheapest one to raise a
   // hand.
   const unresolved = []
-  for (const key of expectedKeys) {
-    const v = byKey.get(key)
+  for (const spec of specs) {
+    const v = byKey.get(spec.key)
     if (!v) {
       // A dead agent is unknown, not passed. It is carried rather than fatal so
       // one flaky agent degrades the verdict instead of destroying the run.
-      unresolved.push({ key, title: key, what: 'the agent returned nothing, so this test never ran' })
+      unresolved.push({ key: spec.key, title: spec.key, what: 'the agent returned nothing, so this test never ran' })
     } else if (v.verdict === 'NEEDS_MORE_INFO') {
       const what = String(v.missingFact || '').trim() || String(v.evidence || '').trim()
       unresolved.push({
-        key,
+        key: spec.key,
         title: v.title,
         what: what || 'agent reported NEEDS_MORE_INFO without naming the missing fact',
       })
     }
   }
-  return { dismissal: null, unresolved }
+  return { dismissal: null, deferred, unresolved }
 }
 
-const brocardTriage = triageBrocards(brocardVerdicts, BROCARDS.map((b) => b.key))
+const brocardTriage = triageBrocards(
+  brocardVerdicts,
+  BROCARDS.map((b) => ({ key: b.key, defersTo: b.defersTo || '' })),
+)
 if (brocardTriage.dismissal) {
   log(`DISMISSED: ${brocardTriage.dismissal.reason}`)
   return {
@@ -530,6 +643,19 @@ if (openQuestions.length > 0) {
   log(`${openQuestions.length} brocard question(s) unresolved and carried: ${openQuestions.map((q) => q.key).join(', ')}`)
 }
 
+// Same channel, different claim: these brocards DID dismiss, and a mechanism
+// with more evidence is about to answer the same question. Carried into the
+// impact and verdict prompts and enforced at the verdict, exactly as
+// openQuestions are.
+const deferredDismissals = brocardTriage.deferred
+if (deferredDismissals.length > 0) {
+  log(
+    `${deferredDismissals.length} brocard dismissal(s) deferred to a downstream gate: ${deferredDismissals
+      .map((d) => d.key)
+      .join(', ')}`,
+  )
+}
+
 // Brocard 6 may survive as a severity input rather than a dismissal. Carried
 // forward explicitly, because a value nothing reads is a value that does not
 // exist.
@@ -537,7 +663,11 @@ const remediationCost = brocardVerdicts
   .filter((v) => String(v.severityInput || '').trim())
   .map((v) => `${v.key}: ${v.severityInput}`)
 
-log(`Brocards 2, 4, 5 and 6 passed. Route: ${route}.`)
+log(
+  `No brocard ended the stage${
+    deferredDismissals.length ? ` (${deferredDismissals.length} dismissal(s) deferred)` : ''
+  }. Route: ${route}.`,
+)
 
 // ------------------------------------------------------- Stages 1c and 1d
 
@@ -694,8 +824,17 @@ safely there, and whether tests cover this path. See
 ${baseDir}/references/false-positive-patterns.md for the API-contract and
 context-blind red-flag lists.
 
-Answer UNCERTAIN if you cannot establish it from the code.`,
-      { label: 'api-contract', phase: 'Layers', schema: LAYER_SCHEMA, effort: 'medium' },
+Return PASSES if no such protection exists, so the alleged issue is still open
+after both questions. BLOCKS if a protection you have READ prevents it entirely.
+UNCERTAIN if you cannot establish either from the code. Set applies: false if
+neither question bears on this finding — no relevant API contract and no relevant
+platform protection — and leave the verdict as UNCERTAIN.
+
+The polarity above is stated because it used to be left to you: the two questions
+are phrased so that "yes" means the finding is dead, while the verdict enum is
+phrased so that PASSES means it is alive, and an answer given in the wrong
+direction reads as a proof that the finding is impossible.`,
+      { label: 'api-contract', phase: 'Layers', schema: PROOF_SCHEMA, effort: 'medium' },
     ),
   )
 
@@ -720,9 +859,12 @@ impossible rather than merely unlikely.
 
 Return PASSES if the vulnerable condition is algebraically reachable, BLOCKS if
 the validation makes it impossible, UNCERTAIN if the relations cannot be pinned
-down. If this is not a bounds or arithmetic finding, return UNCERTAIN and say so
-in the evidence — do not invent algebra for a logic bug.`,
-      { label: 'math-bounds', phase: 'Layers', schema: LAYER_SCHEMA, effort: 'high' },
+down. If this is not a bounds or arithmetic finding, set applies: false with
+verdict UNCERTAIN and say so in the evidence — do not invent algebra for a logic
+bug, and do not report BLOCKS to mean "there is no algebra here". Only
+applies: true can end the analysis, so mis-setting it is how a logic bug gets
+dismissed by an arithmetic argument that was never made.`,
+      { label: 'math-bounds', phase: 'Layers', schema: PROOF_SCHEMA, effort: 'high' },
     ),
   )
 
@@ -743,8 +885,11 @@ same function with no external mutation possible, there is no TOCTOU.
 
 Return PASSES if the race is feasible, BLOCKS if the model rules it out,
 UNCERTAIN if the threading model cannot be established. If concurrency is not
-part of this finding's trigger, return UNCERTAIN and say so.`,
-      { label: 'race-feasibility', phase: 'Layers', schema: LAYER_SCHEMA, effort: 'medium' },
+part of this finding's trigger, set applies: false with verdict UNCERTAIN and say
+so. BLOCKS is reserved for a finding that DOES claim a race and whose threading
+model rules it out; answering BLOCKS because there is no concurrency in the
+finding at all dismisses it on a question it never asked.`,
+      { label: 'race-feasibility', phase: 'Layers', schema: PROOF_SCHEMA, effort: 'medium' },
     ),
   )
 }
@@ -852,6 +997,28 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   // are conjunctive (a PROCEED needs every one to PASS), so one that BLOCKS
   // settles reachability on its own and the dead sibling cannot overturn it.
   const blocked = verdicts.filter((l) => l.verdict === 'BLOCKS')
+
+  // A referenced, complete upstream fix outranks the blocking layer, and this is
+  // a reordering rather than a new rule: both outcomes retract the finding, so
+  // nothing here makes a false positive easier to report — only the REASON the
+  // orchestrator relays changes, and one of the two reasons is strictly better.
+  //
+  // The two coincide constantly, because the usual shape of an already-fixed
+  // finding is a fix one layer up that a layer agent then correctly reports as
+  // BLOCKS. `already-fixed`'s grader asks for the commit — "the reason has to be
+  // the fix, cited as evidence" — and `blocked at _digest (auth.py:31)` does not
+  // carry it. The blocking layer is named in the reason too, so nothing is lost.
+  const fix = upstreamFixStands(historyVerdict)
+  if (fix && !fix.partial) {
+    return {
+      status: 'ALREADY_FIXED',
+      reason:
+        `already fixed by ${fix.reference} — ${fix.evidence}.` +
+        `${blocked.length ? ` The path is also blocked at ${where(blocked)}.` : ''}` +
+        ' Retract rather than report at a lowered severity.',
+    }
+  }
+
   if (blocked.length > 0) {
     return { status: 'NOT_EXPLOITABLE', reason: `blocked at ${where(blocked)}` }
   }
@@ -905,17 +1072,11 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
     return { status: 'BLOCKED', reason: 'already-fixed history agent returned nothing; Stage 1c unverified' }
   }
 
-  // Before the threat-model verdicts: a finding fixed upstream is retracted
-  // whether or not it is in scope, and the commit reference is the more useful
-  // answer. Gated on that reference existing, so this cannot become a cheap
-  // escape hatch.
-  const fix = upstreamFixStands(historyVerdict)
-  if (fix && !fix.partial) {
-    return {
-      status: 'ALREADY_FIXED',
-      reason: `already fixed by ${fix.reference} — ${fix.evidence}. Retract rather than report at a lowered severity.`,
-    }
-  }
+  // The retraction itself is decided above, before the blocking-layer filter,
+  // for the reason recorded there. It is gated on a reference existing, so it
+  // cannot become a cheap escape hatch, and a `historyVerdict` of null reaches
+  // the liveness blocker just above rather than falling through as "nothing was
+  // fixed".
 
   // These reasons are taken straight from an agent, and JSON Schema `required`
   // checks presence, not content — `evidence: ''` validates. Without the
@@ -947,6 +1108,7 @@ if (gate.status !== 'PROCEED') {
     route,
     brocards: brocardVerdicts,
     openQuestions,
+    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
@@ -955,28 +1117,45 @@ if (gate.status !== 'PROCEED') {
   }
 }
 
-// A deep-route proof that BLOCKS is as terminal as a blocking layer: algebra
-// showing the condition is impossible, or a threading model that rules the race
-// out, disposes of the finding. Checked after decideGate so a dead layer agent
-// is still reported as the blocker it is.
-const blockingProof = proofs.filter((p) => p.verdict && p.verdict.verdict === 'BLOCKS')
+// Pure. Which deep-route proofs actually block the finding.
+//
+// Two rules, and each of them cost a graded case:
+//
+// `applies === true`, not merely truthy and not defaulted. A proof that says the
+// question does not bear on this finding has not answered it, and an omitted or
+// non-boolean flag reads as "did not say", which cannot block. Same `!== true`
+// idiom as `upstreamFixStands`' `complete`, in the same direction: unsure means
+// keep analysing.
+//
+// The result is CARRIED rather than terminal. A layer is on the attack path and
+// is conjunctive with its siblings — one that BLOCKS settles reachability. A
+// proof is an auxiliary argument by a single agent that saw one question, and
+// making it terminal put it above the impact stage, the severity cap and the six
+// gates, none of which then ran. `gateMathBounds` and `gateEnvironment` are those
+// same two questions asked again with all the evidence in view, so routing a
+// blocking proof to them produces a verdict that names the gate it failed
+// instead of naming the agent that raised its hand first.
+//
+// This cannot make a false positive easier to report: a blocking proof still
+// forbids TRUE_POSITIVE in code at the verdict, so the softest outcome available
+// is NEEDS_MORE_INFO carrying the proof's own evidence.
+function blockingProofs(proofs) {
+  return (proofs || [])
+    .filter((p) => p && p.verdict && p.verdict.applies === true && p.verdict.verdict === 'BLOCKS')
+    .map((p) => ({
+      key: p.key,
+      title: p.key,
+      what: String(p.verdict.evidence || '').trim() || 'proof reported BLOCKS with no evidence',
+    }))
+}
+
+const blockingProof = blockingProofs(proofs)
 if (blockingProof.length > 0) {
-  const why = blockingProof
-    .map((p) => `${p.key}: ${String(p.verdict.evidence || '').trim() || 'no evidence given'}`)
-    .join('; ')
-  log(`NOT_EXPLOITABLE: ${why}`)
-  return {
-    status: 'NOT_EXPLOITABLE',
-    reason: why,
-    route,
-    brocards: brocardVerdicts,
-    openQuestions,
-    layers: layerVerdicts,
-    recovery,
-    threat,
-    history,
-    proofs,
-  }
+  log(
+    `${blockingProof.length} deep-route proof(s) block and are carried to the verdict: ${blockingProof
+      .map((p) => p.key)
+      .join(', ')}`,
+  )
 }
 
 // A dead proof agent is the deep route not having run, and it fails closed for
@@ -987,10 +1166,8 @@ if (blockingProof.length > 0) {
 // reaches the six gates with the extra evidence missing and only a line of prose
 // telling the gate agent so, which is the self-report this port exists to remove.
 //
-// AFTER the blocking-proof check, deliberately: a proof that decided outranks a
-// sibling that died, exactly as a blocking layer outranks a dead layer agent.
 // UNCERTAIN is not a death — two of the three are asked a question that often does
-// not apply and are told to answer UNCERTAIN — so only a missing verdict blocks.
+// not apply and set `applies: false` — so only a missing verdict blocks.
 const deadProofs = proofs.filter((p) => !p.verdict).map((p) => p.key)
 if (deadProofs.length > 0) {
   const why = `${deadProofs.join(', ')} returned nothing; the deep route was selected for those proofs and they are the only thing it adds`
@@ -1001,11 +1178,13 @@ if (deadProofs.length > 0) {
     route,
     brocards: brocardVerdicts,
     openQuestions,
+    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
     history,
     proofs,
+    blockingProofs: blockingProof,
   }
 }
 
@@ -1025,6 +1204,8 @@ ${history.fixed === 'UNCERTAIN' ? `History search was inconclusive: ${history.se
 ${upstreamFixStands(history) ? `A PARTIAL fix exists (${upstreamFixStands(history).reference}); report what remains, not the original claim.` : ''}
 ${remediationCost.length ? `Remediation cost raised at the pre-gate:\n  ${remediationCost.join('\n  ')}` : ''}
 ${openQuestions.length ? `Unresolved at the cheap pre-gate, carried rather than fatal — resolve what you can from the code:\n  ${openQuestions.map((q) => `${q.title}: ${q.what}`).join('\n  ')}` : ''}
+${deferredDismissals.length ? `Dismissed at the cheap pre-gate and deferred to you, because you hold the evidence\nit did not. Answer it from the code — and note that a framework or specification\nthat contains the damage is a reason to DOWNGRADE the impact, not a reason to say\nthe bug is imaginary:\n  ${deferredDismissals.map((d) => `${d.title}: ${d.what}`).join('\n  ')}` : ''}
+${blockingProof.length ? `Deep-route proof(s) reporting that the finding is impossible. They were carried\nrather than made terminal; weigh them against the traced path:\n  ${blockingProof.map((p) => `${p.key}: ${p.what}`).join('\n  ')}` : ''}
 
 Verify the claimed impact against evidence. If recovery downgrades it, the
 verified impact is the downgraded one, not the original claim.
@@ -1102,11 +1283,13 @@ if (!impact || impact.result !== 'VERIFIED') {
     route,
     brocards: brocardVerdicts,
     openQuestions,
+    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
     history,
     proofs,
+    blockingProofs: blockingProof,
     impact,
     ...severityFields,
   }
@@ -1133,11 +1316,13 @@ if (missingPrecondition(impact)) {
     route,
     brocards: brocardVerdicts,
     openQuestions,
+    deferredDismissals,
     layers: layerVerdicts,
     recovery,
     threat,
     history,
     proofs,
+    blockingProofs: blockingProof,
     impact,
     ...severityFields,
   }
@@ -1199,9 +1384,11 @@ Recovery: ${recovery.recoveryExists ? `EXISTS, ${recovery.mechanism || 'mechanis
 Validation layers, all independently verified as passable:
   ${layerVerdicts.map((l) => `${l.layer} (${l.location}): ${l.evidence}`).join('\n  ')}
 Already-fixed search: ${history.fixed} — ${history.searched}
-${proofs.length ? `Deep-route proofs:\n  ${proofs.map((p) => `${p.key}: ${p.verdict ? `${p.verdict.verdict} — ${p.verdict.evidence}` : 'agent returned nothing'}`).join('\n  ')}` : ''}
+${proofs.length ? `Deep-route proofs:\n  ${proofs.map((p) => `${p.key}: ${p.verdict ? `${p.verdict.applies === true ? p.verdict.verdict : `${p.verdict.verdict} (does not apply to this finding)`} — ${p.verdict.evidence}` : 'agent returned nothing'}`).join('\n  ')}` : ''}
 Route: ${route}
 ${openQuestions.length ? `\nUnresolved at the cheap pre-gate and still open. Resolve each from the code if you\ncan, and put whatever remains into unresolvedUncertainty — an unresolved one blocks\na TRUE POSITIVE whatever the six gates say:\n  ${openQuestions.map((q) => `${q.title}: ${q.what}`).join('\n  ')}\n` : ''}
+${deferredDismissals.length ? `\nDismissed at the cheap pre-gate on the shape of the claim alone, then deferred to\nyou because you hold the traced evidence it did not. This is the argument AGAINST\nthe finding, already made — answer it. If it holds, the matching gate below is a\nFAIL and the finding is a FALSE POSITIVE that names which gate; if it does not,\nsay why on the evidence. A deferred dismissal blocks a TRUE POSITIVE in code\neither way, so do not leave it unanswered:\n  ${deferredDismissals.map((d) => `${d.title}: ${d.what}\n    (deferred to ${d.defersTo || 'this review'})`).join('\n  ')}\n` : ''}
+${blockingProof.length ? `\nDeep-route proof(s) reporting the finding impossible. They were carried rather\nthan made terminal, because a single auxiliary proof is not above the traced path:\n  ${blockingProof.map((p) => `${p.key}: ${p.what}`).join('\n  ')}\n` : ''}
 First, argue against the finding, then for it. Work through
 ${baseDir}/references/false-positive-patterns.md — the 13-item checklist and the
 four red-flag lists. ${route === 'deep' ? 'All 13 devil\'s-advocate questions.' : 'The 7 spot-check questions of the standard route.'}
@@ -1252,8 +1439,18 @@ No speculative language in verdictReason: "probably", "likely", "might", "would"
 //
 // A missing verdict counts AGAINST the finding, and unresolved uncertainty is
 // its own outcome rather than being resolved in either direction.
-function decideVerdict(result, carried) {
+//
+// `overruled` is the third input and the one that makes deferral safe: it is the
+// list of arguments some earlier, cheaper stage already made FOR dismissing this
+// finding — a brocard whose DISMISS was deferred to a specialised gate, a
+// deep-route proof that reported the finding impossible. They were carried here
+// instead of ending the stage, and the invariant that makes that legal is
+// enforced below rather than asked for: nothing on this list can be silently
+// dropped, because a non-empty list forbids TRUE_POSITIVE. Deferring is therefore
+// only ever a decision to keep analysing, never a decision to report.
+function decideVerdict(result, carried, overruled) {
   const open = (carried || []).filter(Boolean)
+  const dismissals = (overruled || []).filter(Boolean)
   if (!result) {
     return { status: 'NEEDS_MORE_INFO', reason: 'the gate-review agent returned nothing; no gate was evaluated' }
   }
@@ -1316,20 +1513,39 @@ function decideVerdict(result, carried) {
         .join('; ')}`,
     }
   }
+
+  // The other half of deferral. A dismissal that was carried here rather than
+  // acted on has to be answered by the six gates, and "answered" means a FAIL
+  // that names the gate — which is checked first, above, and returns
+  // FALSE_POSITIVE. Six passes with a dismissal still standing means the two
+  // disagree and nothing reconciled them, so the finding is not confirmed.
+  //
+  // The reason quotes the dismissal rather than summarising it: the whole point
+  // of deferring was that this argument survives to the reader.
+  if (dismissals.length > 0) {
+    return {
+      status: 'NEEDS_MORE_INFO',
+      reason: `all six gates passed, but ${dismissals.length} earlier dismissal(s) were deferred here and none was answered: ${dismissals
+        .map((d) => `${d.title} — ${d.what}`)
+        .join('; ')}`,
+    }
+  }
   return { status: 'TRUE_POSITIVE', reason: why }
 }
 
-const verdict = decideVerdict(verdictAgent, openQuestions)
+const verdict = decideVerdict(verdictAgent, openQuestions, [...deferredDismissals, ...blockingProof])
 
 const payload = {
   route,
   brocards: brocardVerdicts,
   openQuestions,
+  deferredDismissals,
   layers: layerVerdicts,
   recovery,
   threat,
   history,
   proofs,
+  blockingProofs: blockingProof,
   impact,
   severity: capped.severity,
   severityCorrection: capped.note,

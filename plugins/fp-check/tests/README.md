@@ -13,8 +13,10 @@ So: the *operational* sections (the commands, the flags, the traps) apply to
 fp-check now and have been re-pointed. The *measured* sections describe
 concept-prover, and the numbers in them are the baseline the merged plugin has to
 beat — see `tests/fixtures/eval-result-*.json`, which are checked in for exactly
-that purpose. **fp-check has not been measured yet.** When it is, add its sweep
-below rather than amending theirs.
+that purpose. **fp-check has now been measured twice** — 2026-08-06 (v1, mean
+delta +0.170) and 2026-08-07 (v2, +0.151, and the first sweep here with 42/42
+runs clean). Both are recorded below alongside concept-prover's, not merged into
+it. Add the next one the same way rather than amending any of them.
 
 Two things follow from the merge and are not yet closed:
 
@@ -1228,6 +1230,30 @@ caught. Two of the ten were written with `perl -0pi` patterns that silently
 matched nothing on the first attempt, and `perl -pi` exits 0 either way — the
 existing `run_mutation` checksums the sandbox for exactly this reason, so port
 them into it rather than into a fresh harness.
+
+### Nine more owed, for the settled-verdict path (2026-08-06)
+
+`triage-poc.js` gained `settledByStageOne` — the branch that answers a dispatch
+carrying a terminal Stage 1 verdict as *"Stage 1 settled this"* rather than as
+*"unusable arg shape"* — and SKILL.md gained the reporting section that branch
+points at. All nine were run in a sandbox against `review.test.mjs` with a
+verified-green baseline: **9 run, 0 survived, 0 stale**. They are not yet in
+`mutation-gate.sh`, so the count in §"The gate" is unchanged and this is the
+outstanding work. Three of the nine mutate `skills/fp-check/SKILL.md`, which no
+existing mutation does — `run_mutation` checksums the sandbox, so it will need to
+checksum that file too.
+
+| mutation | must turn red |
+|---|---|
+| `const settled = settledByStageOne(args)` → `const settled = null` | the degraded mode never fires |
+| delete `'ALREADY_FIXED',` from the `settled` list | one verdict silently reverts to the arg-shape message |
+| add `'NEEDS_MORE_INFO',` to the `settled` list | a non-answer acquires a reporting template — the one direction that could loosen anything |
+| delete `settledBy: settled.status,` from the return | the field SKILL.md tells the orchestrator to branch on |
+| rename the `deliverable` key | the refusal stops naming what replaces the PoC |
+| drop `.trim()` from the status read | ` NOT_EXPLOITABLE ` stops matching and falls back to the arg gate |
+| rename SKILL.md's `## When the user asked for a PoC and Stage 1 said no` | the section the gate's `deliverable` points at |
+| break the `ALREADY_FIXED` row of its reporting table | a verdict with no documented way to say it |
+| replace "negative PoC" throughout SKILL.md | the legitimate alternative to hand-building disappears |
 
 ## What the checkpoint gates actually enforce
 

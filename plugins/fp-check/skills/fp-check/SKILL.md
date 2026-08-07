@@ -55,7 +55,7 @@ record the open questions each later stage will resolve.
 
 | Question | Default | Why it is a question and not automatic |
 |---|---|---|
-| **Q1. Validate by building a PoC?** | **no** | Measured at **$13.34 against $2.15** on the same finding — 6x. Worth it to settle a disputed finding; wasteful when static analysis already answered. |
+| **Q1. Validate by building a PoC?** | **no** | Measured at **$13.34 against $2.15** on the same finding — 6x. Worth it to settle a disputed finding; wasteful when static analysis already answered. A yes authorises the *cost*, not the *conclusion*: Stage 1 may settle the finding first, and then the verdict is what the request gets. |
 | **Q2. Run online checks?** | **no** | Needs network access and a real upstream project. Stage 2 fails closed when offline, so defaulting it on makes every offline invocation halt. |
 
 **Read the answers out of the request first, and only fall back to
@@ -241,12 +241,15 @@ Returns `TRIAGED`, `OUT_OF_SCOPE`, `DUPLICATE`, `NEEDS_MORE_INFO`, `BLOCKED`, or
 stage makes is about the project's *current* public posture, and it will not make
 one from memory.
 
-### Stage 3 — only if Q1 was yes
+### Stage 3 — only if Q1 was yes **and** Stage 1 returned `TRUE_POSITIVE`
 
 Only a `TRUE_POSITIVE` justifies building an exploit, and the script enforces
 that: `verification.status` is checked, because a failing Stage 1 return carries a
 fully populated `impact` and `severity` too, so forwarding one satisfies every
 other field and buys a PoC for a finding that failed its own gates.
+
+For any other Stage 1 status, **do not dispatch this stage** — the PoC question
+has already been answered, and the next section is what to answer it with.
 
 ```text
 Workflow({ name: 'fp-check:triage-poc', args })
@@ -254,9 +257,9 @@ Workflow({ name: 'fp-check:triage-poc', args })
 args = {
   baseDir, finding                  as above
   verification:  triage-static's return value, forwarded VERBATIM
-                 (its impact.impact, impact.rootCause, impact.classification,
-                  severity, severityCorrection and history.fixed /
-                  history.searched are all read)
+                 (its status, reason, impact.impact, impact.rootCause,
+                  impact.classification, severity, severityCorrection and
+                  history.fixed / history.searched are all read)
   envelope: {
     level:        1-5, per safety-guidelines.md
     hosts:        array of permitted targets; [] means local process only
@@ -270,9 +273,75 @@ args = {
 }
 ```
 
-Returns `REPORTED`, `DO_NOT_SUBMIT`, `BUILD_FAILED`, `NO_CANDIDATES`, or
-`BLOCKED`. `REPORTED` is the one terminal status with no `reason` — relay
-`report.reportPath`, `band` and the `defeated` tally instead.
+Returns `REPORTED`, `DO_NOT_SUBMIT`, `ALREADY_FIXED`, `BUILD_FAILED`,
+`NO_CANDIDATES`, `NEEDS_MORE_INFO`, or `BLOCKED`. `REPORTED` is the one terminal
+status with no `reason` of its own — relay `report.reportPath`, `band` and the
+`defeated` tally instead.
+
+## When the user asked for a PoC and Stage 1 said no
+
+Most requests that reach this skill open with *"write a PoC for this"*. When
+Stage 1 then returns a verdict of its own, that request has been **answered, not
+refused**, and answering it is the entire deliverable. This is the most expensive
+failure mode measured here: the orchestrator reads Stage 3's gate as an obstacle,
+builds the exploit by hand *"per your explicit request"*, and the framing reverts
+to what the arm with no plugin at all produces.
+
+**A terminal Stage 1 verdict ends the PoC work.** Building an exploit by hand
+after it is the failure, not a fallback — the gate that stopped Stage 3 is the
+same gate, and it applies to you. Measured, both directions:
+
+- Three no-plugin runs on `dead-route` wrote a PoC calling the sink directly,
+  **executed real command injection**, and led with *"Confirmed command
+  injection"* before noting the route does not exist. That is a false positive
+  with a working exploit attached, and it is what hand-building produces.
+- On `already-fixed`, all three runs of one sweep **found the fix** and two still
+  scored zero, because they wrote *"Confirmed for v1.4.0 as reported, but already
+  fixed on current HEAD"*. That sentence is verbatim what the no-plugin baseline
+  answers. The analysis was right; the sentence was wrong.
+
+### The verdict is the first clause of the first sentence
+
+A sentence that opens with what the report got right and closes with the
+refutation reads as a confirmation. Lead with the verdict. The reported version's
+history goes after it, never before.
+
+| Stage 1 returned | Open with | Not |
+|---|---|---|
+| `ALREADY_FIXED` | `RETRACTED — already fixed by <reference>`, then all three of: the bug was real at the reported version, a fix landed, **do not pay it and do not report it against current code** | "Confirmed as reported, but already fixed" — and not a lowered severity either; a retraction is not a downgrade |
+| `NOT_EXPLOITABLE` | `FALSE POSITIVE — no attacker-reachable path: <the blocking layer, verbatim>` | "The sink is genuinely injectable, however…" |
+| `NOT_VULNERABLE` | `FALSE POSITIVE — intended behaviour: <the evidence>` | "Arguably a bug, though by design" |
+| `OUT_OF_SCOPE` | `OUT OF SCOPE — <the clause>`, and say plainly that this answers scope and not whether the bug is real | a severity; nothing here established one |
+| `FALSE_POSITIVE`, `DISMISSED` | `FALSE POSITIVE — <the reason, verbatim>` | "unproven", which is NEEDS MORE INFO and a different answer |
+
+`NEEDS_MORE_INFO` and `BLOCKED` are **not** on this list and must not be written
+up as any row of it. One is a fact still to establish, the other an analysis that
+could not run; both are answered by closing the gap and re-running Stage 1.
+
+### A negative PoC is legitimate; an exploit is not
+
+Demonstrating that the guard **rejects** the payload is different work from
+demonstrating the bug, and it is worth doing when the refusal itself is what the
+reporter disputes. It is optional — Stage 1's evidence already decided the
+verdict — and it is bounded:
+
+- It drives the **entry point**. A harness that calls the sink directly is an
+  exploit whatever the file is named, and it shows the sink is dangerous in
+  isolation, which was never in question.
+- Its assertion is the refusal: the payload is rejected, the route has no caller,
+  the digests compare in constant time. It **fails** if the payload ever reaches
+  the sink.
+- It never sits next to a confirmed-vulnerability framing and is never called a
+  PoC for the finding. Say what it is: evidence for the refutation.
+- If it unexpectedly *does* reach the sink, that is a new fact for Stage 1, not a
+  licence to report. Re-dispatch Stage 1 with it as a layer.
+
+### If you dispatched Stage 3 anyway
+
+It returns `BLOCKED` carrying `settledBy` — the Stage 1 status that settled it —
+and a `deliverable`. That `BLOCKED` is **not** a NEEDS MORE INFO: nothing is
+missing, and re-dispatching buys the same refusal twice. Report per the table
+above.
 
 ## Completion Gate
 
@@ -283,7 +352,9 @@ Before you report anything, check what actually came back.
    re-dispatch. Never infer a verdict from partial agent output; doing that is the
    exact mistake this skill exists to prevent.
 2. **Read `status`, not the shape.** Failing returns carry populated payloads, so
-   a result that looks complete may be a `NEEDS_MORE_INFO`.
+   a result that looks complete may be a `NEEDS_MORE_INFO`. The one named
+   exception is Stage 3's `settledBy`, below — a field the script sets rather
+   than a shape you infer.
 3. **Relay the `reason` verbatim.** Every terminal status except Stage 3's
    `REPORTED` carries one, and it names the layer, clause, gate or commit that
    decided the outcome. That specificity is the deliverable, and for
@@ -292,6 +363,11 @@ Before you report anything, check what actually came back.
 4. **State the verdict in your final response**, with the severity and the
    evidence. Stage 3 writes its report to a file, and a file is not an answer.
    If Stage 3 ran, state the confidence band and the N/5 challenge tally too.
+5. **A stage that correctly refused has finished, not failed.** Item 1 covers a
+   workflow that was torn down mid-flight; this is its opposite, and the two
+   need opposite handling. A refusal is the answer: relay it, do not re-dispatch
+   it, and above all do not do by hand the work the stage declined to do. For
+   Stage 3 that means building the exploit yourself — see the section above.
 
 ## Verdicts
 
@@ -304,7 +380,16 @@ Stage statuses collapse onto three user-facing verdicts:
 | **NEEDS MORE INFO** | `NEEDS_MORE_INFO`, `BLOCKED`, `OFFLINE`, `BUILD_FAILED`, `NO_CANDIDATES` | `BUG #N NEEDS MORE INFO — <the missing fact>` |
 
 `ALREADY_FIXED` and `DUPLICATE` are reported as retractions with their reference,
-and `OUT_OF_SCOPE` as a scope answer rather than a judgement on the bug.
+and `OUT_OF_SCOPE` as a scope answer rather than a judgement on the bug. A
+retraction is **not** a false positive and **not** a lowered severity: the bug
+was real, a fix landed, and nothing is owed against current code. Say all three.
+The exact opening lines are in the table above.
+
+**Stage 3's `BLOCKED` is two outcomes, and the `settledBy` field tells them
+apart** — a field rather than a prefix of prose, which is the mistake
+`DO_NOT_SUBMIT` below records. With `settledBy` present, Stage 1 settled the
+finding and its verdict is what you report. Absent, the dispatch itself was
+malformed: that one is NEEDS MORE INFO and is re-dispatched with the shape fixed.
 
 `TRIAGED` is Stage 2 finishing, not a verdict of its own: keep the Stage 1 verdict
 and correct its severity and scope from `summary.finalSeverity`,
@@ -327,11 +412,20 @@ the case below the arm that had no plugin at all.
 
 ## Batch Triage
 
+**Nothing in code enforces any of this.** Every workflow takes exactly one
+`finding`; the batch is your loop, and there is no gate that fails when you skip
+one. That is a real limit of the merge, not an oversight to be talked around —
+the first row of the Rationalizations table exists because prose arguing with
+prose is what this plugin was built to stop relying on. If a batch matters,
+dispatch each finding and keep your own record of which returned what.
+
+
 1. Run Step 0 for every finding first — restating the claims collapses the
    obvious false positives immediately and costs nothing.
 2. Ask the two questions **once**, for the batch.
 3. Dispatch Stage 1 per finding. Each is independent; they may run concurrently.
-4. After all of them, check for **exploit chains**: findings that individually
+4. After all of them, check for **exploit chains** — also unenforced, and a
+   comparison no workflow can make, since none of them sees a second finding: findings that individually
    failed a gate may combine into a viable attack. Two `NOT_EXPLOITABLE` results
    whose blocking layers are different is the shape to look for.
 
@@ -346,6 +440,9 @@ the case below the arm that had no plugin at all.
 | "Similar code was vulnerable elsewhere" | Each context has different validation, callers and protections | Verify this instance |
 | "This is clearly critical" | LLMs over-rate severity, and the severity caps are arithmetic | Let Stage 1e apply them |
 | "I'll skip the PoC question and just build one" | A PoC costs 6x and the user gets a bill they did not agree to | Ask, or read the answer from the request |
+| "Stage 3 refused, but the user asked for a PoC, so I'll build one myself" | The refusal **is** the answer to that request. Measured: hand-built exploits after a refusal reproduce the no-plugin arm's framing, and three of them executed real command injection against a route with no caller | State the Stage 1 verdict; build a *negative* PoC if the refusal is what is disputed |
+| "It was real at the reported version, so I'll confirm it and note the fix" | Leading with the confirmation reports a bug the code does not have, and it is the baseline's exact sentence | Open with the retraction and the reference; the version history comes after |
+| "The verdict is unproven, so it is a false positive" | "Unproven" is NEEDS MORE INFO. Conflating the two killed a real finding here and scored below the arm with no plugin | Name the missing fact and re-run Stage 1 with it |
 
 ## References
 

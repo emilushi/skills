@@ -1,7 +1,7 @@
 export const meta = {
   name: 'triage-online',
   description:
-    "Stage 2: check the project's current public posture — disclosure policy, bounty scope, advisories, past reports, downstream users — and correct the scope or severity Stage 1 reached",
+    "Stage 2: check the project's current public posture — disclosure policy, bounty scope, advisories and past reports — and correct the scope or severity Stage 1 reached",
   whenToUse:
     'Only when the user asked for online checks, and only after triage-static has produced a verdict. Requires network access to a real upstream project; it fails closed rather than triaging policy from memory.',
   phases: [{ title: 'Policy' }, { title: 'Scope' }, { title: 'History' }, { title: 'Summary' }],

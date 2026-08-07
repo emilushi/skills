@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 import { loadFn, loadFns, runScript, script } from './extract.mjs'
@@ -17,17 +18,61 @@ import { loadFn, loadFns, runScript, script } from './extract.mjs'
 const STATIC = script('triage-static.js')
 const selectRoute = loadFn(STATIC, 'selectRoute')
 const triageBrocards = loadFn(STATIC, 'triageBrocards')
-// Only a DISMISS is terminal now; everything else is carried. These two shims keep
-// the existing assertions readable against the new two-field return.
+// Only a DISMISS from a brocard with no downstream equivalent is terminal now;
+// everything else is carried. These shims keep the existing assertions readable
+// against the three-field return.
 const dismissalOf = (v, k) => triageBrocards(v, k).dismissal
 const unresolvedOf = (v, k) => triageBrocards(v, k).unresolved
+const deferredOf = (v, k) => triageBrocards(v, k).deferred
 const upstreamFixStands = loadFn(STATIC, 'upstreamFixStands')
 const capSeverity = loadFn(STATIC, 'capSeverity')
 const decideVerdict = loadFn(STATIC, 'decideVerdict')
+const blockingProofs = loadFn(STATIC, 'blockingProofs')
 
-const KEYS = ['from-the-heavens', 'standard-behavior', 'documented-behavior', 'cure-worse']
+// The descriptor list the workflow passes, not a bare key list: `defersTo` is
+// what tells a terminal brocard from a deferring one. Mirroring the shipped
+// values here would be a copy that can rot, so
+// `the fixtures agree with the shipped BROCARDS about which brocards defer`
+// below reads them back out of the script.
+const SPECS = [
+  { key: 'from-the-heavens', defersTo: '' },
+  { key: 'standard-behavior', defersTo: 'the recovery check and the threat-model agent' },
+  { key: 'documented-behavior', defersTo: 'the already-fixed history search' },
+  { key: 'cure-worse', defersTo: '' },
+]
+const KEYS = SPECS.map((s) => s.key)
+// The two that still end the stage on their own, and the two that hand over.
+const TERMINAL = SPECS.filter((s) => !s.defersTo).map((s) => s.key)
+const DEFERRING = SPECS.filter((s) => s.defersTo).map((s) => s.key)
 const pass = (key) => ({ key, title: `Brocard ${key}`, verdict: 'PASS', missingFact: '', evidence: 'fine' })
 const allPass = () => KEYS.map(pass)
+
+// The one thing SPECS cannot assert about itself. Every test above and below
+// runs against these fixtures, so if the shipped BROCARDS list stopped deferring
+// brocard 5 — or started deferring brocard 2 — this whole file would keep
+// passing while grading a routing table the plugin no longer has.
+//
+// Read out of the source rather than imported: workflow scripts have no module
+// system, which is why `extract.mjs` exists at all.
+test('the fixtures agree with the shipped BROCARDS about which brocards defer', () => {
+  const src = readFileSync(STATIC, 'utf8')
+  const block = src.match(/const BROCARDS = \[[\s\S]*?\n\]\n/)
+  assert.ok(block, 'BROCARDS not found; this pin is stale')
+  // Split on the entry boundary so a `defersTo` is attributed to the `key` it
+  // shares an object literal with, rather than to whichever key came first.
+  const entries = block[0].split(/\n  \{\n/).slice(1)
+  assert.equal(entries.length, SPECS.length, `BROCARDS declares ${entries.length} tests, SPECS has ${SPECS.length}`)
+  const shipped = entries.map((entry) => {
+    const key = entry.match(/^\s*key: '([^']+)'/m)
+    assert.ok(key, `a BROCARDS entry has no key: ${entry.slice(0, 60)}`)
+    return { key: key[1], defers: /^\s*defersTo:\s*'[^']+'/m.test(entry) }
+  })
+  assert.deepEqual(
+    shipped,
+    SPECS.map((s) => ({ key: s.key, defers: Boolean(s.defersTo) })),
+    'the fixtures in this file no longer describe the shipped brocard routing',
+  )
+})
 
 // ------------------------------------------------------------- selectRoute
 
@@ -86,17 +131,99 @@ test('selectRoute never throws on a missing or empty dispatch', () => {
 // ------------------------------------------------------ dismissedByBrocard
 
 test('all four passing returns null so the analysis continues', () => {
-  assert.equal(dismissalOf(allPass(), KEYS), null)
+  assert.equal(dismissalOf(allPass(), SPECS), null)
 })
 
 test('a DISMISS ends the stage and quotes the brocard that did it', () => {
   const verdicts = allPass().map((v) =>
-    v.key === 'standard-behavior' ? { ...v, verdict: 'DISMISS', evidence: 'RFC 7230 requires it' } : v,
+    v.key === 'cure-worse' ? { ...v, verdict: 'DISMISS', evidence: 'RFC 7230 requires it' } : v,
   )
-  const r = dismissalOf(verdicts, KEYS)
+  const r = dismissalOf(verdicts, SPECS)
   assert.equal(r.status, 'DISMISSED')
-  assert.match(r.reason, /standard-behavior/)
+  assert.match(r.reason, /cure-worse/)
   assert.match(r.reason, /RFC 7230/)
+})
+
+// ------------------------------------------------------- deferred dismissals
+//
+// The merge's largest measured regression, and the reason `defersTo` exists.
+// The brocard pre-gate is a first-position gate NEITHER parent had, and being
+// cheap and first it won the race on findings the specialised gates were built
+// for. Across 63 with-plugin runs of the seven eval cases a brocard DISMISS
+// decided 12, while `upstreamFixStands`, `capSeverity`, `missingPrecondition`
+// and `decideVerdict` fired zero times between them — and three of the seven
+// cases exist to exercise exactly those four.
+
+test('a DISMISS from a brocard with a downstream gate defers rather than ending the stage', () => {
+  for (const key of DEFERRING) {
+    const verdicts = allPass().map((v) =>
+      v.key === key ? { ...v, verdict: 'DISMISS', evidence: 'the CHANGELOG documents this' } : v,
+    )
+    assert.equal(dismissalOf(verdicts, SPECS), null, `${key} must not end the stage on its own`)
+    const deferred = deferredOf(verdicts, SPECS)
+    assert.deepEqual(deferred.map((d) => d.key), [key])
+    assert.match(deferred[0].what, /CHANGELOG documents this/, 'the dismissal survives verbatim')
+    assert.ok(deferred[0].defersTo.trim(), 'and says which mechanism it handed over to')
+  }
+})
+
+test('a brocard with no downstream gate still ends the stage', () => {
+  for (const key of TERMINAL) {
+    const verdicts = allPass().map((v) =>
+      v.key === key ? { ...v, verdict: 'DISMISS', evidence: 'the attacker already holds it' } : v,
+    )
+    const r = dismissalOf(verdicts, SPECS)
+    assert.ok(r, `${key} has no downstream equivalent; deferring it buys a fan-out and no better answer`)
+    assert.equal(r.status, 'DISMISSED')
+    assert.match(r.reason, new RegExp(key))
+    assert.deepEqual(deferredOf(verdicts, SPECS), [], 'and nothing is left carried once the stage ends')
+  }
+})
+
+// Precedence, and it is not declaration order: a terminal DISMISS ends the stage
+// wherever it sits in the list. Reading the first DISMISS of any kind would let a
+// deferring brocard at position 2 suppress a terminal one at position 4 and turn
+// a finished analysis into a full fan-out.
+test('a terminal DISMISS outranks a deferring one whatever the order', () => {
+  const verdicts = allPass().map((v) =>
+    v.key === 'standard-behavior' || v.key === 'cure-worse'
+      ? { ...v, verdict: 'DISMISS', evidence: `because ${v.key}` }
+      : v,
+  )
+  const r = dismissalOf(verdicts, SPECS)
+  assert.equal(r.status, 'DISMISSED')
+  assert.match(r.reason, /cure-worse/, 'the terminal brocard decides even though it is declared last')
+})
+
+// All of them, not the first. Two brocards dismissing for two different reasons
+// is two arguments the downstream gates have to answer, and reporting one drops
+// the other silently.
+test('every deferred dismissal is carried, not just the first', () => {
+  const verdicts = allPass().map((v) =>
+    DEFERRING.includes(v.key) ? { ...v, verdict: 'DISMISS', evidence: `because ${v.key}` } : v,
+  )
+  assert.deepEqual(deferredOf(verdicts, SPECS).map((d) => d.key), DEFERRING)
+})
+
+test('a deferred DISMISS with no evidence still says something', () => {
+  const verdicts = allPass().map((v) =>
+    v.key === 'documented-behavior' ? { ...v, verdict: 'DISMISS', evidence: '   ' } : v,
+  )
+  const deferred = deferredOf(verdicts, SPECS)
+  assert.equal(deferred.length, 1)
+  assert.ok(deferred[0].what.trim(), 'a blank evidence string must not become a blank carried reason')
+})
+
+// The fail-safe direction. A caller that passes the old bare-key list, or a
+// descriptor whose key was renamed, matches no verdict — and that must read as
+// "this test never ran" (which blocks a TRUE POSITIVE) rather than as "this test
+// passed". A malformed contract cannot be allowed to look like a clean bill.
+test('a spec that matches no verdict is carried as unevaluated, never as passed', () => {
+  const bare = ['from-the-heavens', 'standard-behavior', 'documented-behavior', 'cure-worse']
+  const r = triageBrocards(allPass(), bare)
+  assert.equal(r.dismissal, null)
+  assert.equal(r.unresolved.length, 4, 'four unmatched specs are four unevaluated tests')
+  assert.deepEqual(r.deferred, [])
 })
 
 // The brocards skill's rule is "stop at the first DISMISS". All four agents run
@@ -107,7 +234,7 @@ test('the reported DISMISS is the first in declaration order, not in return orde
   const verdicts = allPass()
     .map((v) => ({ ...v, verdict: 'DISMISS', evidence: `because ${v.key}` }))
     .reverse()
-  assert.match(dismissalOf(verdicts, KEYS).reason, /from-the-heavens/)
+  assert.match(dismissalOf(verdicts, SPECS).reason, /from-the-heavens/)
 })
 
 // A DISMISS is terminal and a NEEDS_MORE_INFO is not, so when both are present
@@ -120,7 +247,7 @@ test('a DISMISS outranks a NEEDS_MORE_INFO', () => {
     if (v.key === 'cure-worse') return { ...v, verdict: 'DISMISS', evidence: 'the fix breaks every consumer' }
     return v
   })
-  assert.equal(dismissalOf(verdicts, KEYS).status, 'DISMISSED')
+  assert.equal(dismissalOf(verdicts, SPECS).status, 'DISMISSED')
 })
 
 // Carried, not terminal — this is the change the first sweep forced. A cheap test
@@ -134,8 +261,8 @@ test('NEEDS_MORE_INFO is carried with its missing fact, not made terminal', () =
       ? { ...v, verdict: 'NEEDS_MORE_INFO', missingFact: 'whether the docs warn about this' }
       : v,
   )
-  assert.equal(dismissalOf(verdicts, KEYS), null, 'must not end the stage')
-  const open = unresolvedOf(verdicts, KEYS)
+  assert.equal(dismissalOf(verdicts, SPECS), null, 'must not end the stage')
+  const open = unresolvedOf(verdicts, SPECS)
   assert.equal(open.length, 1)
   assert.equal(open[0].key, 'documented-behavior')
   assert.match(open[0].what, /whether the docs warn/)
@@ -146,7 +273,7 @@ test('a carried NEEDS_MORE_INFO with no missing fact still explains itself', () 
     const verdicts = allPass().map((v) =>
       v.key === 'cure-worse' ? { ...v, verdict: 'NEEDS_MORE_INFO', missingFact, evidence: '' } : v,
     )
-    const open = unresolvedOf(verdicts, KEYS)
+    const open = unresolvedOf(verdicts, SPECS)
     assert.equal(open.length, 1)
     assert.ok(open[0].what && open[0].what.trim(), `missingFact ${JSON.stringify(missingFact)} gave nothing`)
   }
@@ -162,15 +289,15 @@ test('a carried NEEDS_MORE_INFO with no missing fact still explains itself', () 
 test('an unevaluated brocard is carried as unknown, never as passed', () => {
   for (const drop of KEYS) {
     const verdicts = allPass().filter((v) => v.key !== drop)
-    assert.equal(dismissalOf(verdicts, KEYS), null, 'a dead agent is not a dismissal')
-    const open = unresolvedOf(verdicts, KEYS)
+    assert.equal(dismissalOf(verdicts, SPECS), null, 'a dead agent is not a dismissal')
+    const open = unresolvedOf(verdicts, SPECS)
     assert.deepEqual(open.map((q) => q.key), [drop], `a missing ${drop} verdict must be carried`)
     assert.match(open[0].what, /never ran|returned nothing/)
   }
 })
 
 test('a dead agent yields null and is counted as unevaluated, not skipped', () => {
-  const open = unresolvedOf([null, ...allPass().slice(1)], KEYS)
+  const open = unresolvedOf([null, ...allPass().slice(1)], SPECS)
   assert.deepEqual(open.map((q) => q.key), ['from-the-heavens'])
 })
 
@@ -185,12 +312,15 @@ test('a dead agent yields null and is counted as unevaluated, not skipped', () =
 // Same rule as `decideGate`'s blocking layer outranking a dead recovery agent.
 test('a DISMISS outranks a dead sibling agent, whichever order they land in', () => {
   for (const deadKey of KEYS) {
-    for (const dismissKey of KEYS) {
+    // TERMINAL, not KEYS: a deferring brocard's DISMISS is carried rather than
+    // terminal, so it has no precedence over a dead sibling to assert. Its own
+    // half of this rule is the test below.
+    for (const dismissKey of TERMINAL) {
       if (deadKey === dismissKey) continue
       const verdicts = allPass()
         .filter((v) => v.key !== deadKey)
         .map((v) => (v.key === dismissKey ? { ...v, verdict: 'DISMISS', evidence: 'the spec requires it' } : v))
-      const r = dismissalOf(verdicts, KEYS)
+      const r = dismissalOf(verdicts, SPECS)
       assert.equal(
         r.status,
         'DISMISSED',
@@ -205,12 +335,25 @@ test('but a dead agent is still carried when nothing dismissed the finding', () 
   // The inverse, so the fix cannot be over-applied into a fail-open: three PASSes
   // and a corpse is not four PASSes. It no longer ends the stage, but it does reach
   // decideVerdict, which blocks a TRUE POSITIVE on it.
-  assert.equal(dismissalOf(allPass().slice(1), KEYS), null)
-  assert.equal(unresolvedOf(allPass().slice(1), KEYS).length, 1)
+  assert.equal(dismissalOf(allPass().slice(1), SPECS), null)
+  assert.equal(unresolvedOf(allPass().slice(1), SPECS).length, 1)
 })
 
 test('all four passing carries nothing', () => {
-  assert.deepEqual(unresolvedOf(allPass(), KEYS), [])
+  assert.deepEqual(unresolvedOf(allPass(), SPECS), [])
+  assert.deepEqual(deferredOf(allPass(), SPECS), [])
+})
+
+// The deferring half of the dead-sibling rule. A deferral is a decision to keep
+// analysing, so a dead sibling has nothing to overturn — but the dismissal still
+// has to survive to the verdict, alongside the dead agent's own open question.
+test('a deferred DISMISS and a dead sibling are both carried', () => {
+  const verdicts = allPass()
+    .filter((v) => v.key !== 'cure-worse')
+    .map((v) => (v.key === 'documented-behavior' ? { ...v, verdict: 'DISMISS', evidence: 'documented' } : v))
+  assert.equal(dismissalOf(verdicts, SPECS), null)
+  assert.deepEqual(deferredOf(verdicts, SPECS).map((d) => d.key), ['documented-behavior'])
+  assert.deepEqual(unresolvedOf(verdicts, SPECS).map((q) => q.key), ['cure-worse'])
 })
 
 // The enforcement half. The pre-gate no longer vetoes, so this is what stops an
@@ -234,6 +377,127 @@ test('a FAIL still outranks a carried question: the specific answer wins', () =>
 test('decideVerdict tolerates a missing or ragged carried list', () => {
   for (const c of [undefined, null, [], [null]]) {
     assert.equal(decideVerdict(GATES, c).status, 'TRUE_POSITIVE', JSON.stringify(c))
+    assert.equal(decideVerdict(GATES, [], c).status, 'TRUE_POSITIVE', `overruled ${JSON.stringify(c)}`)
+  }
+})
+
+// The invariant that makes deferral legal. Everything a cheaper stage said to
+// dismiss the finding is carried here instead of ending the stage — and it is
+// enforced in code rather than asked of the gate agent, so the softest outcome a
+// deferral can reach is NEEDS_MORE_INFO. Deferring therefore only ever buys more
+// analysis; it can never make a false positive easier to report.
+test('a deferred dismissal blocks a TRUE POSITIVE even with six passing gates', () => {
+  const overruled = [
+    { key: 'documented-behavior', title: 'Brocard 5', what: 'the CHANGELOG documents this behaviour' },
+  ]
+  assert.equal(decideVerdict(GATES, [], []).status, 'TRUE_POSITIVE')
+  const r = decideVerdict(GATES, [], overruled)
+  assert.equal(r.status, 'NEEDS_MORE_INFO')
+  assert.match(r.reason, /Brocard 5/)
+  assert.match(r.reason, /CHANGELOG documents this behaviour/, 'the dismissal reaches the reader verbatim')
+})
+
+test('a blocking deep-route proof blocks a TRUE POSITIVE through the same channel', () => {
+  const r = decideVerdict(GATES, [], [
+    { key: 'math-bounds', title: 'math-bounds', what: 'qty >= 1 and rate >= 0 make the product non-negative' },
+  ])
+  assert.equal(r.status, 'NEEDS_MORE_INFO')
+  assert.match(r.reason, /math-bounds/)
+})
+
+// A gate that FAILED is the deferral being ANSWERED, and it outranks: naming the
+// gate is the better-specified dismissal, which is the whole point of handing the
+// question down to the six gates rather than letting the brocard decide it.
+test('a gate FAIL outranks a deferred dismissal: the answer beats the question', () => {
+  const overruled = [{ key: 'standard-behavior', title: 'Brocard 4', what: 'the spec permits it' }]
+  const r = decideVerdict({ ...GATES, gateRealImpact: 'FAIL' }, [], overruled)
+  assert.equal(r.status, 'FALSE_POSITIVE')
+  assert.match(r.reason, /Real Impact/)
+})
+
+// The monotonicity property, asserted rather than argued: over every combination
+// of a carried question and a deferred dismissal, a non-empty list of either can
+// only ever produce a status that is NOT a confirmation.
+test('nothing carried into decideVerdict can be dropped on the way to TRUE POSITIVE', () => {
+  const q = { key: 'cure-worse', title: 'Brocard 6', what: 'the fix cost' }
+  const d = { key: 'standard-behavior', title: 'Brocard 4', what: 'standard behaviour' }
+  for (const [carried, overruled] of [
+    [[q], []],
+    [[], [d]],
+    [[q], [d]],
+  ]) {
+    assert.notEqual(
+      decideVerdict(GATES, carried, overruled).status,
+      'TRUE_POSITIVE',
+      `carried=${carried.length} overruled=${overruled.length}`,
+    )
+  }
+  assert.equal(decideVerdict(GATES, [], []).status, 'TRUE_POSITIVE', 'and the zero guard: nothing carried still passes')
+})
+
+// ---------------------------------------------------------- blockingProofs
+
+// `applies === true`, not merely truthy and not defaulted. This is the fix for
+// the loss that cost `integration-cap` all three of its outcome points on the
+// latest sweep: two of the three runs came back NOT_EXPLOITABLE from a deep-route
+// proof while every other sub-agent said the finding was real, and one of those
+// runs says so in its own words — "the top-line label was self-contradicting
+// against its own reasoning text". The escape hatch for a question that does not
+// apply was a line of prompt, and a prompt is not an enforcement mechanism.
+test('a proof that does not apply cannot block, whatever verdict it reports', () => {
+  for (const applies of [undefined, null, false, 0, '', 'true', 1]) {
+    const proofs = [{ key: 'race-feasibility', verdict: { applies, verdict: 'BLOCKS', evidence: 'no concurrency here' } }]
+    assert.deepEqual(
+      blockingProofs(proofs),
+      [],
+      `applies ${JSON.stringify(applies)} is not an affirmative "this question bears on the finding"`,
+    )
+  }
+})
+
+test('an applicable BLOCKS is returned with its evidence', () => {
+  const proofs = [
+    { key: 'api-contract', verdict: { applies: true, verdict: 'PASSES', evidence: 'no built-in bound' } },
+    { key: 'math-bounds', verdict: { applies: true, verdict: 'BLOCKS', evidence: 'MIN >= sizeof(hdr)' } },
+    { key: 'race-feasibility', verdict: { applies: false, verdict: 'UNCERTAIN', evidence: 'single-threaded' } },
+  ]
+  const blocking = blockingProofs(proofs)
+  assert.deepEqual(blocking.map((p) => p.key), ['math-bounds'])
+  assert.match(blocking[0].what, /sizeof\(hdr\)/)
+})
+
+test('an applicable BLOCKS with no evidence still says something', () => {
+  const blocking = blockingProofs([
+    { key: 'math-bounds', verdict: { applies: true, verdict: 'BLOCKS', evidence: '   ' } },
+  ])
+  assert.equal(blocking.length, 1)
+  assert.ok(blocking[0].what.trim())
+})
+
+test('blockingProofs never throws on a dead or ragged proof list', () => {
+  for (const proofs of [undefined, null, [], [null], [{ key: 'math-bounds', verdict: null }], [undefined]]) {
+    assert.deepEqual(blockingProofs(proofs), [], JSON.stringify(proofs))
+  }
+})
+
+// `required` is the only thing the runtime validator enforces, so `applies` left
+// optional is a field the model may simply omit — and `blockingProofs` reads
+// `=== true`, so every omission reads as "does not apply". The gate would then be
+// silently unable to block anything at all. That direction is safe, which is
+// exactly why nothing else would notice.
+test('PROOF_SCHEMA requires applies, so a proof cannot decline to say whether it applies', () => {
+  const src = readFileSync(STATIC, 'utf8')
+  const block = src.match(/const PROOF_SCHEMA = \{[\s\S]*?\n\}\n/)
+  assert.ok(block, 'PROOF_SCHEMA not found; this pin is stale')
+  const required = block[0].match(/required: \[([^\]]*)\]/)
+  assert.ok(required, 'PROOF_SCHEMA declares no required list')
+  assert.match(required[1], /'applies'/)
+  // And the three deep-route agents are actually given it, rather than the layer
+  // schema that has no such field.
+  for (const label of ['api-contract', 'math-bounds', 'race-feasibility']) {
+    const call = src.match(new RegExp(`label: '${label}'[^}]*schema: (\\w+)`))
+    assert.ok(call, `${label} has no schema option`)
+    assert.equal(call[1], 'PROOF_SCHEMA', `${label} must use PROOF_SCHEMA, not ${call[1]}`)
   }
 })
 
@@ -241,7 +505,7 @@ test('a DISMISS with no evidence still carries a reason', () => {
   const verdicts = allPass().map((v) =>
     v.key === 'cure-worse' ? { ...v, verdict: 'DISMISS', evidence: '   ' } : v,
   )
-  const r = dismissalOf(verdicts, KEYS)
+  const r = dismissalOf(verdicts, SPECS)
   assert.equal(r.status, 'DISMISSED')
   assert.ok(r.reason.trim().length > 'Brocard cure-worse: '.length)
 })
@@ -509,6 +773,100 @@ test('a brocard DISMISS stops before any layer agent is dispatched', async () =>
   assert.ok(!calls.some((c) => c.label === 'impact'))
 })
 
+// The cost half of the deferral, and the reason brocards 2 and 6 keep the
+// short-circuit. Nothing downstream tests "the attacker already holds this
+// capability", so deferring it would buy a full fan-out and no better answer.
+// The measured baseline this protects: a linear checklist matched a full
+// pipeline at 2.3x less cost, so the cheap path has to stay cheap for what the
+// pre-gate genuinely disposes of on its own.
+test('a brocard with no downstream gate still spends nothing after the pre-gate', async () => {
+  for (const title of ['Brocard 2', 'Brocard 6']) {
+    const { result, calls } = await runScript('triage-static.js', {
+      args: WIRING_ARGS,
+      agents: agents({
+        brocard: (prompt) =>
+          prompt.includes(title)
+            ? { verdict: 'DISMISS', missingFact: '', evidence: 'the attacker already holds this' }
+            : { verdict: 'PASS', missingFact: '', evidence: 'fine' },
+      }),
+    })
+    assert.equal(result.status, 'DISMISSED', title)
+    assert.deepEqual(
+      calls.filter((c) => !c.label.startsWith('brocard:')).map((c) => c.label),
+      [],
+      `${title} has no downstream equivalent; not one agent beyond the pre-gate should be spent`,
+    )
+  }
+})
+
+// The wiring half of the deferral, and the one that reproduces the measured
+// loss. `already-fixed` scored 1/3 on the latest sweep against concept-prover's
+// 3/3, and the two failing runs were both decided at the pre-gate — one of them
+// says so verbatim: *"Static triage result: DISMISSED (Brocard 5,
+// already-fixed/documented behavior)"*. `upstreamFixStands` was right there,
+// with the commit reference the case's grader asks for, and never ran.
+test('a brocard 5 DISMISS hands over to the history search instead of ending the stage', async () => {
+  const { result, calls } = await runScript('triage-static.js', {
+    args: WIRING_ARGS,
+    agents: agents({
+      brocard: (prompt) =>
+        prompt.includes('Brocard 5')
+          ? { verdict: 'DISMISS', missingFact: '', evidence: 'the CHANGELOG documents this behaviour' }
+          : { verdict: 'PASS', missingFact: '', evidence: 'fine' },
+      history: {
+        fixed: 'YES',
+        complete: true,
+        reference: '#412',
+        searched: 'git log -p -- auth.py, CHANGELOG',
+        evidence: 'the caller now HMACs both operands',
+      },
+    }),
+  })
+  assert.ok(calls.some((c) => c.label === 'history'), 'the mechanism it defers to must actually run')
+  assert.equal(result.status, 'ALREADY_FIXED')
+  assert.match(result.reason, /#412/, 'and its answer is the one the user gets, with the reference')
+})
+
+// Same shape on brocard 4, where the specialised mechanism is the recovery check
+// and the impact stage. `inflated-impact`'s grader says in terms that the panic
+// is REAL and must not be dismissed — only its impact corrected — so "no
+// vulnerability from standard behavior" is the one answer the case forbids, and
+// it is what the pre-gate returned on 2 of 3 runs.
+test('a brocard 4 DISMISS still reaches the impact agent and the severity cap', async () => {
+  const { result, calls } = await runScript('triage-static.js', {
+    args: WIRING_ARGS,
+    agents: agents({
+      brocard: (prompt) =>
+        prompt.includes('Brocard 4')
+          ? { verdict: 'DISMISS', missingFact: '', evidence: 'net/http recovers this by design' }
+          : { verdict: 'PASS', missingFact: '', evidence: 'fine' },
+    }),
+  })
+  const impact = calls.find((c) => c.label === 'impact')
+  assert.ok(impact, 'the impact stage is the mechanism brocard 4 defers to')
+  assert.match(impact.prompt, /net\/http recovers this by design/, 'and it is told what was dismissed')
+  assert.equal(result.severity, 'Medium', 'the cap runs, which is the whole point of not stopping short')
+  // Never a confirmation while the dismissal stands: it is enforced in code at
+  // decideVerdict, so the deferral cannot turn a DISMISSED into a TRUE_POSITIVE.
+  assert.equal(result.status, 'NEEDS_MORE_INFO')
+  assert.match(result.reason, /net\/http recovers this by design/)
+})
+
+test('a deferred dismissal reaches the gate agent as the argument against the finding', async () => {
+  const { calls } = await runScript('triage-static.js', {
+    args: WIRING_ARGS,
+    agents: agents({
+      brocard: (prompt) =>
+        prompt.includes('Brocard 5')
+          ? { verdict: 'DISMISS', missingFact: '', evidence: 'documented in README.md' }
+          : { verdict: 'PASS', missingFact: '', evidence: 'fine' },
+    }),
+  })
+  const gates = calls.find((c) => c.label === 'gates')
+  assert.ok(gates, 'the gate agent must be dispatched')
+  assert.match(gates.prompt, /documented in README\.md/)
+})
+
 test('an upstream fix retracts before the impact agent is spent', async () => {
   const { result, calls } = await runScript('triage-static.js', {
     args: WIRING_ARGS,
@@ -569,47 +927,100 @@ test('the standard route dispatches no deep-only proof agents', async () => {
   }
 })
 
-test('the deep route dispatches all three, and a blocking proof is terminal', async () => {
+// Every deep-route fixture carries `applies`, because PROOF_SCHEMA requires it —
+// a fixture that omits it is not a shape the runtime validator lets through, and
+// the code reads `applies === true` so an omitted one cannot block.
+const proof = (verdict, evidence, applies = true) => ({ applies, verdict, evidence })
+
+test('the deep route dispatches all three', async () => {
   const { calls } = await runScript('triage-static.js', {
     args: { ...WIRING_ARGS, route: 'deep' },
     agents: agents({
-      'api-contract': { verdict: 'PASSES', evidence: 'no built-in bound' },
-      'math-bounds': { verdict: 'PASSES', evidence: 'the product is unbounded' },
-      'race-feasibility': { verdict: 'UNCERTAIN', evidence: 'not a concurrency finding' },
+      'api-contract': proof('PASSES', 'no built-in bound'),
+      'math-bounds': proof('PASSES', 'the product is unbounded'),
+      'race-feasibility': proof('UNCERTAIN', 'not a concurrency finding', false),
     }),
   })
   for (const label of ['api-contract', 'math-bounds', 'race-feasibility']) {
     assert.ok(calls.some((c) => c.label === label), `${label} must run on the deep route`)
   }
-
-  const blocked = await runScript('triage-static.js', {
-    args: { ...WIRING_ARGS, route: 'deep' },
-    agents: agents({
-      'api-contract': { verdict: 'PASSES', evidence: 'no built-in bound' },
-      'math-bounds': { verdict: 'BLOCKS', evidence: 'qty >= 1 and rate >= 0 make the product non-negative' },
-      'race-feasibility': { verdict: 'UNCERTAIN', evidence: 'n/a' },
-    }),
-  })
-  assert.equal(blocked.result.status, 'NOT_EXPLOITABLE')
-  assert.match(blocked.result.reason, /math-bounds/)
-  assert.ok(!blocked.calls.some((c) => c.label === 'impact'))
 })
 
-// An UNCERTAIN deep proof must not be terminal. Two of the three are asked a
-// question that often does not apply — there is no algebra in a logic bug and no
-// threading model in a synchronous one — and they are told to answer UNCERTAIN
-// and say so. Treating that as a blocker would make the deep route strictly worse
-// than the cheap one on every finding that is not a bounds or race bug.
+// The `integration-cap` loss, reproduced and then fixed. A single auxiliary proof
+// used to return NOT_EXPLOITABLE from above the impact stage, the severity cap
+// and the six gates — none of which then ran. It is carried now: the analysis
+// finishes, the cap is applied, and the proof blocks the confirmation instead of
+// replacing it.
+test('a blocking proof no longer pre-empts the impact stage and the severity cap', async () => {
+  const { result, calls } = await runScript('triage-static.js', {
+    args: { ...WIRING_ARGS, route: 'deep' },
+    agents: agents({
+      'api-contract': proof('PASSES', 'no built-in bound'),
+      'math-bounds': proof('BLOCKS', 'qty >= 1 and rate >= 0 make the product non-negative'),
+      'race-feasibility': proof('UNCERTAIN', 'n/a', false),
+    }),
+  })
+  assert.ok(calls.some((c) => c.label === 'impact'), 'the impact stage must not be pre-empted by one proof')
+  assert.equal(result.severity, 'Medium', 'and the cap has to have been applied')
+  assert.match(result.severityCorrection, /integration/)
+  // Still never a confirmation: the proof blocks TRUE_POSITIVE in code.
+  assert.equal(result.status, 'NEEDS_MORE_INFO')
+  assert.match(result.reason, /math-bounds/)
+  assert.match(result.reason, /non-negative/, 'and the proof reaches the reader verbatim')
+})
+
+// The other direction, so the demotion is not a fail-open: the gate agent sees
+// the blocking proof and can convert it into a named gate FAIL, which is a
+// better-specified dismissal than "math-bounds said no".
+test('a blocking proof reaches the gate agent, which can turn it into a FALSE POSITIVE', async () => {
+  const { result, calls } = await runScript('triage-static.js', {
+    args: { ...WIRING_ARGS, route: 'deep' },
+    agents: agents({
+      'api-contract': proof('PASSES', 'no built-in bound'),
+      'math-bounds': proof('BLOCKS', 'MIN >= sizeof(hdr) so the subtraction cannot underflow'),
+      'race-feasibility': proof('UNCERTAIN', 'n/a', false),
+      gates: { ...GATES, gateMathBounds: 'FAIL', verdictReason: 'the algebra forbids the vulnerable condition' },
+    }),
+  })
+  const gates = calls.find((c) => c.label === 'gates')
+  assert.match(gates.prompt, /sizeof\(hdr\)/)
+  assert.equal(result.status, 'FALSE_POSITIVE')
+  assert.match(result.reason, /Math Bounds/)
+})
+
+// An inapplicable deep proof must not be terminal, and `applies` is what makes
+// that enforceable rather than requested. Two of the three are asked a question
+// that often does not bear on the finding — there is no algebra in a logic bug
+// and no threading model in a synchronous one — and the old escape was a line of
+// prompt telling the agent to answer UNCERTAIN. An agent asked "is concurrent
+// access actually possible?" about a finding with no concurrency in it answers
+// the question it was asked, truthfully, with BLOCKS.
 test('an inapplicable deep proof does not block the finding', async () => {
   const { result } = await runScript('triage-static.js', {
     args: { ...WIRING_ARGS, route: 'deep' },
     agents: agents({
-      'api-contract': { verdict: 'UNCERTAIN', evidence: 'no relevant API contract' },
-      'math-bounds': { verdict: 'UNCERTAIN', evidence: 'not a bounds finding' },
-      'race-feasibility': { verdict: 'UNCERTAIN', evidence: 'single-threaded' },
+      'api-contract': proof('UNCERTAIN', 'no relevant API contract', false),
+      'math-bounds': proof('UNCERTAIN', 'not a bounds finding', false),
+      'race-feasibility': proof('UNCERTAIN', 'single-threaded', false),
     }),
   })
   assert.equal(result.status, 'TRUE_POSITIVE')
+})
+
+test('an inapplicable proof reporting BLOCKS does not block either', async () => {
+  const { result } = await runScript('triage-static.js', {
+    args: { ...WIRING_ARGS, route: 'deep' },
+    agents: agents({
+      'api-contract': proof('UNCERTAIN', 'no relevant API contract', false),
+      'math-bounds': proof('UNCERTAIN', 'not a bounds finding', false),
+      // The exact shape that cost `integration-cap` its points: a proof asked a
+      // question the finding never posed, answering it accurately, in the enum
+      // position that means "this finding is impossible".
+      'race-feasibility': proof('BLOCKS', 'this is not a concurrency finding at all', false),
+    }),
+  })
+  assert.equal(result.status, 'TRUE_POSITIVE')
+  assert.equal(result.severity, 'Medium')
 })
 
 // A dead deep-route proof agent is the deep route not having happened. The three
@@ -632,18 +1043,24 @@ test('a dead deep-route proof agent blocks rather than passing as non-blocking',
   assert.match(result.reason, /race-feasibility/)
 })
 
-// And it does not outrank a proof that DID decide: a BLOCKS is the answer the
-// fan-out already found, and a dead sibling must not turn it into
-// "could not determine" — the same precedence decideGate applies to the layers.
-test('a blocking deep proof outranks a dead sibling proof', async () => {
+// A blocking proof no longer outranks a dead sibling, and that is a consequence
+// of the demotion rather than a weakening. The old precedence — "a proof that
+// decided beats one that died" — was worth having only while a single BLOCKS
+// could end the stage. Now it cannot, so a dead sibling means the escalation the
+// deep route was paid for did not happen, and BLOCKED is the honest answer.
+// What must not happen is the live proof's finding being thrown away, so it is
+// still on the payload for whoever re-dispatches.
+test('a dead sibling proof blocks even when another proof decided, and the decision survives', async () => {
   const { result } = await runScript('triage-static.js', {
     args: { ...WIRING_ARGS, route: 'deep' },
     agents: agents({
-      'math-bounds': { verdict: 'BLOCKS', evidence: 'qty >= 1 and rate >= 0 make the product non-negative' },
+      'math-bounds': proof('BLOCKS', 'qty >= 1 and rate >= 0 make the product non-negative'),
     }),
   })
-  assert.equal(result.status, 'NOT_EXPLOITABLE')
-  assert.match(result.reason, /math-bounds/)
+  assert.equal(result.status, 'BLOCKED')
+  assert.match(result.reason, /api-contract/)
+  assert.deepEqual(result.blockingProofs.map((p) => p.key), ['math-bounds'])
+  assert.match(result.blockingProofs[0].what, /non-negative/)
 })
 
 test('the severity cap is applied to what the workflow returns', async () => {
@@ -724,6 +1141,7 @@ test('every gate function is extractable: a rename must fail loudly', () => {
     'decideGate',
     'missingPrecondition',
     'capSeverity',
+    'blockingProofs',
     'decideVerdict',
   ]
   const loaded = loadFns(STATIC, ...names)

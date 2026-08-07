@@ -174,6 +174,60 @@ path ever actually used?`,
   },
 ]
 
+// Pure. The Stage 1 statuses that are a SETTLED ANSWER rather than a defective
+// dispatch: the finding was analysed and did not survive.
+//
+// It exists because the arg gate below is right about the outcome and wrong
+// about the reason, and the wrong reason is what the plugin's most expensive
+// failure mode feeds on. A settled finding used to come back as "triage-poc
+// received an unusable arg shape: verification.status (...). Forward
+// triage-static's return value verbatim" — a complaint about the CALLER, on a
+// dispatch where the caller did everything right. The orchestrator is still
+// holding a user request for a PoC, reads that as "your dispatch was wrong, try
+// again", finds it cannot be made right, and builds the exploit by hand
+// instead. Traced, verbatim: "the downstream PoC-workflow's hard gate then
+// refused to run without a literal TRUE_POSITIVE string from that stage, so I
+// built and executed the PoC directly instead, per your explicit request."
+//
+// The behaviour it reverts to is measured, not hypothetical: three no-plugin
+// runs on `dead-route` wrote a PoC calling the sink directly, executed real
+// command injection, and led with "Confirmed command injection" before noting
+// the route does not exist.
+//
+// So this path builds nothing, spends nothing and relaxes nothing — the exploit
+// is refused exactly as before. It states the refusal in terms of the finding
+// rather than in terms of the arguments, and names the deliverable that takes
+// the PoC's place.
+//
+// NEEDS_MORE_INFO and BLOCKED are deliberately NOT here. Neither is an answer:
+// one is a fact still to establish, the other an analysis that could not run,
+// and both are resolved by re-running Stage 1 rather than by writing anything
+// up. They keep the arg gate's message, which is the one that tells the caller
+// to go back. An unrecognised status is absent for the reason a fall-through
+// pass is wrong everywhere else in this plugin.
+//
+// The list is inline rather than hoisted to a const: the tests extract this
+// function and evaluate it alone, where a free variable is a ReferenceError.
+// review.test.mjs pins the literal against the statuses SKILL.md tells the
+// orchestrator how to report, so the two cannot drift.
+function settledByStageOne(a) {
+  const verification = (a && a.verification) || {}
+  const status = typeof verification.status === 'string' ? verification.status.trim() : ''
+  const settled = [
+    'FALSE_POSITIVE',
+    'DISMISSED',
+    'NOT_EXPLOITABLE',
+    'NOT_VULNERABLE',
+    'ALREADY_FIXED',
+    'OUT_OF_SCOPE',
+  ]
+  if (!settled.includes(status)) return null
+  // Trimmed for the same reason every other relayed string in this file is:
+  // `reason: '   '` is truthy and would reach the orchestrator as a verdict
+  // that explains itself with blank space.
+  return { status, reason: String(verification.reason || '').trim() }
+}
+
 // Pure. Same guard as triage-static, and here the failure is worse than an
 // `undefined` in a prompt: `envelope.hosts.join()` and
 // `verification.impact.impact` are nested accesses, so a missing or misnamed arg
@@ -209,6 +263,13 @@ function missingArgs(a) {
   // with a passing one — satisfies every other field here and buys a PoC for a
   // finding that failed its own gates. A blocking gate the caller can skip by
   // not reading it is not a gate.
+  //
+  // This is still the only gate on the build path. settledByStageOne runs
+  // earlier and reaches the same outcome for the six statuses that are a
+  // verdict; what is left here is everything else — NEEDS_MORE_INFO, BLOCKED, a
+  // status this script does not recognise, and an absent one — for which "go
+  // back and correct the dispatch or re-run Stage 1" is the right instruction.
+  // Removing this check would let all of those through.
   const status = (a && a.verification && a.verification.status) || ''
   if (status !== 'TRUE_POSITIVE') {
     // The message says TRUE_POSITIVE and not "cleared all six gates", which is
@@ -259,6 +320,30 @@ function missingArgs(a) {
     }
   }
   return missing
+}
+
+// Ahead of the arg gate, deliberately. A settled finding is the more useful
+// answer than a list of fields, and it is the same answer whether or not the
+// rest of the dispatch is well formed — nothing below this line runs either way.
+// Dispatched with only a `verification`, the arg gate buries "Stage 1 already
+// decided this" under a dozen field names.
+//
+// The status stays BLOCKED because BLOCKED means "this stage did not run", which
+// is exactly and correctly what happened. What tells a settled finding from a
+// malformed dispatch is `settledBy`, a field rather than a prefix of prose:
+// DO_NOT_SUBMIT is this plugin's cautionary tale about three outcomes sharing
+// one status and being told apart by pattern-matching the `reason`, and the
+// documented mapping sent all three to FALSE POSITIVE.
+const settled = settledByStageOne(args)
+if (settled) {
+  log(`BLOCKED: Stage 1 settled this as ${settled.status}; there is no exploit to build.`)
+  return {
+    status: 'BLOCKED',
+    settledBy: settled.status,
+    reason: `Stage 1 settled this finding as ${settled.status}${settled.reason ? `: ${settled.reason}` : ''}. No exploit is owed and nothing here is missing — a finding that did not survive Stage 1 has nothing to demonstrate.`,
+    deliverable:
+      "Report Stage 1's verdict and the evidence behind it as the answer to the PoC request; that verdict IS the deliverable. Do not build an exploit by hand and do not re-dispatch this workflow — see \"When the user asked for a PoC and Stage 1 said no\" in SKILL.md, including what a negative PoC may and may not do.",
+  }
 }
 
 const argProblems = missingArgs(args)

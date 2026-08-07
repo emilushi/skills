@@ -168,6 +168,69 @@ test('a dead threat-model agent blocks rather than proceeding', () => {
   assert.match(r.reason, /threat-model/)
 })
 
+// ------------------------------------------- the retraction's precedence
+//
+// Both outcomes retract the finding, so reordering them cannot make a false
+// positive easier to report — only the REASON the orchestrator relays changes.
+// And the two coincide constantly, because the usual shape of an already-fixed
+// finding is a fix one layer up that a layer agent then correctly reports as
+// BLOCKS: `already-fixed`'s own fix is in `auth.py`, one layer above the reported
+// `session.py:88`. Its grader asks for the commit — "the reason has to be the
+// fix, cited as evidence" — and `blocked at _digest (auth.py:31)` does not carry
+// it, so the better-specified of two equally-safe answers should win.
+const retracted = {
+  fixed: 'YES',
+  complete: true,
+  reference: '#412',
+  searched: 'git log -p -- auth.py, CHANGELOG',
+  evidence: 'the caller reduces both operands to a keyed HMAC digest',
+}
+
+test('a referenced complete fix outranks a blocking layer, and names both', () => {
+  const r = decideGate([layer('digest', 'BLOCKS')], checked, inScope, retracted, 1)
+  assert.equal(r.status, 'ALREADY_FIXED')
+  assert.match(r.reason, /#412/)
+  assert.match(r.reason, /digest/, 'the blocking layer is not lost, only outranked')
+  assert.match(r.reason, /Retract/)
+})
+
+// The retraction is gated on a reference existing, and nothing about promoting it
+// loosens that. A fix the agent could not point at leaves the blocking layer as
+// the answer.
+test('an unreferenced or partial fix does not outrank a blocking layer', () => {
+  for (const history of [
+    { ...retracted, reference: '' },
+    { ...retracted, reference: '   ' },
+    { ...retracted, complete: false },
+    { ...retracted, complete: undefined },
+    { ...retracted, fixed: 'UNCERTAIN' },
+  ]) {
+    const r = decideGate([layer('digest', 'BLOCKS')], checked, inScope, history, 1)
+    assert.equal(r.status, 'NOT_EXPLOITABLE', JSON.stringify(history))
+    assert.match(r.reason, /blocked at digest/)
+  }
+})
+
+// The guard above it keeps its place: if there are more verdicts than agents
+// dispatched, the results were mis-attributed and nothing read out of them is
+// trustworthy — including the history verdict's position in the same array.
+test('mis-attributed results still outrank a retraction', () => {
+  const r = decideGate([layer('a', 'PASSES'), layer('b', 'PASSES')], checked, inScope, retracted, 1)
+  assert.equal(r.status, 'BLOCKED')
+  assert.match(r.reason, /mis-attributed/)
+})
+
+// And a dead history agent is not a silent "nothing was fixed": promoting the
+// check above the liveness blocker would have made `upstreamFixStands(null)`
+// fall through to the layers rather than reaching the blocker below.
+test('a dead history agent still blocks rather than falling through as unfixed', () => {
+  for (const dead of [undefined, null]) {
+    const r = decideGate([layer('a', 'PASSES')], checked, inScope, dead, 1)
+    assert.equal(r.status, 'BLOCKED')
+    assert.match(r.reason, /history/)
+  }
+})
+
 test('a blocking layer outranks a dead recovery agent', () => {
   // Ordering matters: NOT_EXPLOITABLE is the more informative answer, and it is
   // reached without needing the recovery verdict at all.
