@@ -430,6 +430,25 @@ const BROCARDS = [
   {
     key: 'from-the-heavens',
     title: 'Brocard 2 — no exploit from the heavens',
+    // Deferred, on evidence. This brocard was left short-circuiting on the
+    // reasoning that nothing downstream asks its question — and that is wrong for
+    // one whole class. "The attacker must already control the upstream rate
+    // service" IS an integration root cause, which is exactly what
+    // `missingPrecondition` and `capSeverity` exist to decide: the finding is
+    // real, the precondition has to be stated, and the severity caps at Medium.
+    //
+    // Measured, at $1.15: a probe of `integration-cap` on 2.2.0 returned
+    // "DISMISSED at Stage 1's pre-gate (Brocard 2)" with the answer stating
+    // "Severity: not reached — the finding was dismissed before the
+    // impact/severity phase". So the gate that was fixed to always run the cap
+    // was starved by the one brocard still allowed to end the stage.
+    //
+    // Its genuine dismissals — an active MITM that can already inject, ctypes
+    // that already implies code execution — survive this: the impact stage reaches
+    // the same answer with the trace in hand, and a deferred dismissal blocks a
+    // TRUE POSITIVE in code either way.
+    defersTo:
+      'the impact stage, which decides root cause and applies the Medium cap when the capability the attack needs is an external precondition rather than power the attacker already holds',
     prompt: `Do the attacker capabilities this attack REQUIRES already equal or exceed the
 impact it GRANTS? If the attacker must already hold the power the exploit would
 give them, the finding is redundant and you should DISMISS.

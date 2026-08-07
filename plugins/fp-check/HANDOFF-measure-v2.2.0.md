@@ -1,8 +1,21 @@
-# Handoff: measure fp-check 2.2.0, then decide whether the merge is worth keeping
+# Handoff: measure fp-check 2.2.1, then decide whether the merge is worth keeping
 
 **Written 2026-08-07.** You are picking up a plugin that has been measured twice
-and beaten its baseline neither time. Everything free is green; the next thing it
-needs is a paid sweep and an honest reading of it.
+and beaten its baseline neither time. Everything free is green, **the §1.1 probe
+has been run and acted on**, and the next thing it needs is the sweep in §1.2.
+
+> **The probe was run on 2.2.0 and it failed, which is why this now says 2.2.1.**
+> `integration-cap` came back `DISMISSED at Stage 1's pre-gate (Brocard 2)`, with
+> the answer stating *"Severity: not reached — the finding was dismissed before
+> the impact/severity phase"*. So 2.2.0 fixed the deep-route proof that had been
+> killing this case and the cap still never ran, because the last brocard allowed
+> to end the stage killed it one step earlier. Brocard 2 now defers to the impact
+> stage; brocard 6 is the only one that still short-circuits, and it is the only
+> one with no downstream equivalent.
+>
+> Cost of finding that: **$1.15**. It is the third consecutive time the probe has
+> caught something that would have wasted the sweep. Run it again on 2.2.1 before
+> §1.2 — the same command, the same four checks.
 
 Read this file, then [tests/README.md](tests/README.md) — that one records every
 dead end this plugin has been down, including **five paid sweeps that were invalid
@@ -14,7 +27,7 @@ and each produced a plausible-looking number.** Do not skip it.
 
 | | |
 |---|---|
-| Version | **2.2.0**, branch `fp-check-triage-merge` in a worktree off `origin/main` |
+| Version | **2.2.1**, branch `fp-check-triage-merge` in a worktree off `origin/main` |
 | Free layers | 318 node + 324 pytest + 36 bats, all green |
 | `make check` | passes except `python-tests`, which fails in `constant-time-analysis` for want of an aarch64 cross sysroot CI installs — **pre-existing, not this branch** (verified on a stashed tree) |
 | Mutation gate | **120 run, 0 survived, 0 stale, 12 deferred** |
@@ -24,7 +37,7 @@ and each produced a plausible-looking number.** Do not skip it.
 
 ## 1. Do this before spending anything
 
-Two steps, in order. The first is free. **Neither has been done against 2.2.0.**
+Two steps, in order. The first is free. **The probe has been run against 2.2.0 and its finding is fixed in 2.2.1; re-run it against 2.2.1.**
 
 ### 1.1 Trace probe (~$2, 10 min) — this is not optional
 
@@ -35,7 +48,7 @@ before it found that the plugin never activated at all.
 export CLAUDE_CODE_WALNUT_SPIRE=1
 claude plugin marketplace add /Users/gros/ToB/tools/tob/skills-wt-fp-check
 claude plugin install fp-check@trailofbits
-diff -r ~/.claude/plugins/cache/trailofbits/fp-check/2.2.0 plugins/fp-check   # MUST be empty
+diff -r ~/.claude/plugins/cache/trailofbits/fp-check/2.2.1 plugins/fp-check   # MUST be empty
 claude plugin eval fp-check@trailofbits --case integration-cap --runs 1 \
   --ablation none --scaffold --keep-temp \
   --allow-tools Bash Write Skill Workflow Task TaskCreate TaskUpdate TaskList TaskGet \

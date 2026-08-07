@@ -35,7 +35,11 @@ const blockingProofs = loadFn(STATIC, 'blockingProofs')
 // `the fixtures agree with the shipped BROCARDS about which brocards defer`
 // below reads them back out of the script.
 const SPECS = [
-  { key: 'from-the-heavens', defersTo: '' },
+  // Deferred as of the 2.2.0 probe: "the attacker must already control the
+  // upstream service" is an integration root cause, which the impact stage and
+  // capSeverity decide. It was the last brocard able to end the stage, and it
+  // starved the cap on the one case the cap exists for.
+  { key: 'from-the-heavens', defersTo: 'the impact stage' },
   { key: 'standard-behavior', defersTo: 'the recovery check and the threat-model agent' },
   { key: 'documented-behavior', defersTo: 'the already-fixed history search' },
   { key: 'cure-worse', defersTo: '' },
@@ -230,11 +234,25 @@ test('a spec that matches no verdict is carried as unevaluated, never as passed'
 // concurrently, so "first" can only mean first in the declared order — otherwise
 // the reported reason depends on which agent happened to finish first, and the
 // same finding gets a different epitaph on every run.
-test('the reported DISMISS is the first in declaration order, not in return order', () => {
+// The brocards run concurrently, so "stop at the first DISMISS" can only mean
+// first in DECLARATION order — otherwise the reported reason depends on which
+// agent happened to finish first and the same finding gets a different epitaph
+// every run.
+//
+// Among the ones that can END the stage. A deferring brocard's dismissal is
+// carried to the gate that asks its question with the evidence in hand, so it is
+// not the epitaph even when it is declared first — and the assertion below is
+// deliberately written against the SPECS list rather than a hardcoded key, so it
+// keeps testing the ordering property as brocards change which side they are on.
+test('the reported DISMISS is the first terminal one in declaration order', () => {
   const verdicts = allPass()
     .map((v) => ({ ...v, verdict: 'DISMISS', evidence: `because ${v.key}` }))
     .reverse()
-  assert.match(dismissalOf(verdicts, SPECS).reason, /from-the-heavens/)
+  const firstTerminal = SPECS.find((spec) => !String(spec.defersTo || '').trim())
+  assert.ok(firstTerminal, 'every brocard defers now; this test would grade nothing')
+  assert.match(dismissalOf(verdicts, SPECS).reason, new RegExp(firstTerminal.key))
+  // And the deferring ones are still carried rather than lost.
+  assert.equal(unresolvedOf(verdicts, SPECS).length, 0, 'a terminal dismissal ends it outright')
 })
 
 // A DISMISS is terminal and a NEEDS_MORE_INFO is not, so when both are present
@@ -779,8 +797,15 @@ test('a brocard DISMISS stops before any layer agent is dispatched', async () =>
 // The measured baseline this protects: a linear checklist matched a full
 // pipeline at 2.3x less cost, so the cheap path has to stay cheap for what the
 // pre-gate genuinely disposes of on its own.
-test('a brocard with no downstream gate still spends nothing after the pre-gate', async () => {
-  for (const title of ['Brocard 2', 'Brocard 6']) {
+// Brocard 6 is the only one left that ends the stage: nothing else in the plugin
+// evaluates remediation cost, so deferring it would buy a fan-out and no better
+// answer. Brocards 2, 4 and 5 all have a downstream gate that asks their question
+// with the traced evidence in hand, and all three defer to it.
+//
+// This is the cost pin. The cheap path has to stay cheap for the one case where
+// short-circuiting is still right.
+test('the one brocard with no downstream gate still spends nothing after the pre-gate', async () => {
+  for (const title of ['Brocard 6']) {
     const { result, calls } = await runScript('triage-static.js', {
       args: WIRING_ARGS,
       agents: agents({
