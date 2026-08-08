@@ -67,6 +67,53 @@ test('the shape the orchestrator actually invented is rejected', () => {
   )
 })
 
+// The largest measured source of variance in this plugin, and it had no test.
+// `baseDir` is model-supplied; only its PRESENCE was validated. On a 3-run sweep
+// of `integration-cap` with identical input, two runs passed the target repo's
+// path and one passed the plugin's — the first two could not read a single
+// reference file and scored 0.000 and 0.333 against the third's 1.000. All three
+// impact agents returned the same correct `Medium / integration`; the difference
+// was entirely which files the agents downstream could open.
+test('a baseDir that is not the skill directory is rejected', () => {
+  const wrong = [
+    // The two shapes actually observed in the failing runs: the eval's working
+    // directory, which is the TARGET repo and has no references/ in it.
+    '/private/var/folders/T/claude-eval-VYuPfq/cwd',
+    '/Users/someone/code/target-repo',
+    // Relative, which resolves against whatever the agent's cwd happens to be.
+    'skills/fp-check',
+    './skills/fp-check',
+    // Right tail, wrong plugin.
+    '/plugin/skills/concept-prover',
+  ]
+  for (const baseDir of wrong) {
+    const problems = missingArgs({ ...GOOD, baseDir })
+    assert.ok(
+      problems.some((p) => p.startsWith('baseDir')),
+      `${baseDir} must be rejected: every reference read would 404 and each agent would answer from memory`,
+    )
+  }
+})
+
+test('the skill directory itself is accepted, with or without a trailing slash', () => {
+  for (const baseDir of [
+    '/plugin/skills/fp-check',
+    '/plugin/skills/fp-check/',
+    '/Users/x/.claude/plugins/cache/trailofbits/fp-check/2.5.0/skills/fp-check',
+  ]) {
+    assert.deepEqual(missingArgs({ ...GOOD, baseDir }), [], baseDir)
+  }
+})
+
+// Absence and wrong-shape are different messages, and both have to be reported:
+// the guard is additive to `need`, not a replacement for it.
+test('an absent baseDir is still reported as absent', () => {
+  const { baseDir, ...rest } = GOOD
+  void baseDir
+  assert.ok(missingArgs(rest).includes('baseDir'))
+  assert.ok(missingArgs({ ...GOOD, baseDir: '   ' }).some((p) => p.startsWith('baseDir')))
+})
+
 test('an object scope is rejected, a string scope is fine', () => {
   assert.ok(missingArgs({ ...GOOD, scope: { module: 'x' } }).some((p) => p.startsWith('scope')))
   assert.deepEqual(missingArgs({ ...GOOD, scope: 'anything' }), [])

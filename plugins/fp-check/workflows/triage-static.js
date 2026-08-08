@@ -224,6 +224,36 @@ function missingArgs(a, maxLayers = 4) {
   const entry = (a && a.entryPoint) || {}
 
   need('baseDir', a && a.baseDir)
+
+  // `baseDir` had its PRESENCE validated and never its SHAPE, and that gap is the
+  // largest single source of variance measured on this plugin. On a 3-run sweep of
+  // `integration-cap` with identical input, two runs passed the TARGET REPO's path
+  // and one passed the plugin's: every read under `${baseDir}/references/` 404'd in
+  // first two. The impact agent could not read dismissal-grounds.md, the gate agent
+  // could not read false-positive-patterns.md, and those runs scored 0.000 and
+  // 0.333 against the third's 1.000. All three impact agents returned the same
+  // correct `Medium / integration` — the only difference was which files the
+  // agents downstream of them could open.
+  //
+  // A workflow has no filesystem access, so existence cannot be checked here. The
+  // SHAPE can be, and it is exactly what the two failing dispatches got wrong: an
+  // absolute path ending in the skill directory. Reported rather than silently
+  // tolerated, because the failure is otherwise invisible — an agent that cannot
+  // read its reference file carries on and answers from memory.
+  //
+  // Written without a regex literal on purpose: the Python contract suite lexes
+  // these scripts to strip strings and comments, and it REJECTS a regex literal
+  // rather than risk mis-lexing one (test_a_regex_literal_is_rejected_rather_than_mis_lexed).
+  // Adding one here failed 51 of its tests on unmutated code and took 27 mutations
+  // with it, because a mutation whose baseline is red proves nothing.
+  const base = typeof (a && a.baseDir) === 'string' ? a.baseDir.trim() : ''
+  const withoutSlash = base.endsWith('/') ? base.slice(0, -1) : base
+  const shaped = withoutSlash.startsWith('/') && withoutSlash.endsWith('/skills/fp-check')
+  if (base && !shaped) {
+    missing.push(
+      `baseDir (must be the skill directory's ABSOLUTE path, ending in skills/fp-check; got '${base}'. Copy it from an expanded reference link rather than reconstructing it — the working directory is the TARGET repo and has no references/ in it)`,
+    )
+  }
   need('finding.summary', finding.summary)
   need('finding.sink', finding.sink)
   need('finding.component', finding.component)

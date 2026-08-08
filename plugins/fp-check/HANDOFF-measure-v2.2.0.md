@@ -1,4 +1,4 @@
-# Handoff: measure fp-check 2.5.0, then decide whether the merge is worth keeping
+# Handoff: fp-check 2.5.1 — measured twice, beats its baseline, and what is left
 
 **Written 2026-08-07.** You are picking up a plugin that has been measured twice
 and beaten its baseline neither time. Everything free is green, §1 has landed, and
@@ -17,7 +17,8 @@ where it failed and found why `integration-cap` loses all 3 points.** That fix i
 >
 > Cost of finding that: **$1.15**. It is the third consecutive time the probe has
 > caught something that would have wasted the sweep. Run it again before §2.2 —
-> the same command, the same four checks.
+> the same command, the checks in §2.1 — which are now five, and two of them read
+> `journal.jsonl` rather than the trace.
 >
 > **Then it was run again on 2.3.0, and failed again** — on a different mechanism,
 > and this time on the dispatch contract rather than a gate. `missingArgs` rejected
@@ -51,13 +52,13 @@ and each produced a plausible-looking number.** Do not skip it.
 
 | | |
 |---|---|
-| Version | **2.5.0**, branch `fp-check-triage-merge` in a worktree off `origin/main` |
-| Free layers | 313 node + 364 pytest + 36 bats, all green |
+| Version | **2.5.1**, branch `fp-check-triage-merge` in a worktree off `origin/main` |
+| Free layers | 316 node + 364 pytest + 36 bats, all green |
 | `make check` | passes except `python-tests`, which fails in `constant-time-analysis` for want of an aarch64 cross sysroot CI installs — **pre-existing, not this branch** (verified on a stashed tree) |
-| Mutation gate | **128 run, 0 survived, 0 stale, 12 deferred** |
-| Measured | v1 (2026-08-06) mean delta **+0.170**; v2 (2026-08-07) **+0.151** |
+| Mutation gate | **129 run, 0 survived, 0 stale, 12 deferred** |
+| Measured | 2.5.0 **+0.213**, 2.5.1 **+0.208** — two sweeps, 0.005 apart. Earlier: v1 +0.170, v2 +0.151 |
 | Target to beat | concept-prover's **+0.170**, and 3/3 on `already-fixed`, `integration-cap`, `blocked-attack-path` |
-| Verdict so far | **has not beaten its baseline.** concept-prover is NOT retired |
+| Verdict so far | **beats its baseline, reproduced.** Retiring concept-prover is now a decision someone can defensibly make — see §4 |
 
 ## 1. ~~First job: build the downstream-users census~~ — DONE in 2.3.0
 
@@ -184,7 +185,7 @@ or moves the failure one step along, and $5 is the cheapest way to find out.
 export CLAUDE_CODE_WALNUT_SPIRE=1
 claude plugin marketplace add /Users/gros/ToB/tools/tob/skills-wt-fp-check
 claude plugin install fp-check@trailofbits
-diff -r ~/.claude/plugins/cache/trailofbits/fp-check/2.5.0 plugins/fp-check   # MUST be empty
+diff -r ~/.claude/plugins/cache/trailofbits/fp-check/2.5.1 plugins/fp-check   # MUST be empty
 claude plugin eval fp-check@trailofbits --case integration-cap --runs 1 \
   --ablation none --scaffold --keep-temp \
   --allow-tools Bash Write Skill Workflow Task TaskCreate TaskUpdate TaskList TaskGet \
@@ -192,19 +193,94 @@ claude plugin eval fp-check@trailofbits --case integration-cap --runs 1 \
   --output-dir /tmp/probe --json /tmp/probe.json
 ```
 
-Then read the trace — `tracePath` in the JSON — and confirm **all** of:
+Then read **two** records. They are not interchangeable, and three probes were
+graded on the wrong one.
 
-| Check | Why |
-|---|---|
-| `Skill` ≥ 1 and `Workflow` ≥ 1 | A path target does NOT register the skill. Target by NAME. Two probes scored `Skill 0` before this was understood |
-| `AskUserQuestion` == 0 | Every case pins both stage answers; if it appears, the pre-supply path is broken and the eval measures Stage 1 only |
-| `severityCorrection` appears **in a result, not in source text** | **The whole point of this run.** `capSeverity` has fired **0 times in 64 measured runs**. On the 2.3.0 probe all 8 hits were in the workflow source the agent had read — grep the trace for the value, not the word |
-| No layer names the absence of a check | The 2.3.0 failure. A `layers[]` entry whose description says "no validation exists" means the orchestrator is still reading a stale contract |
-| The final answer says Medium, not Critical | `integration-cap` is the 3-point loss |
+- **`out/trace.jsonl`** — what the orchestrator did. Tool calls and the args it
+  dispatched with. It also contains **the workflow source as text**, because the
+  agent reads the script.
+- **`journal.jsonl`** — what each agent actually returned, one file per workflow.
+  This is the authoritative record, and the Workflow tool's own docs say to read
+  it rather than assume.
+
+> **Grep the trace for a VALUE from the journal, never for a word from the source.**
+
+Any check of the form "the string `X` appears in the trace" is broken: the source
+text guarantees the hit. The old `severityCorrection` row was exactly that, and it
+never once observed a real value — all 8 occurrences on the 2.3.0 probe and all 4
+on the 2.4.0 probe were source text.
+
+Both records live under the temp dir `--keep-temp` preserves. `tracePath` in the
+result JSON *is* `<eval-temp>/out/trace.jsonl`, so the temp dir is its grandparent,
+and the journals sit under the eval's config directory — **one per workflow, so
+Stage 1 and Stage 3 have separate journals and you need all of them**:
+
+```bash
+EVAL_TMP=$(grep -o '"tracePath": *"[^"]*"' /tmp/probe.json | head -1 | cut -d'"' -f4)
+EVAL_TMP=${EVAL_TMP%/out/trace.jsonl}    # one run, one arm, so head -1 is the run
+find "$EVAL_TMP" -name journal.jsonl     # …/subagents/workflows/wf_*/journal.jsonl
+
+uv run --no-project python - "$EVAL_TMP" <<'PY'
+import json, sys
+from pathlib import Path
+
+KEYS = ("result", "severity", "rootCause", "classification", "unresolvedUncertainty",
+        "gateProcess", "gateReachability", "gateRealImpact", "gatePocValidation",
+        "gateMathBounds", "gateEnvironment", "severityCorrection")
+journals = sorted(Path(sys.argv[1]).rglob("journal.jsonl"))
+assert journals, "no journal.jsonl — the run had no --keep-temp, or no workflow ran"
+for j in journals:
+    print(f"== {j.parent.name}")
+    for line in j.read_text().splitlines():
+        row = json.loads(line)
+        if row.get("type") != "result":
+            continue
+        hit = {k: v for k, v in (row.get("result") or {}).items() if k in KEYS}
+        if hit:
+            print("  ", hit)
+PY
+```
+
+On the 2.5.0 probe that prints two lines for the Stage 1 workflow — the impact
+agent's `{'result': 'VERIFIED', 'rootCause': 'integration', 'classification':
+'hardening_gap', 'severity': 'Medium'}` and the gate agent's six `PASS`es — plus
+`{'severity': 'Medium'}` from Stage 3's report agent. That is the shape to expect.
+
+The trace side is a count over `tool_use` blocks, which also dumps what the
+orchestrator passed as `layers`:
+
+```bash
+uv run --no-project python - "$EVAL_TMP/out/trace.jsonl" <<'PY'
+import collections, json, sys
+
+n, layers = collections.Counter(), []
+for line in open(sys.argv[1]):
+    msg = json.loads(line).get("message")            # system events carry a string
+    content = msg.get("content") if isinstance(msg, dict) else None
+    for b in content if isinstance(content, list) else []:
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            n[b.get("name")] += 1
+            if b.get("name") == "Workflow":
+                layers += ((b.get("input") or {}).get("args") or {}).get("layers") or []
+print({k: n[k] for k in ("Skill", "Workflow", "AskUserQuestion")})
+print("layers:", json.dumps(layers))
+PY
+```
+
+Confirm **all** of:
+
+| Check | Read from | Why |
+|---|---|---|
+| `Skill` ≥ 1 and `Workflow` ≥ 1 | trace, `tool_use` blocks | A path target does NOT register the skill. Target by NAME. Two probes scored `Skill 0` before this was understood |
+| `AskUserQuestion` == 0 | trace, `tool_use` blocks | Every case pins both stage answers; if it appears, the pre-supply path is broken and the eval measures Stage 1 only |
+| The impact agent returned `severity: Medium` **and** `rootCause: integration` | journal, the result object carrying `result`/`rootCause`/`classification` | `integration-cap` is the 3-point loss, and the returned severity is the thing this run exists to observe. **A missing `severityCorrection` is FINE.** `capSeverity` lowers Critical→Medium for an `integration` root cause and emits a note ONLY when it actually lowers something — an agent that already returned Medium leaves it empty, which is what happened on both the 2.4.0 and 2.5.0 probes. Assert the value, never the note |
+| All six `gate*` fields are `PASS` (or `N/A` for `gateMathBounds`) and `unresolvedUncertainty` is empty | journal, the result object carrying `gateProcess` | **What actually decides the case.** Six passes with nothing unresolved and no carried dismissal is the only route to TRUE_POSITIVE; one FAIL is FALSE_POSITIVE and throws away the Medium the impact agent already got right. That is `decideVerdict` in `workflows/triage-static.js`, arithmetic over these six enums — the status itself is computed in the workflow and is NOT in the journal, so read the gates. The 2.4.0 probe had the severity right and lost the case here, on `gateReachability`, `gateRealImpact` and `gatePocValidation` |
+| No `layers[]` entry describes the ABSENCE of a check | trace, the Workflow call's `args.layers` | The 2.3.0 failure. A `layers[]` entry whose description says "no validation exists" means the orchestrator is still reading a stale contract. On a fixture with nothing validating the path the correct dispatch is `layers: []` with `layersSearched` naming what was read |
 
 `integration-cap` is the probe case deliberately: it is the single biggest
 shortfall, and 2.4.0's changes are aimed straight at the mechanism that was losing
-it.
+it. The full history of each correction is in [tests/README.md](tests/README.md)
+under "The 2.4.0 probe"; this table is the operational version.
 
 ### 2.2 The sweep
 

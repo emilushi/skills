@@ -194,6 +194,15 @@ run_mutation "the brocard gate machinery is reintroduced" "L2" \
   'perl -0pi -e "s/const MAX_LAYERS = 4/const BROCARD_SCHEMA = { type: 0 }\nconst MAX_LAYERS = 4/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/coverage.test.mjs"'
 
+# `baseDir` shape, added 2.5.1 after it was measured as the largest single source
+# of variance: two of three sweep runs on identical input passed the target repo's
+# path, every reference read 404'd, and they scored 0.000 and 0.333 against the
+# third's 1.000. The failure is invisible without this guard — an agent that
+# cannot open its reference file does not error, it answers from memory.
+run_mutation "any baseDir shape is accepted again" "L2" \
+  'perl -0pi -e "s/if \\(base && !shaped\\)/if (false)/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/args.test.mjs"'
+
 run_mutation "gate infers PAYLOAD_REACHES_SINK instead of reading it" "L2" \
   'perl -0pi -e "s/passed\.length !== attemptedLayers/false/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/gate.test.mjs"'

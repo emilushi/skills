@@ -1134,8 +1134,40 @@ grader fix, so it is left for a decision rather than folded into this one.
 
 ### The online suite: one case, authored 2026-08-07, NOT YET MEASURED
 
-**Status: authored, invariants green, never run.** This suite has no number
-attached to it and must not be quoted as if it had. The rule this file states
+**Status: RUN ONCE, and it does not discriminate. Not admitted.** $11.51, 47 min,
+n=3 both arms, 2026-08-07:
+
+| | with | without | delta |
+|---|---|---|---|
+| as scored | 0.889 | **1.000** | **−0.111** |
+| after removing a defective grader | 1.000 | 1.000 | 0.000 |
+
+**Both arms got it right in all six runs.** Every run went online, found
+`GHSA-mf9w-mj56-hr94`, and correctly said not to file. A plain session with
+WebFetch does that as well as the plugin does, so the case measures nothing about
+fp-check — which is what "prove it discriminates at n=3 before admitting it" is
+for, and this is the third case in this suite's history to fail that test.
+
+**The −0.111 was a grader defect, and it was mine.** `actually-went-online`
+required `WebFetch` ≥ 1. Two with-plugin runs went online through `Bash`
+(`gh`/`curl`) instead and were failed for it — the grader measured TOOL CHOICE,
+not behaviour. Trace tool counts: with/run1 `{Bash: 10}`, with/run3 `{Bash: 2}`,
+against with/run2 `{Bash: 4, WebFetch: 2, WebSearch: 1}`. Removed; the reasoning
+is in the case file where the grader used to be.
+
+**What that leaves uncovered.** The advisory was published 2026-04-19, inside some
+training data, so an identifier *can* arrive from memory rather than a lookup.
+`tool_used` names one tool and cannot express "any network call", so nothing now
+closes that hole. The case still works as a regression check — the GHSA id cannot
+be guessed — but not as an ablation.
+
+**To make it discriminate**, the finding has to be one a plain session gets wrong:
+an advisory that is genuinely hard to match (different wording, a different
+component name, a chain of superseding advisories), or the inverse case — a
+plausible finding with NO advisory, where the failure mode is calling it a
+duplicate that does not exist. The second is the more valuable and is not written.
+
+The rest of this section describes the case as designed. The rule this file states
 elsewhere applies to it in full — *prove a new case discriminates at n=3 before
 admitting it*; two cases were once admitted on n=1 smoke tests showing +0.60 and
 came in at +0.07 and −0.20.
@@ -1241,6 +1273,113 @@ propagates into every gate downstream of it, and the verdict that comes back is
 about the missing context rather than about the finding. The 2.3.0 probe found a
 validator that forced a dishonest input; this one found a prompt that withheld an
 honest one. Both produced a confident, well-reasoned, wrong verdict.
+
+### Two sweeps, and they agree: +0.213 and +0.208 (2026-08-07/08)
+
+The first time this plugin has been measured twice on comparable code, and the
+first time it has beaten its baseline. **The reproducibility question is answered:
+the two means differ by 0.005.**
+
+| case | 2.5.0 delta | 2.5.1 delta | move |
+|---|---|---|---|
+| blocked-attack-path | +0.733 | +0.733 | — |
+| integration-cap | +0.111 | **+0.389** | **+0.278** |
+| already-fixed | +0.444 | +0.333 | −0.111 |
+| dead-route | +0.200 | 0.000 | −0.200 |
+| inflated-impact | 0.000 | 0.000 | — |
+| should-not-fire | 0.000 | 0.000 | — |
+| wrong-parameter | 0.000 | 0.000 | — |
+| **7-case mean** | **+0.213** | **+0.208** | −0.005 |
+
+`sweep251`: $42.08, 3.0 h, 42 runs, **zero errored**. `sweep250`: $37.65, 2.6 h,
+4 errored (all `wrong-parameter`, recovered separately at 1.000/1.000).
+
+**Do not quote the CLI's mean for sweep250.** It reported +0.279 because
+`wrong-parameter`'s baseline arm was entirely dead; +0.213 is that suite with the
+case re-run. sweep251's CLI figure (+0.2079) is sound — nothing errored.
+
+**Three of seven cases have a zero delta in both sweeps.** `inflated-impact`,
+`should-not-fire` and `wrong-parameter` score identically in both arms, twice.
+The entire measured signal is four cases, and half of it is
+`blocked-attack-path` alone. That is worth knowing before anyone reads +0.208 as
+a broad result: it is a narrow one, reproduced.
+
+**The `baseDir` guard is visible in the trace, doing its job.** On
+`integration-cap`, run2 dispatched `…/claude-eval-weWmrJ/cwd` — the same mistake
+that scored 0.333 in sweep250 — was rejected five times, retried with the skill
+directory, and scored **1.000**. A silent failure became a loud, recoverable one,
+which is the whole design. The case's with-arm went 0.444 → 0.722.
+
+**What is left on that case is the gateReachability conflict, now on clean
+evidence.** sweep251 run1 had a correct `baseDir` throughout and still failed,
+with the gate agent writing: *"There is no caller of `charge()` anywhere in this
+repository … nothing in the code shown demonstrates an external actor driving the
+rate."* That is `rootCause: integration` and `gateReachability` contradicting each
+other by construction, with no missing file and no brocard to blame. It is the
+one remaining known cause of variance on this case.
+
+### The variance was `baseDir`, and it had no test (2026-08-07)
+
+`integration-cap` scored **0.000 / 0.333 / 1.000** on three sweep runs of
+identical input. Reading the three journals side by side found the divergence,
+and it is not where three probes had been looking.
+
+| | run1 (0.000) | run2 (0.333) | run3 (1.000) |
+|---|---|---|---|
+| `baseDir` dispatched | the eval's `cwd` | the eval's `cwd` | **the plugin cache** |
+| Impact agent | `VERIFIED, Medium, integration` | `VERIFIED, Medium, integration` | `VERIFIED, Medium, integration` |
+| Six gates | never returned | Reachability + RealImpact **FAIL** | **all six PASS** |
+| Status | workflow never completed | `FALSE_POSITIVE` | `TRUE_POSITIVE`, Medium |
+
+**The impact agent was right 3 times out of 3.** The severity cap this case is
+named for produced `Medium / integration` in every run. What differed was whether
+the agents downstream of it could open a file.
+
+Runs 1 and 2 pointed `baseDir` at the target repository, so every read under
+`${baseDir}/references/` 404'd. Measured in the journals, not inferred: run2's
+impact agent got *"File does not exist"* for `dismissal-grounds.md`,
+`bug-class-verification.md` and `checkpoints.md`, then searched the filesystem and
+found nothing. Its gate agent then `cat`-ed `false-positive-patterns.md` and
+`dismissal-grounds.md`, got exit 1 for both, and failed `gateReachability` and
+`gateRealImpact`. The file it could not read is the one that says in terms: *"the
+trigger comes from outside this repository is an external precondition to state
+and a severity to cap — not a reason the bug is imaginary."*
+
+Run 1 stacked a second failure on the same cause: it passed the three
+non-validating functions AS layers, which tripped `layers.length >= 3` into the
+`deep` route (11 agents), and its agents then spent minutes on filesystem-wide
+searches for the missing references. Three were killed on timeout. It answered
+*"Waiting for the stage-1 triage result to come back"* with a correct impact
+verdict already sitting in its own journal.
+
+**This was known gap #5 in the handoff** — *"`baseDir` is model-supplied and
+nothing validates it… a wrong value still fails silently"* — carried as a nice-to-have
+for weeks. It is the largest single source of measured variance in this plugin,
+and `missingArgs` validated twelve fields without validating the one that decides
+whether any agent can read anything.
+
+Fixed in 2.5.1: all three workflows check the SHAPE — an absolute path ending in
+`skills/fp-check`. A workflow has no filesystem access so existence cannot be
+checked, but shape is exactly what the two failing dispatches got wrong. Covered
+by `tests/args.test.mjs` and one mutation.
+
+**Two things this does not fix**, both recorded so they are not rediscovered:
+
+- **The orchestrator does not reliably block on the workflow.** Runs 1 and 2 ended
+  their turns while Stage 1 was still running. Run 3 is the only one that called
+  `TaskOutput(block: true)` — and it found that by way of `ToolSearch`. That
+  belongs in SKILL.md, not in the model's luck.
+- **`names-the-integration-root-cause` missed a correct answer.** Run 2 wrote
+  *"requires that external, out-of-scope system to already be compromised"*; the
+  pattern's branch 5 needs `external` adjacent to `service|system|failure|party`
+  and the comma in `external, out-of-scope system` is not in its separator class.
+  One of run2's lost points is phrasing, not reasoning.
+
+**Write the regex-literal rule down while you are here.** The first version of the
+`baseDir` guard used one. `test_workflow_contract.py` lexes these scripts and
+deliberately REJECTS a regex literal rather than risk mis-lexing it, so 51 of its
+tests went red on unmutated code and took 27 mutations with them — a mutation
+whose baseline is red proves nothing. Use string methods in workflow scripts.
 
 ### 2.5.0 removed the brocard pre-gate, and integration-cap passed (2026-08-07)
 
@@ -1417,8 +1556,8 @@ that land before review-poc is dispatched.
 the suite to go red. Anything that survives is testing the model, not the
 plugin. It fails if zero mutations run.
 
-Last run, after 2.5.0 removed the brocard pre-gate: **128 run, 0 survived, 0
-stale, 12 deferred** (140 total). Two of those are new and both guard the removal
+Last run, after 2.5.1 added the `baseDir` shape guard: **129 run, 0 survived, 0
+stale, 12 deferred** (141 total). Two of those are new and both guard the removal
 rather than the machinery: one breaks the `dismissal-grounds.md` reference in the
 impact prompt (a removal that loses the content is not what was decided, and a
 dangling reference is invisible until an agent reports the file missing), the
