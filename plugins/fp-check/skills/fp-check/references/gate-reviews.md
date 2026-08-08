@@ -11,7 +11,7 @@ be the copy that decides.
 | Gate | Passes when |
 |------|-------------|
 | 1 Process | every stage produced concrete evidence, not assertion |
-| 2 Reachability | attacker-controlled data reaches the sink **through a path a real caller can drive** |
+| 2 Reachability | **attacker-controlled data reaches the sink through a path a real caller can drive**. On a finding whose root cause is *integration* or *external* the first half is dropped and only the path is judged — 2.4b has already established that the value comes from outside, and it is priced there as a severity cap, so failing this gate on it would charge it twice |
 | 3 Real Impact | RCE, privilege escalation or information disclosure — not operational robustness, and not a defence-in-depth failure behind intact primary controls |
 | 4 PoC Validation | the attack path is demonstrated end to end |
 | 5 Math Bounds | the algebra permits the vulnerable condition. `N/A` when it is not a bounds or arithmetic finding |

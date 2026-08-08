@@ -1153,6 +1153,16 @@ function capSeverity(severity, rootCause, classification) {
 
 phase('Verdict')
 
+// Gate 2 is stated TWICE below, under one `impact.rootCause` conditional, and the
+// duplication is the point. 2.6.0 rewrote the criterion to be about the PATH only,
+// so that an integration finding could stop being charged for its external trigger
+// twice — but it rewrote it for every finding, and `decideVerdict` branches on the
+// enum alone, so the trust-of-source requirement left the pipeline entirely.
+// Checkpoint 2.4b does NOT answer it for an internal root cause: 2.4b asks whether
+// the trigger comes from outside this repository, not whether the value at the sink
+// is attacker-controlled. `internal` therefore keeps the pre-2.6.0 wording, which
+// is the one every measured false positive was caught by; the relaxation applies
+// only where the premise it relies on is actually established.
 const verdictAgent = await agent(
   `The adversarial pass, then the six gates. Everything below was established by
 agents that each saw one narrow question; you are the first to see all of it.
@@ -1189,10 +1199,21 @@ rather than in a reference file on purpose: they used to be in both, and a gate
 criterion that exists in two places is one an agent can read the stale copy of.
 
   gateProcess         every stage above produced concrete evidence, not assertion
-  gateReachability    attacker-controlled data reaches the sink through a path a
+  gateReachability    ${impact.rootCause === 'internal' ? `attacker-controlled data reaches the sink through a path a
                       real caller can drive. A demonstration that constructs
                       state no real caller could reach does NOT pass this gate,
-                      however genuine the sink is
+                      however genuine the sink is. Neither does a value no
+                      attacker can influence: a compile-time constant, a value
+                      only a trusted installer or operator sets, a field this
+                      repository itself computes. Trust boundary confusion is
+                      item 6 of the checklist above and this gate is where it is
+                      priced` : `the sink is reached through a path a real caller can drive.
+                      A demonstration that constructs state no real caller could
+                      reach does NOT pass this gate, however genuine the sink is.
+                      This gate is about the PATH. Where the tainted VALUE
+                      originates is the question checkpoint 2.4b asks, and for
+                      THIS finding it is answered above, under Root cause: the
+                      value originates outside this repository`}
   gateRealImpact      RCE, privilege escalation or information disclosure —
                       distinguished from operational robustness, and from a
                       defense-in-depth failure behind intact primary controls
@@ -1204,7 +1225,28 @@ criterion that exists in two places is one an agent can read the stale copy of.
   gateEnvironment     no compiler, runtime, OS or framework protection prevents
                       exploitation ENTIRELY. Raising the bar is not preventing
 
-Put anything you could not resolve with the evidence at hand into
+${impact.rootCause === 'internal' ? '' : `The root cause of this finding is ${impact.rootCause}: the trigger originates outside
+this repository BY CONSTRUCTION. The precondition is stated — ${impact.externalPrecondition} —
+and the severity is already capped at ${capped.severity} because of it.
+
+Do NOT fail gateReachability, gateRealImpact or gatePocValidation on the ground
+that the trigger comes from outside this repository, or that no in-repo caller
+supplies the value. That is the premise this finding was accepted under and it has
+been priced once already, in the cap. Failing a gate on it prices it twice, and the
+second charge cancels the first.
+
+Judge the three GIVEN that precondition. gateReachability fails only if the in-repo
+segment is broken: a check between the entry point and the sink that the stated
+precondition does not defeat, or no path at all from that entry point to the sink.
+The absence of an in-repo caller is that same external premise restated, not a
+second ground — the caller is outside this repository BY CONSTRUCTION, so searching
+for it in here will always come up empty, and a gate that fails on the empty result
+is the double charge again under another name.
+gateRealImpact fails only if what survives is operational robustness rather than a
+security consequence. gatePocValidation fails only if the traced path has a gap in
+it.
+
+`}Put anything you could not resolve with the evidence at hand into
 unresolvedUncertainty, and leave it empty when there is nothing. An honest
 "unresolved" routes this to NEEDS MORE INFO, which is a supported outcome; a
 guess dressed as a verdict is not.

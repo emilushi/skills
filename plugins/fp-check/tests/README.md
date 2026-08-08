@@ -1274,6 +1274,195 @@ about the missing context rather than about the finding. The 2.3.0 probe found a
 validator that forced a dishonest input; this one found a prompt that withheld an
 honest one. Both produced a confident, well-reasoned, wrong verdict.
 
+### Third sweep, 2.6.0: +0.267, and read the with-arm not the delta (2026-08-08)
+
+$52.43, 3h40m, **42/42 runs, zero errored** — the cleanest sweep this suite has
+produced. Three sweeps now exist on comparable code: **+0.213, +0.208, +0.267.**
+
+| case | 2.6.0 with | 2.6.0 without | delta | 2.5.1 delta |
+|---|---|---|---|---|
+| already-fixed | **1.000** | 0.500 | +0.500 | +0.333 |
+| blocked-attack-path | 0.800 | 0.133 | +0.667 | +0.733 |
+| dead-route | 0.800 | 0.600 | +0.200 | 0.000 |
+| inflated-impact | 0.833 | 1.000 | **−0.167** | 0.000 |
+| integration-cap | **1.000** | 0.333 | +0.667 | +0.389 |
+| should-not-fire | 1.000 | 1.000 | 0.000 | 0.000 |
+| wrong-parameter | 1.000 | 1.000 | 0.000 | 0.000 |
+| **mean** | **0.919** | **0.652** | **+0.267** | +0.208 |
+
+**The delta gain is mostly baseline noise, and saying so is the point.** The
+with-arm moved 0.908 → 0.919, which is +0.011. The without-arm fell 0.700 → 0.652,
+and the without-arm does not load the plugin — that 0.048 is n=3 variance and it
+supplies four fifths of the headline improvement. `dead-route`'s entire +0.200
+"gain" is baseline: its with-arm is 0.800 in both sweeps and only the baseline
+moved.
+
+**Quote the with-arm when asking whether the plugin got better.** Across the three
+sweeps it is 0.868 → 0.908 → 0.919: a real, modest, monotone improvement, and a
+much smaller claim than the deltas suggest.
+
+**The per-case gates finally moved, and then swapped.**
+
+| gate | 2.5.1 | 2.6.0 |
+|---|---|---|
+| `already-fixed` 3/3 | ❌ 0.833 | ✅ **1.000** |
+| `integration-cap` 3/3 | ❌ 0.722 | ✅ **1.000** |
+| `blocked-attack-path` 3/3 | ✅ 1.000 | ❌ **0.800** |
+
+Still 2 of 3, by a different two. At n=3 a single run moves a case by 0.333, so
+this is as consistent with shuffling as with progress — which is the argument for
+n≥5 on the three gate cases specifically rather than n=3 on all seven.
+
+**The relaxation did not cause under-firing, checked three ways.**
+`should-not-fire` is 1.000/1.000, 3/3 in both arms. And both with-arm losses fail
+in the OPPOSITE direction — the plugin rejecting too hard:
+
+- `blocked-attack-path`'s 0.4 run called the finding not exploitable and cited the
+  blocking layer (both correct, both graders passed), then volunteered *"would be
+  dangerous for any other caller that bypasses handle_search"* — an unevidenced
+  alternative entry point, which that grader fails by design.
+- `inflated-impact`'s 0.5 run returned FALSE_POSITIVE on a bug the grader says
+  "must not be dismissed", while its two supporting graders both passed. The
+  analysis was right and the verdict label was too strong.
+
+**`inflated-impact` is now NEGATIVE (−0.167)** — the first case where the plugin
+scores below the no-plugin baseline. One run of three, and the failure is the
+verdict label rather than the reasoning, but it is a real regression to watch: a
+plugin that turns a correct downgrade into a dismissal is doing the thing this
+whole skill exists to prevent.
+
+**Harness note.** The first launch of this sweep was killed at 62 minutes with no
+JSON written — roughly 15 runs' spend, unrecoverable, because the CLI writes
+results only at the end. A long sweep should be started detached
+(`start_new_session=True`) so a harness timeout cannot reap it.
+
+### 2.6.0: the gate stopped pricing the external precondition twice (2026-08-08)
+
+The last known cause of variance on `integration-cap`, fixed after two sweeps
+isolated it on independent evidence.
+
+**The conflict.** `rootCause: integration` means the trigger originates OUTSIDE
+the repository by construction — that is the definition. `gateReachability` as
+prompted opened with *"attacker-controlled data reaches the sink"*, which imports
+checkpoint 2.4b's question (where does the tainted VALUE come from?) into Gate 2's
+slot (is the PATH drivable?) and answers it with a binary instrument. So the same
+fact was priced twice: once as a Medium cap, and again as a dismissal — and the
+second charge cancelled the first.
+
+Traced twice, with different upstream causes, which is what made it structural
+rather than a bad roll:
+
+- sweep250, probe 3: a brocard fed the gate agent an unanswerable trust-boundary
+  question and it failed three gates on it.
+- sweep251 run1: **no brocards, correct `baseDir`, nothing missing** — and the gate
+  agent still wrote *"There is no caller of `charge()` anywhere in this repository
+  … nothing in the code shown demonstrates an external actor driving the rate."*
+
+**Why not the obvious fix.** Passing the root cause and precondition into the gate
+prompt was already done — lines interpolating `Root cause:`, the external
+precondition and `Severity after the caps:` have been there for versions. The
+traced FAIL happened with all three facts in front of the agent. **The missing
+thing was the rule, not the context.**
+
+**The change.** Gate 2's criterion is now written twice, under the same
+`impact.rootCause` conditional. On a non-internal root cause it drops
+"attacker-controlled data reaches the sink" and asks only whether the path is
+drivable, saying that value provenance is 2.4b's question and that for this
+finding 2.4b answered it — the value comes from outside the repository. Then a
+paragraph that exists ONLY when the root cause is not internal tells the agent not
+to fail gateReachability, gateRealImpact or gatePocValidation on the ground that
+the trigger is external — naming all three, because all three failed on that one
+sentence in the trace and `decideVerdict` needs only one FAIL.
+
+**The criterion has to be conditional too, and the first cut of this made it
+unconditional.** Only the paragraph was scoped; the criterion was rewritten for
+every finding, and its assertion that provenance "has already been answered above,
+under Root cause" is simply false for `rootCause: internal` — 2.4b asks whether the
+TRIGGER originates outside this repository, not whether the value at the sink is
+attacker-controlled. `decideVerdict` branches on the six enums alone, so with the
+requirement gone from the one gate that carried it, nothing in code carried it at
+all: an internal finding whose sink takes a value only the developer sets — the
+canonical trust-boundary false positive, item 6 of the checklist — could reach
+TRUE_POSITIVE at High, with `capSeverity` and `missingPrecondition` both silent
+because both key off a non-internal root cause. `internal` therefore keeps the
+pre-2.6.0 wording verbatim, plus a naming of the values that are not attacker
+influenced. `coverage.test.mjs` asserts both criteria, and the mutation that
+un-conditionalises the root-cause ternaries reddens on it.
+
+**A prohibition is worth only what the rule under it allows.** The first draft of
+that paragraph closed with a positive rule listing *"or has no caller at all"* as a
+permitted `gateReachability` FAIL — the ground it had just forbidden, restated as an
+affirmative licence, and the licence is the half an agent acts on. It matched the
+sweep251 trace word for word, and `charge()` really does have zero in-repo callers
+in the fixture (`evals/integration-cap/scaffold.sh` names the order pipeline as its
+caller and does not create it), so the n=3 at 1.000 below was three samples against
+a sentence that still permitted the failure. The rule now says the in-repo segment
+fails only on a check the precondition does not defeat, or no path from the entry
+point to the sink, and names the missing caller as the premise rather than a second
+ground. `coverage.test.mjs` asserts both halves and `mutation-gate.sh` puts the
+licence back to prove the assertion bites.
+
+**It does make a false positive marginally easier to report, and that is
+deliberate.** One dismissal ground is removed from three gates, and from Gate 2's
+criterion, **for findings that already carry a non-internal root cause** — an
+internal one sees neither. The weakening is bounded by three
+PRE-EXISTING code gates, not by prose:
+
+| Bound | What it guarantees |
+|---|---|
+| `decideGate` | a `PAYLOAD_STOPPED_HERE` layer returns NOT_EXPLOITABLE before the impact agent — the canonical FP never reaches the gate agent |
+| `missingPrecondition` | a non-internal root cause with a blank precondition returns NEEDS_MORE_INFO first, so **the paragraph cannot appear without a stated precondition** |
+| `capSeverity` | the ceiling is Medium, in code; the relaxation cannot produce a High or Critical |
+
+Against that, leaving it preserved a measured structural FALSE NEGATIVE: the whole
+apparatus built for this class — 2.4b, `missingPrecondition`, `capSeverity` — could
+never reach a verdict.
+
+`tests/coverage.test.mjs` asserts both directions, and **the negative half is the
+load-bearing one**: on an internal root cause the prohibition must NOT appear, or
+the relaxation leaks onto every finding, including the internal ones where all the
+measured delta lives.
+
+**Measured, n=3 both arms, $13.63:** `integration-cap` went **with 0.833 /
+without 0.333, delta +0.500** — two of three runs at a clean 1.000. The
+trajectory across the three fixes on this one case:
+
+| version | with-arm | delta | what changed |
+|---|---|---|---|
+| 2.5.0 | 0.444 | +0.111 | brocard pre-gate removed |
+| 2.5.1 | 0.722 | +0.389 | `baseDir` shape guard |
+| 2.6.0 | **0.833** | **+0.500** | external-precondition prohibition |
+
+The remaining failure is a DIFFERENT mechanism and probably a case-design
+ambiguity rather than a defect: run3 stopped at the scope gate with the
+threat-model agent returning `inScope: NO`, reading the third-party rate *service*
+as outside a declared scope of *"the billing service and the rate client it
+calls"*. That is a defensible reading of the prompt. Either the scope sentence
+should say whether the upstream service is in or out, or the case should accept
+both answers. **Do not "fix" it in the plugin** — it is the prompt that is
+ambiguous.
+
+**This does not give a new 7-case mean.** Substituting this number into sweep251's
+other six would suggest roughly +0.22, and that is an ESTIMATE across two runs on
+different days, not a measurement. The per-case gate of 3/3 is still not met
+(0.833). A full sweep is what settles both.
+
+**Not folded in, flagged instead.** `gateRealImpact` excludes "a defence-in-depth
+failure behind intact primary controls", and `classification: hardening_gap` is on
+a literal reading exactly that — while `capSeverity` caps it at Medium and treats
+it as live. That is a second conflict of identical shape on a different field. It
+has never been isolated by a probe the way this one was, and two relaxations in one
+change is how a bound stops being a bound.
+
+**Two mutation-gate traps, both hit while writing this.** A `perl s///` without
+`/g` matched an EARLIER `impact.rootCause === 'internal'` — so the mutation edited
+a different conditional, the bound stayed correct, and it SURVIVED while appearing
+to test it. And an apostrophe inside a NESTED template literal desynchronises the
+Python contract lexer: `finding's` there produced "unbalanced parentheses" and
+failed three contract tests. Both are the same class as the regex-literal trap
+below: workflow scripts are lexed by a hand-written parser, so avoid regex
+literals, and avoid apostrophes inside nested templates.
+
 ### Two sweeps, and they agree: +0.213 and +0.208 (2026-08-07/08)
 
 The first time this plugin has been measured twice on comparable code, and the
@@ -1550,14 +1739,97 @@ output under `-p` is grading a killed run** — so the severity band, the
 confidence band and the report are not measurable this way, only the statuses
 that land before review-poc is dispatched.
 
+## Ablation isolation, and what c-review's container was actually for
+
+**The baseline arm is clean, and that is now verified rather than assumed.** Read
+out of sweep251's own traces, all 42 runs:
+
+| arm | plugins | skills |
+|---|---|---|
+| `with` | exactly one — `fp-check`, from the install cache | 18 |
+| `without` | **`[]`** | 14 |
+
+The 14 are Claude Code's built-ins; the 4 extra are fp-check's own. No
+`concept-prover`, no `contrarian`, nothing else installed on the machine. Every
+delta this suite has ever reported rests on that being true, and nothing checked
+it until now.
+
+**Why it was worth checking.** c-review's bench harness
+(`tools/c-review-bench/` in the `skills` repo) hit the opposite. Its own session
+records showed **20 plugins and 48 skills** reaching the driving session and all
+eight subagents — including `c-review`'s own skill leaking into the arm that was
+supposed to be *without* it, plus a foreign `SessionStart` hook from an unrelated
+plugin firing four times and injecting its stdout into the context. That voided a
+real run. Their fix is a Docker container with a pinned `hermetic-settings.json`
+and a hard runtime check that refuses to start unless exactly one plugin is
+loaded.
+
+**We do not need the container.** `claude plugin eval` scopes plugins per arm
+already. What was worth taking is the assertion, which is now
+`check_ablation_isolation` in `validate_eval_result.py`: it reads every
+`"subtype":"init"` record in each run's `tracePath` and fails if the no-plugin
+arm loaded anything, or the plugin arm loaded other than exactly one.
+
+**It checks skills too, and for a while it did not — which made it weaker than
+the failure it was written for.** c-review's void was a *skill* leak, and the
+first version of this check collected the skill names and then only looked at
+`plugins`. That is not the same check: a skill reaches a session from
+`~/.claude/skills` or from a plugin installed globally rather than by the eval,
+with `plugins` still `[]`. A baseline holding `fp-check:fp-check` passed as
+"verified". Now every skill whose `<plugin>:` namespace is not a plugin *that
+arm* loaded is a failure; Claude Code's built-ins are bare names and own no
+namespace, so the 14 in the baseline still pass. Reading every init record
+rather than the first matters for the same reason — a run that dispatches
+subagents has one per session, and those subagent sessions are the other half of
+what c-review measured.
+
+**It reports UNVERIFIED rather than passing when no trace survives.** Without
+`--keep-temp` the temp dir is deleted, which is a legitimate state and not a pass.
+Conflating "we checked and it was clean" with "we could not check" is the single
+mistake this file exists to prevent, so the two print differently and the count
+of inspected sessions is stated.
+
+**Per arm, and both of them, or it is not verified.** The count started as one
+scalar total, which let the same conflation back in: traces are reaped per temp
+dir, so a `with` arm keeping one while the baseline's went is an ordinary state,
+and any surviving record read as proof. That printed `isolation verified on 1
+session(s)` for an ablation whose no-plugin arm — the only arm this check exists
+to police — was never opened, and a contaminated baseline in that run was
+reported as clean. `check_ablation_isolation` now returns a `Counter` over the
+two arm classes and the caller says UNVERIFIED unless both are non-zero, naming
+the arm that went unread.
+
+**Their other lesson is the one to copy if context is the worry.** c-review turns
+11.4 MB of transcripts and a 236 KB result set into a **7.7 KB `REPORT.md`** with a
+Python scorer, and no agent ever reads a transcript. That is the same architecture
+`validate_eval_result.py` already has, and it is why a sweep here can be analysed
+without the JSON entering anyone's context. The container was never the answer to
+that; the scorer was.
+
+**What their container does NOT buy**, and is worth knowing before anyone proposes
+it here: their base image floats (`debian:bookworm-slim`), Claude Code is installed
+unpinned via `curl | bash`, and the plugin version is whatever is in the mounted
+tree. Their own README records two runs of the same configuration scoring **15/17
+and 11/17**. No container fixes reviewer variance — only repeats do, which is what
+`--runs 3` is for. Their image also has no Go toolchain, and two of these cases
+scaffold Go.
+
 ## The gate
 
 `mutation-gate.sh` breaks each covered behaviour in a sandbox copy and requires
 the suite to go red. Anything that survives is testing the model, not the
 plugin. It fails if zero mutations run.
 
-Last run, after 2.5.1 added the `baseDir` shape guard: **129 run, 0 survived, 0
-stale, 12 deferred** (141 total). Two of those are new and both guard the removal
+Last run, after 2.6.1's review/fix loop: **136 run, 0 survived, 0 stale, 12
+deferred** (148 total). Four of the new entries came from that loop, and one of
+them was a mutation THAT DID NOT MATCH — the baseline-contamination pattern had
+gone stale, so the gate exited 1 on unmutated code. A mutation whose pattern
+misses is the same failure as a test that cannot fail.
+
+**Run it with nothing else going.** One run this week stalled ~25 minutes on a
+single `node --test` that burned 53 minutes of CPU; the same mutation was caught in
+60 seconds in isolation. Contention, not a defect — the same trap the table above
+records for running the gate during a sweep. Two of those are new and both guard the removal
 rather than the machinery: one breaks the `dismissal-grounds.md` reference in the
 impact prompt (a removal that loses the content is not what was decided, and a
 dangling reference is invisible until an agent reports the file missing), the

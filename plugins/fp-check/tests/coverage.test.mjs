@@ -264,6 +264,93 @@ test('[concept-prover] a path with NO validation reaches the impact agent, and t
   assert.match(promptFor(r, 'impact'), /declared this rather than any agent verifying it/)
 })
 
+// The conflict two sweeps measured, and the assertion that bounds its fix.
+//
+// `rootCause: integration` means the trigger originates OUTSIDE the repository by
+// construction. `gateReachability` as prompted demanded it be traced INSIDE it, so
+// every integration finding failed the six-gate review on principle — and the
+// Medium that `capSeverity` had already produced was discarded into a
+// FALSE_POSITIVE. Traced twice: once with a brocard feeding the gate agent an
+// unanswerable question, and again on sweep251 run1 with a correct baseDir, no
+// brocards, and the gate agent writing "nothing in the code shown demonstrates an
+// external actor driving the rate".
+//
+// The fix is a prohibition in the gate prompt, and the SECOND half of this test is
+// the load-bearing one: it is the code-side proof that the relaxation is scoped to
+// non-internal root causes. An unconditional prohibition would weaken the gate for
+// every finding, including the internal ones where all the measured evidence lives.
+test('[concept-prover] the external-precondition prohibition reaches the gate agent, and only there', async () => {
+  const integration = await runScript('triage-static.js', {
+    args: standardArgs(),
+    agents: staticAgents({
+      impact: {
+        ...IMPACT_INTERNAL,
+        severity: 'Critical',
+        rootCause: 'integration',
+        externalPrecondition: 'the rate service returns a negative rate',
+      },
+    }),
+  })
+  const gates = promptFor(integration, 'gates')
+  assert.match(gates, /Do NOT fail gateReachability, gateRealImpact or gatePocValidation/)
+  assert.match(gates, /the rate service returns a negative rate/, 'the precondition is quoted, not summarised')
+  assert.match(gates, /priced once already/, 'the reason has to reach the agent, not just the instruction')
+
+  // The prohibition and the positive rule that follows it have to agree. The
+  // first draft forbade failing on "no in-repo caller supplies the value" and
+  // then, six lines later, listed "or has no caller at all" as a permitted FAIL
+  // ground — the same fact, restated as an affirmative licence, which is the one
+  // an agent acts on. That is verbatim the sweep251 run1 trace this whole change
+  // exists to close: "There is no caller of charge() anywhere in this repository".
+  // charge() genuinely has zero in-repo callers in the fixture (evals/
+  // integration-cap/scaffold.sh documents the order pipeline as its caller and
+  // does not create it), so the licence was reachable, not theoretical.
+  assert.ok(
+    !/has no caller at all/.test(gates),
+    'the positive rule re-licenses the exact FAIL ground the paragraph above it forbids',
+  )
+  assert.match(
+    gates,
+    /absence of an in-repo caller is that same external premise restated/,
+    'the no-caller ground has to be closed explicitly, not merely left unmentioned',
+  )
+
+  // And the cap is still what it was: the prohibition changes which gates may
+  // fail, never the severity ceiling.
+  assert.equal(integration.result.severity, 'Medium')
+
+  // The bound. IMPACT_INTERNAL is `rootCause: internal`, and nothing about those
+  // findings changes.
+  const internal = await runScript('triage-static.js', { args: standardArgs(), agents: staticAgents() })
+  assert.ok(
+    !/Do NOT fail gateReachability/.test(promptFor(internal, 'gates')),
+    'the prohibition leaked onto an internal-root-cause finding, which weakens the gate everywhere',
+  )
+
+  // The other half of the same bound, and the one the first cut of 2.6.0 missed.
+  // The prohibition paragraph was conditional; the GATE 2 CRITERION was not. It
+  // dropped "attacker-controlled data reaches the sink" for every finding and
+  // asserted that value provenance "has already been answered above, under Root
+  // cause" — which is false for `internal`: 2.4b asks where the TRIGGER comes
+  // from, not whether the value at the sink is attacker-controlled. Nothing in
+  // code replaced it (`decideVerdict` reads the enum only), so an internal
+  // finding whose sink takes a developer-set constant had no gate left to fail.
+  assert.match(
+    promptFor(internal, 'gates'),
+    /attacker-controlled data reaches the sink/,
+    'gate 2 stopped requiring attacker control on an internal root cause, and no code gate carries it',
+  )
+  assert.ok(
+    !/answered above, under Root cause/.test(promptFor(internal, 'gates')),
+    'an internal root cause is told provenance was already settled by 2.4b, which 2.4b does not settle',
+  )
+  // ...and the relaxed half really is the one an integration finding gets.
+  assert.ok(
+    !/attacker-controlled data reaches the sink/.test(gates),
+    'the relaxation never reached the criterion, so gate 2 still charges the external premise twice',
+  )
+})
+
 test('[concept-prover] the upstream-fix retraction decides, and needs a reference', async () => {
   const fixed = await runScript('triage-static.js', {
     args: standardArgs(),

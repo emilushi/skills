@@ -48,6 +48,16 @@ def real() -> dict:
     return json.loads(REAL_RESULT.read_text())
 
 
+def validator():
+    """The validator module, loaded from the script it actually ships as."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("validate_eval_result", VALIDATOR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def case_suites() -> dict[str, set[str]]:
     """`CASE_SUITES` as the validator actually defines it.
 
@@ -144,6 +154,306 @@ def test_an_unrecognised_case_is_reported_rather_than_ignored(tmp_path: Path, pa
     proc = run_validator(passing, tmp_path)
     assert proc.returncode == 1
     assert "some-case-nobody-registered" in proc.stderr
+
+
+def _trace(tmp_path: Path, name: str, plugins: list[dict], skills: list[str] | None = None) -> str:
+    """A minimal trace file carrying one session-init record.
+
+    `skills` is a flat list of names, which is the shape a real init record has —
+    see fixtures/run.stream.jsonl. Built-ins are bare, plugin skills namespaced.
+    """
+    return _multi_init_trace(tmp_path, name, [(plugins, skills or [])])
+
+
+def _multi_init_trace(tmp_path: Path, name: str, sessions: list[tuple]) -> str:
+    """A trace carrying one init record per session, as a run with subagents has."""
+    path = tmp_path / f"{name}.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps({"type": "system", "subtype": "init", "plugins": p, "skills": s}) + "\n"
+            for p, s in sessions
+        )
+    )
+    return str(path)
+
+
+def _one_case(with_trace: str, without_trace: str) -> dict:
+    return {
+        "cases": [
+            {
+                "name": "c",
+                "arms": {
+                    "with": [{"tracePath": with_trace}],
+                    "without": [{"tracePath": without_trace}],
+                },
+            }
+        ]
+    }
+
+
+def isolation(result: dict) -> tuple[int, list[str]]:
+    """Total sessions inspected, for the cases that only care how many there were.
+
+    The per-arm breakdown the validator actually returns is asserted directly by
+    `test_the_inspected_sessions_are_counted_per_arm`; summing here keeps the
+    older cases reading as the session counts they were written as.
+    """
+    counts, problems = isolation_counts(result)
+    return sum(counts.values()), problems
+
+
+def isolation_counts(result: dict) -> tuple[dict, list[str]]:
+    problems: list[str] = []
+    return validator().check_ablation_isolation(result, problems), problems
+
+
+def test_a_case_with_a_null_name_fails_cleanly_rather_than_crashing(tmp_path: Path):
+    """`_get` returns the value of a present key, so `"name": null` is None.
+
+    A set mixing None and str raises TypeError inside `sorted()`, so a malformed
+    result produced a traceback instead of the clean failure message this whole
+    script exists to print. Caught by a type checker, not by any test.
+    """
+    payload = {"partial": False, "cases": [{"name": None}], "aggregates": {"casesTotal": 1}}
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(payload))
+    proc = run_validator(payload, tmp_path)
+    assert proc.returncode == 1, "a malformed result must fail, not crash"
+    assert "Traceback" not in proc.stderr, f"crashed instead of reporting: {proc.stderr}"
+    assert "no known case ran" in proc.stderr
+
+
+def test_a_clean_ablation_passes_isolation(tmp_path: Path):
+    result = _one_case(
+        _trace(tmp_path, "w", [{"name": "fp-check", "version": "2.6.0"}]),
+        _trace(tmp_path, "b", []),
+    )
+    checked, problems = isolation(result)
+    assert checked == 2, "both runs must be inspected"
+    assert problems == []
+
+
+# The failure c-review built a Docker container to prevent: its host cells ran
+# with 20 plugins reaching every arm, including its own skill leaking into the
+# baseline, which voided a real run. `claude plugin eval` scopes plugins already —
+# this is the assertion that proves it still does.
+def test_a_contaminated_baseline_is_rejected(tmp_path: Path):
+    result = _one_case(
+        _trace(tmp_path, "w", [{"name": "fp-check"}]),
+        _trace(tmp_path, "b", [{"name": "concept-prover"}]),
+    )
+    _checked, problems = isolation(result)
+    assert problems, "a baseline arm carrying a plugin must be reported"
+    assert "concept-prover" in problems[0]
+
+
+# The leak c-review actually suffered, and the one the plugins-only check could not
+# see: `plugins` is empty in the baseline — `claude plugin eval` did scope those —
+# while the plugin under test's own SKILL is loaded anyway, from ~/.claude/skills or
+# a globally installed copy. Before this, the run below returned checked=2 with no
+# problems and the CLI printed `isolation verified`, certifying a delta measured
+# against a baseline that had the thing being measured.
+def test_a_baseline_carrying_the_plugins_own_skill_is_rejected(tmp_path: Path):
+    result = _one_case(
+        _trace(tmp_path, "w", [{"name": "fp-check"}], ["fp-check:fp-check"]),
+        _trace(tmp_path, "b", [], ["fp-check:fp-check", "c-review:c-review"]),
+    )
+    _checked, problems = isolation(result)
+    assert problems, "a baseline arm carrying a plugin's skill must be reported"
+    assert "fp-check:fp-check" in problems[0]
+    assert "c-review:c-review" in problems[0]
+
+
+# The other direction, so the skill check cannot be satisfied by rejecting every
+# arm: the baseline legitimately carries Claude Code's built-ins (14 of them in
+# sweep251), which are bare names owned by no plugin.
+def test_builtin_skills_do_not_trip_the_skill_check(tmp_path: Path):
+    builtins = ["deep-research", "dataviz", "code-review", "run"]
+    result = _one_case(
+        _trace(tmp_path, "w", [{"name": "fp-check"}], [*builtins, "fp-check:fp-check"]),
+        _trace(tmp_path, "b", [], builtins),
+    )
+    checked, problems = isolation(result)
+    assert checked == 2
+    assert problems == []
+
+
+def test_the_plugin_arm_rejects_a_foreign_plugins_skill(tmp_path: Path):
+    """One plugin loaded is not enough if a second plugin's skill got in anyway."""
+    result = _one_case(
+        _trace(tmp_path, "w", [{"name": "fp-check"}], ["fp-check:fp-check", "contrarian:x"]),
+        _trace(tmp_path, "b", []),
+    )
+    _checked, problems = isolation(result)
+    assert problems, "a foreign skill in the plugin arm must be reported"
+    assert "contrarian:x" in problems[0]
+
+
+# A run that dispatches subagents writes one init record per session, and the
+# subagent sessions are half of what c-review measured its leak in. The reader used
+# to `break` after the first, so a clean driving session hid every contaminated
+# subagent behind it.
+def test_every_session_in_a_trace_is_inspected_not_just_the_first(tmp_path: Path):
+    result = _one_case(
+        _trace(tmp_path, "w", [{"name": "fp-check"}], ["fp-check:fp-check"]),
+        _multi_init_trace(
+            tmp_path,
+            "b",
+            [([], ["deep-research"]), ([], ["c-review:c-review"])],
+        ),
+    )
+    checked, problems = isolation(result)
+    assert checked == 3, "one record per session, not one per run"
+    assert problems, "a subagent session's leak must be reported"
+    assert "c-review:c-review" in problems[0]
+
+
+def test_a_plugin_arm_with_the_wrong_plugin_count_is_rejected(tmp_path: Path):
+    for plugins in ([], [{"name": "fp-check"}, {"name": "contrarian"}]):
+        result = _one_case(
+            _trace(tmp_path, f"w{len(plugins)}", plugins),
+            _trace(tmp_path, f"b{len(plugins)}", []),
+        )
+        _checked, problems = isolation(result)
+        assert problems, f"plugin arm with {len(plugins)} plugin(s) must be reported"
+
+
+# Absent traces are a legitimate state — without --keep-temp the temp dir is gone.
+# Reporting that as VERIFIED is the conflation this whole file exists to prevent,
+# so the count must be zero and the caller must say so.
+def test_a_missing_trace_is_unverified_not_passed(tmp_path: Path):
+    missing = str(tmp_path / "gone.jsonl")
+    result = {"cases": [{"name": "c", "arms": {"with": [{"tracePath": missing}]}}]}
+    checked, problems = isolation(result)
+    assert checked == 0
+    assert problems == []
+
+
+# The count has to be per arm, because the caller decides "verified" from it and
+# the two arms are not interchangeable: the baseline is the only one this check
+# exists to police. A scalar total made a surviving `with` trace speak for a
+# baseline nobody opened — see the CLI test below.
+def test_the_inspected_sessions_are_counted_per_arm(tmp_path: Path):
+    result = _one_case(
+        _multi_init_trace(
+            tmp_path, "w", [([{"name": "fp-check"}], []), ([{"name": "fp-check"}], [])]
+        ),
+        _trace(tmp_path, "b", []),
+    )
+    counts, problems = isolation_counts(result)
+    assert problems == []
+    assert dict(counts) == {"plugin": 2, "baseline": 1}
+
+
+def test_a_baseline_with_no_surviving_trace_is_not_counted(tmp_path: Path):
+    """The half-reaped sweep: the plugin arm kept a trace, the baseline did not."""
+    result = _one_case(_trace(tmp_path, "w", [{"name": "fp-check"}]), str(tmp_path / "gone.jsonl"))
+    counts, problems = isolation_counts(result)
+    assert problems == [], "a baseline that was never read is unverified, not a failure"
+    assert counts["plugin"] == 1
+    assert counts["baseline"] == 0, "an unread baseline must not borrow the other arm's count"
+
+
+# The tests above call check_ablation_isolation() directly, which leaves the
+# one thing the shipping validator actually runs — the call site in main() — with
+# no coverage at all. Measured: replacing `isolation_checked =
+# check_ablation_isolation(result, problems)` with `isolation_checked = 0` left
+# all of them green, and the mutation-gate entry for this check reddens on the
+# function BODY, which the direct calls still reach. Unwired, the gate would print
+# `ablation isolation NOT verified` on every run forever and report a contaminated
+# baseline as clean. The three tests below go through the CLI, so they are the ones
+# that die if the call is dropped.
+def _point_first_runs_at(case: dict, with_trace: str, without_trace: str) -> None:
+    """Give the first run of each arm a trace that exists.
+
+    Only the first: the remaining runs keep the recorded temp paths, which are
+    long gone, so they are skipped and the verified count is exactly 2. That
+    makes the count itself assertable rather than a function of the fixture.
+    """
+    case["arms"]["with"][0]["tracePath"] = with_trace
+    case["arms"]["without"][0]["tracePath"] = without_trace
+
+
+def test_the_cli_reports_a_contaminated_baseline(tmp_path: Path, passing: dict):
+    """The wiring test: contamination reaches the exit code, not just the helper."""
+    _point_first_runs_at(
+        passing["cases"][0],
+        _trace(tmp_path, "cli-w", [{"name": "fp-check"}]),
+        _trace(tmp_path, "cli-b", [{"name": "concept-prover"}]),
+    )
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 1, f"a contaminated baseline must fail the CLI:\n{proc.stdout}"
+    assert "concept-prover" in proc.stderr
+
+
+def test_the_cli_reports_a_clean_ablation_as_verified(tmp_path: Path, passing: dict):
+    """And the other direction, so the check cannot be satisfied by rejecting all."""
+    _point_first_runs_at(
+        passing["cases"][0],
+        _trace(tmp_path, "ok-w", [{"name": "fp-check"}]),
+        _trace(tmp_path, "ok-b", []),
+    )
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    # "session(s)", not "run(s)": the count is of init records, and a run with
+    # subagents contributes more than one.
+    assert "isolation verified on 2 session(s)" in proc.stdout, proc.stdout
+
+
+def test_the_cli_reports_a_baseline_carrying_the_plugins_skill(tmp_path: Path, passing: dict):
+    """The reviewer's exact case: `plugins: []` in the baseline, the skill loaded anyway.
+
+    This run exited 0 printing `ablation isolation verified` before the skill check
+    existed, so it is the one that must reach the exit code.
+    """
+    _point_first_runs_at(
+        passing["cases"][0],
+        _trace(tmp_path, "skill-w", [{"name": "fp-check"}], ["fp-check:fp-check"]),
+        _trace(tmp_path, "skill-b", [], ["fp-check:fp-check"]),
+    )
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 1, f"a baseline carrying the plugin's skill must fail:\n{proc.stdout}"
+    assert "fp-check:fp-check" in proc.stderr
+
+
+def test_the_cli_says_unverified_when_no_trace_survives(tmp_path: Path, passing: dict):
+    """Without --keep-temp every tracePath is dead, and that must not read as pass."""
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "isolation NOT verified" in proc.stdout, proc.stdout
+
+
+# Half a sweep surviving is the ordinary state, not a contrived one: traces are
+# reaped per temp dir. With a scalar count, `if isolation_checked:` read the one
+# surviving `with` trace as proof and printed `ablation isolation verified on 1
+# session(s)` for an ablation whose no-plugin arm was never opened — measured on
+# this exact payload before the per-arm count. A contaminated baseline in that run
+# is reported as clean.
+def test_the_cli_says_unverified_when_only_the_plugin_arm_has_a_trace(
+    tmp_path: Path, passing: dict
+):
+    passing["cases"][0]["arms"]["with"][0]["tracePath"] = _trace(
+        tmp_path, "half-w", [{"name": "fp-check"}], ["fp-check:fp-check"]
+    )
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "isolation NOT verified" in proc.stdout, proc.stdout
+    # The phrase, not the bare word: the boilerplate that follows says
+    # "a contaminated baseline would not have been detected" on every unread arm,
+    # so asserting `"baseline" in stdout` would hold no matter which arm was read.
+    assert "for the baseline arm(s)" in proc.stdout, "the message must name the unread arm"
+    assert "verified on" not in proc.stdout, proc.stdout
+
+
+def test_the_cli_says_unverified_when_only_the_baseline_arm_has_a_trace(
+    tmp_path: Path, passing: dict
+):
+    """And the mirror: an unread plugin arm means its one-plugin rule went unchecked."""
+    passing["cases"][0]["arms"]["without"][0]["tracePath"] = _trace(tmp_path, "half-b", [])
+    proc = run_validator(passing, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "isolation NOT verified" in proc.stdout, proc.stdout
+    assert "for the plugin arm(s)" in proc.stdout, "the message must name the unread arm"
 
 
 @pytest.fixture

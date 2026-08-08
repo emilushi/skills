@@ -203,6 +203,87 @@ run_mutation "any baseDir shape is accepted again" "L2" \
   'perl -0pi -e "s/if \\(base && !shaped\\)/if (false)/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/args.test.mjs"'
 
+# The external-precondition prohibition, added 2.6.0. Two directions, because the
+# fix is a deliberate, BOUNDED relaxation and both bounds have to hold: it must
+# reach a non-internal finding, and it must NOT reach an internal one. An
+# unconditional version would weaken gateReachability for every finding, including
+# the internal ones where all the measured delta lives.
+#
+# Both patterns are written without a single quote in them. Two earlier attempts
+# in this file used \x27 inside a single-quoted shell string that is later eval'd;
+# it resolved to a literal quote, closed the string, and the mutation silently
+# became something else. `.internal.` matches the quoted literal without needing
+# to reproduce the quotes.
+#
+# /g is load-bearing. Without it perl replaces only the FIRST match, and the
+# first `impact.rootCause === 'internal'` in this script is the "Root cause:" line
+# further up — so the mutation edited a different conditional, the prohibition
+# stayed correctly scoped, and it SURVIVED while appearing to test the bound.
+run_mutation "the root-cause conditionals stop being conditional" "L2" \
+  'perl -0pi -e "s/impact\.rootCause === .internal. \?/false ?/g" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+run_mutation "the gate agent is no longer told not to price the precondition twice" "L2" \
+  'perl -0pi -e "s/Do NOT fail gateReachability/Consider failing gateReachability/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+# The prohibition is only worth what the positive rule under it allows. The first
+# draft of that rule listed "or has no caller at all" as a permitted gateReachability
+# FAIL — which is the forbidden ground restated as an affirmative licence, and the
+# licence is what an agent acts on. It is also verbatim the sweep251 run1 trace this
+# fix exists to close. This mutation puts the licence back; the coverage test has to
+# see it. No newline in the pattern: the eval-then-perl path in this file mangles
+# backslash escapes, and `second ground` is unique in the file on its own.
+run_mutation "the no-caller FAIL ground is re-licensed under the prohibition" "L2" \
+  'perl -0pi -e "s/second ground/second ground unless it has no caller at all/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+# Ablation isolation, added after looking at how c-review's bench solves the same
+# problem. Its host cells ran with 20 plugins and 48 skills reaching EVERY arm —
+# c-review's own skill included, in the arm meant to be without it — which voided a
+# real run, and they built a Docker container for it. `claude plugin eval` scopes
+# plugins already (verified: `plugins: []` in sweep251's baseline, exactly one in
+# the other, across 42 runs), so what was worth taking is the assertion, not the
+# container. A contaminated baseline makes the delta a measure of what else was
+# installed that day, and nothing here checked it.
+# Points at the contamination branch itself, not at the arm-name test: the tuple
+# moved out to BASELINE_ARM_NAMES and the old pattern went stale, matching nothing
+# and reporting a phantom gap. Mutating `if plugins:` also keeps the mutation on
+# the behaviour the test names — silently accepting a baseline that loaded a
+# plugin — instead of on arm classification, which would fail for a second reason.
+run_mutation "a contaminated no-plugin baseline stops being reported" "L2" \
+  'perl -0pi -e "s/^            if plugins:$/            if False:/m" "$SANDBOX/tests/validate_eval_result.py"' \
+  '"${PYTEST[@]}" "$SANDBOX/tests/test_validate_eval_result.py"'
+
+# The mutation above edits the function BODY, which the direct-call tests reach.
+# That left the CALL SITE in main() — the only path the shipping validator takes —
+# covered by nothing: dropping the call kept every test green while the gate
+# printed `ablation isolation NOT verified` forever and passed contaminated
+# baselines. This is the mutation that pins the wiring.
+# The plugins-only check was less than it claimed: c-review's void was its own
+# SKILL in the baseline, and a skill reaches a session from ~/.claude/skills or a
+# globally installed plugin with `plugins` still empty. Dropping this leaves a
+# baseline holding the plugin under test's own skill printing `isolation verified`.
+run_mutation "a skill from an unloaded plugin stops being reported" "L2" \
+  'perl -0pi -e "s/foreign = _foreign_skills\(plugins, skills\)/foreign = []/" "$SANDBOX/tests/validate_eval_result.py"' \
+  '"${PYTEST[@]}" "$SANDBOX/tests/test_validate_eval_result.py"'
+
+# `Counter()`, not `0`: the call now returns a per-arm Counter, and `0` would kill
+# this mutation with a TypeError from the caller rather than with the behaviour
+# being pinned — an unwired check that reports NOT verified forever.
+run_mutation "the isolation check is unwired from main()" "L2" \
+  'perl -0pi -e "s/isolation_checked = check_ablation_isolation\(result, problems\)/isolation_checked = Counter()/" "$SANDBOX/tests/validate_eval_result.py"' \
+  '"${PYTEST[@]}" "$SANDBOX/tests/test_validate_eval_result.py"'
+
+# The count is per arm because "verified" has to mean BOTH arms were read. This
+# mutation restores the scalar it replaced: any surviving trace counts for every
+# arm, so a sweep whose baseline temp dirs were reaped while one `with` trace
+# survived printed `isolation verified on 1 session(s)` — certifying an ablation
+# whose no-plugin arm, the only arm the check exists to police, was never opened.
+run_mutation "one arm's surviving trace speaks for the other" "L2" \
+  'perl -0pi -e "s/if not isolation_checked\[arm\]/if not sum(isolation_checked.values())/" "$SANDBOX/tests/validate_eval_result.py"' \
+  '"${PYTEST[@]}" "$SANDBOX/tests/test_validate_eval_result.py"'
+
 run_mutation "gate infers PAYLOAD_REACHES_SINK instead of reading it" "L2" \
   'perl -0pi -e "s/passed\.length !== attemptedLayers/false/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/gate.test.mjs"'

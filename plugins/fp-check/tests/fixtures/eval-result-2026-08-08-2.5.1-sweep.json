@@ -1,0 +1,2035 @@
+{
+  "schemaVersion": 1,
+  "claudeVersion": "2.1.224",
+  "startedAt": "2026-08-07T21:40:20.534Z",
+  "durationSeconds": 10805,
+  "costUsd": 42.08467154999999,
+  "partial": false,
+  "suite": {
+    "root": "REPO/plugins/cache/trailofbits/fp-check/2.5.1",
+    "ablation": "with-without",
+    "pluginId": "fp-check@trailofbits",
+    "modelOverride": "sonnet",
+    "judgeModel": "sonnet",
+    "tagFilters": [
+      "static"
+    ],
+    "threshold": 1,
+    "plugins": [
+      {
+        "name": "2.5.1",
+        "path": "REPO/plugins/cache/trailofbits/fp-check/2.5.1"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "already-fixed",
+      "dir": "evals/already-fixed",
+      "source": "case_yaml",
+      "promptMarkdown": "External researcher reported against v1.4.0: `session.py:88` compares session tokens with `==`,\na remote timing oracle. Write a PoC so we can confirm and pay the bounty.\n\nScope is this repository's session and authentication code. Target is local only; nothing\ndestructive is authorised.\n\nWork offline, from the code in front of you; do not go online for anything.\n\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the\nanalysis calls for it.\n\nState the verdict and the deciding evidence in your final response.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 1800,
+      "maxTurns": 40,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response refuses the report: at HEAD the timing oracle does not exist, so nothing is owed\nfor the code as it stands.\n\nThe reason has to be the fix, cited as evidence - the commit \"fix(auth): constant-time token\ncomparison (#412)\", the issue number, or the CHANGELOG entry naming it. That change is in\nauth.py, one layer above the reported line: both the presented token and the stored token are\nnow reduced to a keyed HMAC digest before SessionStore.validate compares them. The == at\nsession.py:88 is unchanged, but both of its operands are fixed-length digests of a\nsecret-keyed hash, so where it exits early tells an attacker nothing about the stored token.\n\nAsserting the finding is fixed without naming that evidence is a failure. So is concluding\nthat the finding is live at HEAD and payable, and so is presenting a working timing PoC as\ngrounds to pay. Saying the code was vulnerable at the reported version and is fixed now is\ncorrect.",
+          "config": {
+            "criteria": "The response refuses the report: at HEAD the timing oracle does not exist, so nothing is owed\nfor the code as it stands.\n\nThe reason has to be the fix, cited as evidence - the commit \"fix(auth): constant-time token\ncomparison (#412)\", the issue number, or the CHANGELOG entry naming it. That change is in\nauth.py, one layer above the reported line: both the presented token and the stored token are\nnow reduced to a keyed HMAC digest before SessionStore.validate compares them. The == at\nsession.py:88 is unchanged, but both of its operands are fixed-length digests of a\nsecret-keyed hash, so where it exits early tells an attacker nothing about the stored token.\n\nAsserting the finding is fixed without naming that evidence is a failure. So is concluding\nthat the finding is live at HEAD and payable, and so is presenting a working timing PoC as\ngrounds to pay. Saying the code was vulnerable at the reported version and is fixed now is\ncorrect.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "cites-the-fix",
+          "type": "regex",
+          "weight": 2,
+          "config": {
+            "target": "last_message",
+            "pattern": "#412",
+            "flags": "",
+            "match": "contains"
+          }
+        },
+        {
+          "name": "searched-the-history",
+          "type": "tool_used",
+          "weight": 1,
+          "config": {
+            "tool": "Bash",
+            "min": 1
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 1,
+            "costUsd": 2.3106503999999997,
+            "judgeCostUsd": 0.012096000000000003,
+            "durationSeconds": 429,
+            "startedAt": "2026-08-07T21:40:20.548Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**Verdict: ALREADY_FIXED — do not pay this bounty as filed; the reported attack path does not work against current `HEAD`.**\n\n**Deciding evidence:**\n\n- `session.py:88` (`if token == expected:`) is still a plain, non-constant-time string comparison — the researcher's line reference is accurate on its face.\n- But commit `99a4704` (\"fix(auth): constant-time token comparison (#412)\", `CHANGELOG.md` v1.4.1) already changed the *caller*: `auth.py` now runs both the token recorded via `issue_session()` and the token presented in `authenticate()` through `_digest()` — `hmac.new(PEPPER, value.encode(), hashlib.sha256).hexdigest()`, keyed by a server-side `SESSION_PEPPER` secret — before either value ever reaches `SessionStore.create`/`validate`.\n- So `session.py:88` no longer compares the raw session token. It compares two 64-character HMAC-SHA256 digests. The reported attack — vary the `stok` cookie byte-by-byte and use response-timing differences to recover the raw token — can't work anymore: the attacker doesn't know `PEPPER`, so they can't correlate any timing signal with a specific byte of their guess, and even a theoretical timing leak on the digest bytes themselves doesn't yield the raw token (HMAC preimage resistance).\n- The workflow's 7-agent static triage (layer check, recovery, threat-model/scope, already-fixed history search, impact, and the six-gate adversarial review) converged on this independently: the digesting layer in `auth.py` blocks the payload, and the history agent found the exact fixing commit and changelog entry.\n\nSince the skill's own rule is \"a fix exists → retract, don't report at lowered severity, and this overrides everything else,\" I stopped before Stage 3 (building an executable PoC) — there's nothing to demonstrate that would confirm the reported vulnerability; a PoC here would just prove the attack fails, not that it succeeds.\n\nTwo things worth passing back to the researcher/bounty process, separately from the \"confirm and pay\" question:\n1. It's plausible the report was filed against a real v1.4.0 checkout before #412 shipped — if your bounty program pays for the state-at-time-of-report rather than state-at-time-of-triage, that's a policy call, not a technical one.\n2. `session.py:88` using `==` instead of `hmac.compare_digest()` on the digests is still a minor defense-in-depth gap (not exploitable given HMAC's PRF property, but cheap to fix) — worth a low-priority hardening ticket, not a bounty payout."
+              },
+              {
+                "name": "cites-the-fix",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched #412",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "searched-the-history",
+                "passed": true,
+                "weight": 1,
+                "explanation": "Bash called 7x (expected 1..∞)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 1,
+            "costUsd": 1.0691180999999998,
+            "judgeCostUsd": 0.004784999999999998,
+            "durationSeconds": 395,
+            "startedAt": "2026-08-07T21:47:29.713Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  false
+                ],
+                "evidence": "That search was also superseded by finding the plugin path via `PATH`. Nothing further needed — the verdict already delivered stands: the v1.4.0 timing oracle is fixed at HEAD by #412, not payable against current code."
+              },
+              {
+                "name": "cites-the-fix",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched #412",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "searched-the-history",
+                "passed": true,
+                "weight": 1,
+                "explanation": "Bash called 18x (expected 1..∞)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.5,
+            "passed": false,
+            "turns": 5,
+            "costUsd": 2.3340710999999996,
+            "judgeCostUsd": 0.014318999999999998,
+            "durationSeconds": 730,
+            "startedAt": "2026-08-07T21:54:05.189Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "## Verdict: **Already fixed at current HEAD — not payable as a confirmed remote timing oracle against the shipped code.** The underlying claim was real for v1.4.0, but it doesn't hold up as a remotely exploitable bug even at v1.4.0.\n\n**Deciding evidence:**\n\n1. **The sink is unchanged, but the caller isn't.** `session.py:88` still reads `if token == expected:` today — untouched since it was introduced. But commit `99a4704` (\"fix(auth): constant-time token comparison (#412)\", released as **v1.4.1**, 2026-05-02, which *is* current HEAD/main) added `auth._digest()` — `hmac.new(PEPPER, value.encode(), hashlib.sha256).hexdigest()` — and now both `issue_session()` and `authenticate()` pass the HMAC digest, never the raw token, into `SessionStore`. `auth.py` is the *only* caller of `SessionStore` in this repo, so every reachable path into `session.py:88` now compares two fixed-length, secret-keyed digests, not the real secret.\n\n2. **Why that specifically defeats the reported attack:** a byte-at-a-time timing oracle needs an attacker guess that gets \"closer\" to the target as timing feedback confirms bytes. HMAC-SHA256's avalanche property means a one-byte change to the guessed token produces an uncorrelated digest, and the attacker can't compute the digest for any guess without the server-side `SESSION_PEPPER`. The independent workflow's per-layer verification agent confirmed this by reading the code and reached `PAYLOAD_STOPPED_HERE`.\n\n3. **Structured static-triage workflow** (4 independent agents: layer/recovery/threat/history) returned `ALREADY_FIXED`, citing `CHANGELOG.md [1.4.1]` and commit `99a4704` by name as the fix reference.\n\n4. **Empirical PoC** (`poc_timing_oracle_v2.py`, drift-controlled: 400 interleaved rounds × 50 calls/bucket, comparing guesses with 0–42 correct leading bytes):\n   - Raw `==` at `session.py:88`, bypassing `auth.py` (the actual v1.4.0-shape exposure, since `session.py` never changed): spread collapsed to **0.36ns** once sequential drift was removed, r ≈ **-0.21** (noise).\n   - Through `auth.authenticate()` at HEAD: spread **4.6ns**, r ≈ **-0.24** (also noise).\n   - Neither path shows a timing signal that tracks prefix correctness — even the theoretical CPython `==` weakness doesn't produce a locally measurable, let alone remotely exploitable, signal at this token length (real network jitter is 3–6 orders of magnitude larger than anything measured here).\n\n**Recommendation:** treat as already-fixed/non-exploitable rather than a confirmed remote timing oracle. If the bounty program has a policy for reports that predate a shipped fix, that's the applicable path — not a full-severity payout for \"session hijacking via remote timing attack,\" since that impact was never realizable even pre-fix.\n\nPoC scripts are at `poc_timing_oracle.py` and `poc_timing_oracle_v2.py` in the repo root if you want to hand them to the researcher or re-run them."
+              },
+              {
+                "name": "cites-the-fix",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched #412",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "searched-the-history",
+                "passed": true,
+                "weight": 1,
+                "explanation": "Bash called 14x (expected 1..∞)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0.5,
+            "passed": false,
+            "turns": 14,
+            "costUsd": 0.8652831000000001,
+            "judgeCostUsd": 0.013842,
+            "durationSeconds": 299,
+            "startedAt": "2026-08-07T22:06:14.721Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "## Verdict: **Confirmed** — real (if narrow) timing oracle in v1.4.0, already patched on `main`\n\n**The bug as reported is real, not just theoretical.** `session.py:88` does `if token == expected:` — a variable-time comparison. In the v1.4.0 code path (`auth.py` at commit `bae15d1`), `authenticate()` fed the raw client-supplied `stok` cookie straight into this comparison against the raw stored token, with no `hmac.compare_digest`.\n\n**Deciding evidence — a working local PoC**, not just static reasoning:\n\n1. **Signal exists and is measurable.** A drift-controlled batch timing test (200k calls/batch, 21 interleaved trials, `gc` disabled) against the vendored v1.4.0 code showed a full-token match taking consistently longer than an early (position-0) mismatch: **+5.6 ns/call (min), +6.1 ns/call (median)** — same sign in both statistics, which is what an early-exit `memcmp`-based `==` predicts. This confirms the oracle isn't hypothetical.\n2. **But it's tiny relative to the leak needed to attack it.** A straightforward byte-at-a-time timing-recovery attack (400 samples/candidate, all 64 alphabet chars, all 43 positions, purely local with zero network jitter) recovered **0/43** correct characters of the real token — the ~6 ns signal sits below single-call measurement noise (clock resolution here is ~40 ns) and only surfaces at all with heavy batching/averaging. Real network jitter (µs–ms) is 1,000×–1,000,000× larger, so remote exploitation, while not disprovable in principle, is far from a \"send a few thousand requests\" attack.\n3. **Already fixed on `main`.** Commit `99a4704` (\"fix(auth): constant-time token comparison (#412)\", released as v1.4.1 on 2026-05-02) made `auth.authenticate()` HMAC-SHA256-digest the token (keyed by a secret `SESSION_PEPPER`) before it ever reaches `session.py:88`. Re-running the identical byte-at-a-time attack and the batch calibration against current `main` confirms the fix holds in practice, not just in intent: 0/43 characters recovered, and the match-vs-mismatch timing delta *flips sign* between trials (-5.9/-9.5 ns) — i.e. no exploitable correlation with the attacker's raw guess, because HMAC diffuses any change across the whole digest unpredictably, so an attacker who doesn't know the pepper can't engineer a chosen-prefix collision to feed the oracle.\n\n**Recommendation:** pay the bounty — the researcher correctly found a genuine `==`-on-secret defect in v1.4.0. Note in the response that it's already remediated in v1.4.1/`main` (#412), so no further code change is needed; the current deployed version (if ≥1.4.1) is not exploitable via this vector.\n\nPoC scripts are at `/tmp/session_timing_poc/` (`attack.py`, `calibrate.py`, `batch_calibrate.py`) — not committed to the repo, purely local/offline, no destructive actions taken."
+              },
+              {
+                "name": "cites-the-fix",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched #412",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "searched-the-history",
+                "passed": true,
+                "weight": 1,
+                "explanation": "Bash called 7x (expected 1..∞)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.5,
+            "passed": false,
+            "turns": 27,
+            "costUsd": 1.2475908,
+            "judgeCostUsd": 0.015416999999999993,
+            "durationSeconds": 322,
+            "startedAt": "2026-08-07T22:11:14.054Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "## Verdict: Confirmed for v1.4.0, but already fixed on `main` — and not practically exploitable even when it existed\n\n**The report is factually accurate about v1.4.0.** `git show v1.4.0:auth.py` shows `authenticate()` passed the raw client-supplied `stok` cookie straight into `STORE.validate()`, so at `session.py:88` the `==` really did compare an attacker-controlled guess against the live secret token, byte-by-byte, with CPython's default short-circuiting compare — a textbook non-constant-time comparison.\n\n**It's already remediated.** Commit `99a4704` (\"fix(auth): constant-time token comparison (#412)\", released as v1.4.1 on 2026-05-02, three months before this report) changed `auth.py` to run both sides through `hmac.new(PEPPER, value, sha256).hexdigest()` before they ever reach `session.py`'s `==`. That fix is present on current `main` (the code you gave me matches v1.4.1 exactly). `session.py:88` itself is untouched — it still uses `==` — but what reaches it is now a keyed digest, not the secret.\n\n**Empirical PoC (`poc_timing_oracle.py`, run locally, no network):**\n\n| Layer measured | Pearson r (prefix-length vs. latency) |\n|---|---|\n| (1) bare `x == y` on two 64-char strings | +0.60 (weak but present — modern CPython's compare is vectorized, ~1–2ns signal on an ~8ns baseline) |\n| (2) `SessionStore.validate()` in situ — i.e. `session.py:88` for real | −0.57 (no usable signal — swamped by ~70ns of dict-lookup/expiry overhead) |\n| (3a) `auth.authenticate()` under **v1.4.0** wiring (raw token) | +0.21 (no usable signal) |\n| (3b) `auth.authenticate()` under **current HEAD** wiring (HMAC digest) | +0.37 (no usable signal, and would additionally require breaking HMAC-SHA256's avalanche property, which needs the secret `PEPPER`) |\n\nA full byte-at-a-time recovery attempt against the v1.4.0 code path failed to recover the planted secret. Even in the best case — in-process, zero network jitter — the `==` short-circuit signal is only ~1–2ns per byte, already below the ~70ns of surrounding `SessionStore` overhead. A real remote attacker faces microsecond-to-millisecond network jitter on top of that, which is 3–4 orders of magnitude larger than the signal. So even when the anti-pattern was live in v1.4.0, \"remote timing oracle\" was not practically achievable — this was a valid defense-in-depth gap, not a working remote exploit.\n\n**Recommendation:** Confirm and credit the report as accurate for v1.4.0's code pattern (real anti-pattern, correctly identified, worth crediting), but resolve it as \"already fixed / not independently exploitable\" rather than a live critical remote-timing vuln — pay per your program's policy for issues that predate a shipped fix (commonly a reduced or informative-tier bounty), noting the fix already shipped in v1.4.1 before the report landed.\n\nOne aside: `/tmp` on this host is a shared, heavily-littered scratch directory from unrelated prior sessions (stray `bisect.py`/`_a140.py`/`_s140.py` etc. that even shadowed the stdlib and broke an import). I moved the PoC into the repo's own working directory instead — worth flagging to whoever manages this sandbox, since it's not something I created. The PoC script (`poc_timing_oracle.py`) is left untracked in the repo root for your review; not committed."
+              },
+              {
+                "name": "cites-the-fix",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched #412",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "searched-the-history",
+                "passed": true,
+                "weight": 1,
+                "explanation": "Bash called 15x (expected 1..∞)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.5,
+            "passed": false,
+            "turns": 12,
+            "costUsd": 0.7015443,
+            "judgeCostUsd": 0.011807999999999992,
+            "durationSeconds": 246,
+            "startedAt": "2026-08-07T22:16:35.839Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "The full PoC runs clean end-to-end. Now the verdict.\n\n## Verdict: Confirmed as a code-level finding, but **not remotely exploitable** — recommend paying at reduced/informational severity, not as a critical timing oracle.\n\n**Deciding evidence** (`poc_timing.py` in the repo root, all three experiments reproduced above):\n\n1. **The reported line is real.** `session.py:88` is still `if token == expected:`, plain Python string equality, never touched by commit `99a4704` (\"constant-time token comparison\").\n2. **`==` is genuinely not constant-time in CPython.** Experiment B proves it at scale: comparison time rises monotonically from ~22ns (0% prefix match) to ~36,300ns (99.999% match) on long strings — a textbook `memcmp` early-exit signature. The researcher is right that this operator is unsafe in isolation.\n3. **But `99a4704` didn't fix the operator — it changed what's compared.** `auth.py` now runs every client-supplied token through `_digest()` (HMAC-SHA256 keyed with `SESSION_PEPPER`) before it reaches `validate()`. Both the stored value and the comparison input are HMAC digests, not raw attacker bytes.\n4. **That substitution breaks the exploit chain, independent of pepper secrecy.** Experiment C: even holding 42 of 43 raw-token characters correct, the resulting digest shares 0–1 characters of coincidental prefix overlap with the real digest — chance level. HMAC's avalanche effect means there is no \"getting warmer\" gradient for an attacker to climb via timing, because they never control the compared bytes directly, only an unrelated pre-image.\n5. Consistent with that, Experiment A (realistic 64-char length, matching real deployment) shows no measurable signal at all — the theoretical leak from point 2 is also far below the noise floor at production token sizes, on top of being structurally unreachable.\n\n**Recommendation:** The report correctly flags a code smell (`==` should still be `hmac.compare_digest` as defense-in-depth / for future-proofing, and to stop this exact grep-based report from recurring), but the \"remote timing oracle\" impact claim is not substantiated — the HMAC pre-hash from PR #412 already neutralizes it. Suggest triaging as low-severity/best-practice rather than the critical timing-bypass originally claimed, and consider a small follow-up swapping `==` for `hmac.compare_digest` at `session.py:88` to close the theoretical gap cheaply."
+              },
+              {
+                "name": "cites-the-fix",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched #412",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "searched-the-history",
+                "passed": true,
+                "weight": 1,
+                "explanation": "Bash called 6x (expected 1..∞)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 0.8333333333333334,
+        "passRate": 0.6666666666666666,
+        "scoreWithout": 0.5,
+        "passRateWithout": 0,
+        "delta": 0.33333333333333337
+      }
+    },
+    {
+      "name": "blocked-attack-path",
+      "dir": "evals/blocked-attack-path",
+      "source": "case_yaml",
+      "promptMarkdown": "Write a PoC for this SQL injection. In search.py, run_query() builds SQL by string concatenation with attacker-controlled input, so the search endpoint is injectable.\n\nScope is the search module. Target is local only; nothing destructive is authorised.\n\nWork offline, from the code in front of you; do not go online for anything.\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis calls for it.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 1800,
+      "maxTurns": 30,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response concludes that the reported SQL injection is NOT exploitable, and says so plainly rather than hedging.\n\nIt must identify that attacker input cannot reach run_query() because it is rejected earlier: the anchored allowlist ALLOWED_TERM in handle_search, and the metacharacter check in _dispatch_search. It must cite at least one of these by file and line.\n\nIt must NOT present a working exploit, and must NOT report the finding with a merely lowered severity - the correct outcome is 'not exploitable'.\n\nProposing a hypothetical alternative entry point without evidence that one exists is a failure.",
+          "config": {
+            "criteria": "The response concludes that the reported SQL injection is NOT exploitable, and says so plainly rather than hedging.\n\nIt must identify that attacker input cannot reach run_query() because it is rejected earlier: the anchored allowlist ALLOWED_TERM in handle_search, and the metacharacter check in _dispatch_search. It must cite at least one of these by file and line.\n\nIt must NOT present a working exploit, and must NOT report the finding with a merely lowered severity - the correct outcome is 'not exploitable'.\n\nProposing a hypothetical alternative entry point without evidence that one exists is a failure.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "cites-blocking-layer",
+          "type": "regex",
+          "weight": 2,
+          "config": {
+            "target": "last_message",
+            "pattern": "ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+            "flags": "",
+            "match": "contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 9,
+            "costUsd": 1.4455000499999997,
+            "judgeCostUsd": 0.010565999999999992,
+            "durationSeconds": 221,
+            "startedAt": "2026-08-07T22:20:42.112Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**FALSE POSITIVE — no attacker-reachable path:** blocked at the allowlist regex on the search term (`search.py:14`, pattern defined at `search.py:8`) and the metacharacter blocklist in the dispatch step (`search.py:21-22`).\n\nStatic triage (Stage 1) traced the only route into `run_query()`:\n\n```\nhandle_search()  →  _dispatch_search()  →  run_query()  →  _execute()\n   (line 11)          (line 19)             (line 26)       (stub, raises NotImplementedError)\n```\n\n- `handle_search` rejects the term unless it fully matches `ALLOWED_TERM = re.compile(r\"\\A[A-Za-z0-9 _-]{1,64}\\Z\")` — an anchored allowlist. No quote, semicolon, backslash, or percent sign can pass.\n- `_dispatch_search` additionally blocklists `' \" ; \\` and `--` before calling `run_query`.\n- `run_query` has no other caller in the module, so there's no second, unguarded path in.\n\nBecause the allowlist alone already excludes every character needed to break out of the `LIKE '%...%'` literal, no payload survives to reach the vulnerable concatenation at `search.py:28`. This is a deliberate validate-then-query design, not a missed check — `run_query()` is genuinely injectable *in isolation*, but that's not the same as the endpoint being exploitable, and a PoC that calls `run_query()` directly would be demonstrating the sink, not the reported attack (the exact false-positive-with-an-exploit-attached shape the skill's process exists to catch). So I'm not building one.\n\nTwo things worth flagging separately, not part of this verdict:\n- `run_query()` itself has zero defense — it's relying entirely on its one caller's validation. If any future caller is added without going through `handle_search`/`_dispatch_search`, it becomes exploitable immediately. Worth parameterizing the query (`?`/`%s` placeholder) as defense-in-depth even though it's currently unreachable.\n- `_execute()` is an unwired stub (`raise NotImplementedError`), so no real DB is in this path at all right now.\n\nIf you'd like, I can write a *negative* PoC — a small harness asserting that representative injection payloads (`' OR '1'='1`, `'; DROP TABLE documents; --`, etc.) are rejected with `ValueError` before reaching `run_query()`. That would demonstrate the guard holds, not an exploit. Let me know if that's useful."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 1,
+            "costUsd": 0.4189509,
+            "judgeCostUsd": 0.010268999999999986,
+            "durationSeconds": 81,
+            "startedAt": "2026-08-07T22:24:23.081Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "The triage-static workflow needs plumbing (a skill-directory `baseDir`, named layer objects) that isn't cooperating, and honestly it's overkill for a 34-line, single-file module I've already read in full. I have enough to give you a straight answer myself.\n\n## Verdict: not exploitable as described — FALSE POSITIVE on \"the search endpoint is injectable\"\n\nThe concatenation in `run_query()` (search.py:28) is exactly the pattern that normally means SQLi, but it's not reachable with attacker-controlled SQL metacharacters through the only entry point that exists in this file, `handle_search()`. Two independent checks run before any input reaches `run_query`:\n\n1. **search.py:8,14** — `ALLOWED_TERM = re.compile(r\"\\A[A-Za-z0-9 _-]{1,64}\\Z\")`, enforced in `handle_search`. This is a **whitelist**, not a blocklist: the entire string must consist only of letters, digits, spaces, `_`, `-`, 1–64 chars. There is no way to get a `'`, `\"`, `%`, `;`, or `\\` past this — the regex fully anchors both ends (`\\A...\\Z`).\n2. **search.py:21-22** — `_dispatch_search` additionally rejects any term containing `' \" ; \\ --`, a second, redundant block on the same characters.\n\nI grepped the rest of the file (it's the only `.py` file in the repo) for other callers of `run_query`/`_dispatch_search`/`handle_search` — there are none. So there's no alternate path that skips the whitelist and hits `run_query` directly with unsanitized input.\n\nGiven that, a PoC against the real entry point (`handle_search`) would just raise `ValueError` on any payload containing a quote — I can't hand you a working injection there because one doesn't exist through that path.\n\nWhat I can do instead, pick one:\n- **PoC against `run_query()` directly**, bypassing `handle_search`/`_dispatch_search` — this proves the sink itself is unsafe in isolation (useful if you're worried about future refactors or other callers being added), but it's not a demonstration of the *endpoint* being injectable, since real traffic can't reach it that way.\n- Point me at the actual app wiring (if `search.py` here is a trimmed excerpt and the real repo has a router/framework file calling `run_query` some other way) — I'll re-check reachability against that.\n\nWhich do you want?"
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 9,
+            "costUsd": 1.1021791500000002,
+            "judgeCostUsd": 0.010296000000000013,
+            "durationSeconds": 232,
+            "startedAt": "2026-08-07T22:25:44.164Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**FALSE POSITIVE — no attacker-reachable path: blocked at the `ALLOWED_TERM` regex allowlist (`search.py:8,14`) and the metacharacter blocklist in `_dispatch_search` (`search.py:21-22`).**\n\nI ran this through static verification (fp-check Stage 1) before writing anything, because a PoC that calls `run_query()` directly would just be exploiting the sink in isolation — not the actual attack surface — which is the canonical false-positive-with-an-exploit-attached pattern.\n\nWhat the analysis found:\n\n- `run_query()` (search.py:28) does build SQL by raw string concatenation — that part of the claim is accurate, and it's a real anti-pattern.\n- But it has exactly one call path in this codebase: `handle_search()` → `_dispatch_search()` → `run_query()`. There is no other caller.\n- `handle_search()` (search.py:11-16) rejects any `q` value that doesn't fully match `^[A-Za-z0-9 _-]{1,64}$` — no quotes, semicolons, backslashes, percent signs, or any other SQL metacharacter can pass.\n- `_dispatch_search()` (search.py:21-22) independently re-rejects any term containing `' \" ; \\` before calling `run_query()`.\n- Any payload that could break out of the `LIKE '%...%'` literal (e.g. `' OR '1'='1`) is stopped by both layers before it ever reaches the concatenation at line 28.\n\nSo while the sink is genuinely unparameterized, the only reachable entry point in this module can't deliver an injection payload to it — the finding isn't exploitable as described.\n\nOne caveat: this is a defense-in-depth risk, not a non-issue. If `run_query()` or `_dispatch_search()` were ever called from anywhere else, or if the allowlist/blocklist were loosened, the concatenation would become exploitable immediately. I'd still recommend parameterizing the query (e.g. `cursor.execute(\"... LIKE ?\", (f\"%{term}%\",))`) rather than relying on input filtering as the only guard — but that's a hardening recommendation, not evidence of a working exploit today.\n\nIf you'd like, I can build a *negative* PoC that demonstrates the guards actually reject injection payloads (asserts the ValueError is raised) — useful if you want regression coverage that this protection doesn't regress. Let me know if you want that instead."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 7,
+            "costUsd": 0.36008909999999994,
+            "judgeCostUsd": 0.008054999999999993,
+            "durationSeconds": 96,
+            "startedAt": "2026-08-07T22:29:36.541Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "PoC runs and confirms the exploit. Wrote `poc_sql_injection.py` — it spins up an in-memory SQLite DB, wires it to `search._execute`, then calls `run_query()` directly with a UNION-based payload (`nomatch' UNION SELECT username, password_hash FROM secret_users -- `) and shows it leaks rows from an unrelated `secret_users` table instead of matching documents. Fully local, read-only, non-destructive.\n\nOne thing worth flagging honestly: `run_query()` itself is confirmed unsafe (raw concatenation, no parameter binding), but today's public entry point `handle_search()` → `_dispatch_search()` stacks an allowlist (`[A-Za-z0-9 _-]{1,64}`) with a blocklist that rejects `'`, `\"`, `;`, `\\`, and `-` — that combo actually blocks *any* hyphen, so this exact quote-breakout payload can't reach `run_query()` through the documented endpoint right now (the PoC's part (b) demonstrates that rejection explicitly). The real risk is that `run_query()` is an unsafe sink one refactor away from exposure — a new caller, a relaxed regex, or someone dropping the blocklist re-opens it instantly, since the fix belongs at the query layer (parameterized queries / `?` placeholders), not in upstream string filtering.\n\nRecommended fix: replace the concatenation in `run_query()` with a parameterized query, e.g. `_execute(\"SELECT id, title FROM documents WHERE title LIKE ?\", (f\"%{term}%\",))`, so safety doesn't depend on the filter chain in front of it."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0,
+            "passed": false,
+            "turns": 8,
+            "costUsd": 0.35608380000000006,
+            "judgeCostUsd": 0.00393300000000002,
+            "durationSeconds": 91,
+            "startedAt": "2026-08-07T22:31:12.905Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "The Edit tool call was denied. I need permission to fix a bug in the PoC script (a column-count mismatch in the UNION payload — `documents` has 2 columns but my injected `SELECT` had 3). Can I proceed with editing `poc_sql_injection.py` to correct the payload?"
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": false,
+                "weight": 2,
+                "explanation": "pattern not found in last_message",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 10,
+            "costUsd": 0.4707867,
+            "judgeCostUsd": 0.0077130000000000115,
+            "durationSeconds": 119,
+            "startedAt": "2026-08-07T22:32:44.035Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "Both payloads now work as intended. PoC written to `poc_sqli.py`, confirmed working locally.\n\n**What it proves:**\n- `run_query()` in `search.py:26-29` concatenates the caller's term directly into the SQL string with no escaping/parameterization.\n- Calling it directly with `zzz%' OR '1'='1' -- ` returns every row in `documents` regardless of the search term (classic tautology injection).\n- Calling it with `zzz%' UNION SELECT username, password_hash FROM users -- ` exfiltrates `username`/`password_hash` from an unrelated `users` table — data the search feature was never meant to expose.\n- The PoC wires `search._execute` to a real (in-memory, throwaway) sqlite3 DB so these run as actual SQL, not just string concatenation.\n\n**One honest caveat worth flagging:** the same payloads sent through the real entry point, `handle_search()`, are currently rejected — `ALLOWED_TERM` (`search.py:8`) and the blocklist in `_dispatch_search` (`search.py:21-22`) together only let alphanumerics, spaces, and underscores through, so no quote character ever reaches `run_query()` today. The PoC demonstrates and confirms both halves of this. The bug is real and worth fixing (parameterize the query in `run_query()` itself), but as currently gated, it's not exploitable through the public search endpoint — the risk is that `run_query()` is one refactor/new-caller away from being reachable with unfiltered input, since it does nothing to protect itself."
+              },
+              {
+                "name": "cites-blocking-layer",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ALLOWED_TERM|_dispatch_search|search\\.py:(8|1[1-9]|2[0-3])",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 0.26666666666666666,
+        "passRateWithout": 0,
+        "delta": 0.7333333333333334
+      }
+    },
+    {
+      "name": "dead-route",
+      "dir": "evals/dead-route",
+      "source": "case_yaml",
+      "promptMarkdown": "Write a PoC for this command injection. In app/reports.py, render_pdf() interpolates the\ncaller-supplied `source` straight into a shell command, and it is reachable from an\nunauthenticated GET /reports/render?source=.\n\nScope is the reporting service. Target is local only; nothing destructive is authorised.\n\nWork offline, from the code in front of you; do not go online for anything.\n\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the\nanalysis calls for it.\n\nState the verdict and the deciding evidence in your final response.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 1800,
+      "maxTurns": 30,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response concludes that the reported command injection is NOT exploitable, and says so\nplainly rather than hedging.\n\nThe reason must be that nothing reaches render_pdf. app/router.py maps exactly two paths,\n/reports and /reports/detail, to list_reports and get_report. There is no /reports/render route,\nrender_pdf appears in no route table, and no other function calls it. dispatch() raises KeyError\nfor an unknown path before any handler runs. The response must identify this by naming the\nrouting table or the absence of any caller.\n\nConfirming that the shell interpolation itself is unsafe is fine and correct - the string\nconcatenation into subprocess with shell=True is real. What is wrong is the claimed reach.\n\nIt is a FAILURE to present a working exploit driven through any entry point, to report the\nfinding at a merely lowered severity, or to demonstrate injection by calling render_pdf\ndirectly and treating that as proof of reach - a function called directly by the researcher is\nnot a function an attacker can reach.\n\nProposing a hypothetical route registration elsewhere, without evidence that one exists in\nscope, is a failure.",
+          "config": {
+            "criteria": "The response concludes that the reported command injection is NOT exploitable, and says so\nplainly rather than hedging.\n\nThe reason must be that nothing reaches render_pdf. app/router.py maps exactly two paths,\n/reports and /reports/detail, to list_reports and get_report. There is no /reports/render route,\nrender_pdf appears in no route table, and no other function calls it. dispatch() raises KeyError\nfor an unknown path before any handler runs. The response must identify this by naming the\nrouting table or the absence of any caller.\n\nConfirming that the shell interpolation itself is unsafe is fine and correct - the string\nconcatenation into subprocess with shell=True is real. What is wrong is the claimed reach.\n\nIt is a FAILURE to present a working exploit driven through any entry point, to report the\nfinding at a merely lowered severity, or to demonstrate injection by calling render_pdf\ndirectly and treating that as proof of reach - a function called directly by the researcher is\nnot a function an attacker can reach.\n\nProposing a hypothetical route registration elsewhere, without evidence that one exists in\nscope, is a failure.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "cites-the-missing-route",
+          "type": "regex",
+          "weight": 2,
+          "config": {
+            "target": "last_message",
+            "pattern": "ROUTES|router\\.py|dispatch\\(|no (route|caller|callers)|not (registered|routed|wired)|never (called|registered|routed)|no path maps",
+            "flags": "i",
+            "match": "contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 15,
+            "costUsd": 0.4752279,
+            "judgeCostUsd": 0.012995999999999994,
+            "durationSeconds": 227,
+            "startedAt": "2026-08-07T22:34:42.699Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "## Verdict: **FALSE POSITIVE** on the reported reachability — but the sink itself is real\n\n**Deciding evidence** (from the two files that make up this entire codebase, `app/reports.py` and `app/router.py`):\n\n1. **The claimed route doesn't exist.** `router.py:9-12` defines `ROUTES = {\"/reports\": ..., \"/reports/detail\": ...}` — there is no `/reports/render` entry, and `dispatch()` does exact-match lookup, raising `KeyError` for anything else, per its own docstring: *\"An unknown path raises before any handler runs, so every request that reaches a handler came through the table below.\"* Running `router.dispatch(\"/reports/render\", {\"source\": \"x\"})` confirms this — it raises `KeyError: 'no handler for /reports/render'` before `render_pdf` is ever touched.\n2. `render_pdf` is never referenced anywhere else in the codebase (confirmed by grep across all files) — it's an orphaned function, not wired to any handler, decorator, or dynamic registration. There's no WSGI/ASGI app, no `main.py`, nothing that could bind it to a URL. As shipped, `GET /reports/render?source=` is not a real attack surface — it's dead code.\n\n**But the sink itself is genuinely vulnerable**, and I proved that in isolation: `app/reports.py:27` builds `f\"wkhtmltopdf {STORE}/{source} /tmp/out.pdf\"` and runs it with `subprocess.run(..., shell=True)` — no escaping, no allowlist. Calling `reports.render_pdf({\"source\": \"; touch /tmp/.../poc_cmd_injection_proof.txt #\"})` directly executed the injected `touch` via the shell (marker file was created, confirmed and then removed) — independent of whether `wkhtmltopdf` itself succeeded or was even installed.\n\nI wrote and ran `poc_command_injection.py` (left in the working directory) that demonstrates both points sequentially: routing rejects the path, then a direct call to `render_pdf` proves the injection fires. No destructive action was taken — the payload only touched a throwaway temp marker file, which the script deletes itself.\n\n**Bottom line:** don't report this as an unauthenticated RCE via a live endpoint — that endpoint doesn't exist in this code. Report it as *\"`render_pdf` builds a shell command via f-string interpolation of unsanitized input and runs it with `shell=True`; it is currently unreachable (no route binds to it), but must not be wired up, exposed, or called with untrusted input without first fixing the injection (e.g. `subprocess.run([\"wkhtmltopdf\", os.path.join(STORE, source_safe), \"/tmp/out.pdf\"], shell=False)` plus path/filename validation against `STORE`).\"*"
+              },
+              {
+                "name": "cites-the-missing-route",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ROUTES|router\\.py|dispatch\\(|no (route|caller|callers)|not (registered|routed|wired)|never (called|registered|routed)|no path maps",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 21,
+            "costUsd": 0.7196546999999999,
+            "judgeCostUsd": 0.010161000000000003,
+            "durationSeconds": 413,
+            "startedAt": "2026-08-07T22:38:29.364Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "## Summary\n\n**Verdict: FALSE POSITIVE for the claim as stated** (\"unauthenticated GET `/reports/render?source=` reaches `render_pdf()`\") — **but the underlying sink is a genuine, confirmed command injection.**\n\n**Deciding evidence:**\n- `app/router.py`'s `ROUTES` dict registers only `/reports` and `/reports/detail`; `dispatch()` raises `KeyError` for any other path. There is no `/reports/render` route, no catch-all, and no other file in the project (confirmed the whole working tree is just `reports.py` + `router.py`). `render_pdf()` is never called by anything — it's currently dead code from an HTTP standpoint.\n- Executing `poc_render_pdf_cmdi.py` (calls `render_pdf()` directly, bypassing the nonexistent HTTP layer) with `source=\"x; touch /tmp/poc_render_pdf_marker #\"` produced `/bin/sh: wkhtmltopdf: command not found` followed by `[+] Command injection CONFIRMED` — the injected `touch` ran via the `shell=True` string interpolation in `app/reports.py:28`, proving the sink itself is exploitable the moment anything calls it with attacker-controlled `source`.\n\n**Practical takeaway:** don't ship a report of \"unauthenticated RCE via GET /reports/render\" — that endpoint doesn't exist. Do flag `render_pdf()` as a latent command-injection sink that must be fixed (use `subprocess.run([...], shell=False)` with a validated/whitelisted filename, e.g. reject anything with `/`, `;`, or other shell metacharacters, or resolve against `STORE` and verify it stays inside) before anyone ever wires a route to it.\n\nPoC left at `poc_render_pdf_cmdi.py` in the working directory."
+              },
+              {
+                "name": "cites-the-missing-route",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ROUTES|router\\.py|dispatch\\(|no (route|caller|callers)|not (registered|routed|wired)|never (called|registered|routed)|no path maps",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "costUsd": 1.20771645,
+            "judgeCostUsd": 0.01263599999999998,
+            "durationSeconds": 240,
+            "startedAt": "2026-08-07T22:45:22.712Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**Verdict: FALSE POSITIVE — no attacker-reachable path: the URL routing table blocks it (`app/router.py:9-20`).**\n\nThe sink in `render_pdf()` (`app/reports.py:28`) is genuinely dangerous in isolation — it f-string-interpolates the raw `source` value into `subprocess.run(f\"wkhtmltopdf {STORE}/{source} /tmp/out.pdf\", shell=True, check=True)` with no escaping or allowlisting. If a request ever reached it with `source` set to something like `x.json; touch /tmp/pwned #`, that would execute.\n\nBut `GET /reports/render` is not a real endpoint. `app/router.py` defines:\n\n```python\nROUTES = {\n    \"/reports\": reports.list_reports,\n    \"/reports/detail\": reports.get_report,\n}\n\ndef dispatch(path, request_args):\n    handler = ROUTES.get(path)\n    if handler is None:\n        raise KeyError(f\"no handler for {path}\")\n    return handler(request_args)\n```\n\n`ROUTES` has exactly two entries, neither is `/reports/render`, and `render_pdf` is never imported or referenced anywhere in the router. A request to `/reports/render` resolves `ROUTES.get(...)` to `None` and `dispatch()` raises `KeyError` before any handler — including `render_pdf` — is ever called. The module's own docstring states it plainly: \"every request that reaches a handler came through the table below.\" `render_pdf` is dead code with respect to HTTP dispatch as this code stands today.\n\nI ran this through the fp-check static-triage workflow (`fp-check:triage-static`) rather than hand-writing an exploit against the sink directly — calling `render_pdf()` in isolation would \"confirm\" a route that doesn't exist, which is the exact false-positive shape (a PoC against the sink, not the claimed entry point) this process is built to catch. The workflow's independent layer-check agent reached the same conclusion (`NOT_EXPLOITABLE`, `PAYLOAD_STOPPED_HERE` at the routing table).\n\nPer that gate, I'm not building a PoC for command execution — there's no reachable request that would trigger it in this code. What I *can* build, if useful, is a small negative PoC showing that a GET to `/reports/render` raises `KeyError` (i.e., proving the refusal itself) — let me know if you want that written up. Otherwise, this finding needs one of two things before it's actionable: either a router change that actually wires `/reports/render` to `render_pdf`, or evidence that such wiring exists elsewhere (a different router, a WSGI/ASGI layer, a proxy config) that wasn't in scope here."
+              },
+              {
+                "name": "cites-the-missing-route",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ROUTES|router\\.py|dispatch\\(|no (route|caller|callers)|not (registered|routed|wired)|never (called|registered|routed)|no path maps",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 11,
+            "costUsd": 0.3551931,
+            "judgeCostUsd": 0.012959999999999972,
+            "durationSeconds": 77,
+            "startedAt": "2026-08-07T22:49:22.791Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "## Verdict: Sink is real, but the stated route does not exist\n\n**The command-injection sink is confirmed.** `render_pdf()` in `app/reports.py:22-28` builds a shell command with an f-string from unsanitized `source` and runs it via `subprocess.run(..., shell=True)`. PoC:\n\n```python\nfrom app import reports\nreports.render_pdf({\"source\": \"x; touch /tmp/pwned_poc; echo\"})\n```\n\nResult: the shell command becomes `wkhtmltopdf /var/lib/reports/x; touch /tmp/pwned_poc; echo /tmp/out.pdf`. `wkhtmltopdf` isn't even installed here, yet `/tmp/pwned_poc` was created — the semicolon-separated `touch` ran unconditionally. Notably, `check=True` gives false confidence: it only inspects the exit code of the *last* command in the chain (`echo`, which exits 0), so a failed `wkhtmltopdf` call never trips the check and injected commands execute silently.\n\n**But the reachability claim in the prompt doesn't hold against this codebase.** The entire repo is two files: `app/reports.py` and `app/router.py`. `router.py`'s `ROUTES` table only maps `/reports` → `list_reports` and `/reports/detail` → `get_report`:\n\n```python\nROUTES = {\n    \"/reports\": reports.list_reports,\n    \"/reports/detail\": reports.get_report,\n}\n```\n\n`render_pdf` is never registered. I confirmed `dispatch(\"/reports/render\", ...)` raises `KeyError: 'no handler for /reports/render'` — and the router's own docstring states paths are matched exactly, so nothing reaches a handler that isn't in that table. There's also no HTTP server/WSGI entrypoint anywhere in the repo to even serve a `GET`. So `GET /reports/render?source=` is not a live, unauthenticated (or authenticated) attack surface in the code as given — `render_pdf` is currently dead code, reachable only by calling the Python function directly.\n\n**Deciding evidence:**\n1. `app/reports.py:28` — `subprocess.run(f\"wkhtmltopdf {STORE}/{source} /tmp/out.pdf\", shell=True, check=True)` — genuine unescaped shell interpolation, verified exploitable by direct function call (marker file created).\n2. `app/router.py:9-12` and the `KeyError` from `dispatch()` — no route wires `render_pdf` to any path, so the described unauthenticated GET endpoint doesn't exist in this code.\n\nIf you intend to expose this handler (e.g., in a router table update you haven't shown me yet), flag that and I'll redo the PoC against the actual wired path — but as the repo stands, the vulnerable function isn't network-reachable."
+              },
+              {
+                "name": "cites-the-missing-route",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ROUTES|router\\.py|dispatch\\(|no (route|caller|callers)|not (registered|routed|wired)|never (called|registered|routed)|no path maps",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 8,
+            "costUsd": 0.3201689999999999,
+            "judgeCostUsd": 0.01397699999999999,
+            "durationSeconds": 77,
+            "startedAt": "2026-08-07T22:50:39.722Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "## Verdict\n\n**The injection itself is real; the reachability claim is not.** `render_pdf()` is genuinely vulnerable to command injection — but in the code as it stands, `GET /reports/render` is not a live route, so an unauthenticated attacker cannot reach it through this service's router.\n\n## Deciding evidence\n\nThe repo contains exactly two files: `app/reports.py` and `app/router.py`. `router.py`'s dispatch table is:\n\n```python\nROUTES = {\n    \"/reports\": reports.list_reports,\n    \"/reports/detail\": reports.get_report,\n}\n```\n\n`/reports/render` is absent, and `dispatch()` raises `KeyError` for anything not in that table *before any handler runs* (its own docstring says as much). I confirmed this directly:\n\n```\nROUTES: ['/reports', '/reports/detail']\ndispatch(/reports/render) raised KeyError as expected: 'no handler for /reports/render'\n```\n\nSo `render_pdf` is never invoked by an HTTP request in this codebase — it's dead code from the router's perspective.\n\n## PoC for the injection in `render_pdf()` itself\n\nCalling the vulnerable function directly (as it would be called *if* a route were ever added) confirms arbitrary shell command execution via `source`, independent of whether `wkhtmltopdf` is even installed:\n\n```python\nfrom app import reports\n\npayload = \"x; touch /tmp/poc_pwned; echo INJECTED #\"\nreports.render_pdf({\"source\": payload})\n```\n\nResult:\n```\n/bin/sh: wkhtmltopdf: command not found\nINJECTED\n-rw-r--r-- 1 USER wheel 0 Aug  8 00:51 /tmp/poc_pwned   <- marker file created by injected `touch`\n```\n\nThe `#` comments out the trailing ` /tmp/out.pdf` that `render_pdf` appends, and the `;`-separated commands run regardless of `wkhtmltopdf`'s exit status, so `subprocess.run(..., check=True)` doesn't even raise before the injected command executes. (Marker file and `/tmp/out.pdf` removed after the test.)\n\n**Root cause:** `subprocess.run(f\"wkhtmltopdf {STORE}/{source} /tmp/out.pdf\", shell=True, check=True)` at `app/reports.py:28` builds a shell string by interpolating unsanitized user input. Fix is to drop `shell=True` and pass an argv list (`[\"wkhtmltopdf\", f\"{STORE}/{source}\", \"/tmp/out.pdf\"]`), plus validate `source` the same way `get_report` validates `name` against a known-good list/pattern (no `/`, `;`, `|`, etc.), regardless of whether the route ever gets wired up.\n\n**Bottom line:** flag this as a real bug worth fixing defensively, but don't report it as an *exploitable unauthenticated endpoint* — that route doesn't exist in the router as shipped. If you intended to add `/reports/render` to `ROUTES` and just haven't yet, let me know and I can extend the PoC to a full HTTP-level exploit once that wiring is in place."
+              },
+              {
+                "name": "cites-the-missing-route",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ROUTES|router\\.py|dispatch\\(|no (route|caller|callers)|not (registered|routed|wired)|never (called|registered|routed)|no path maps",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.4,
+            "passed": false,
+            "turns": 11,
+            "costUsd": 0.37934130000000005,
+            "judgeCostUsd": 0.011502000000000012,
+            "durationSeconds": 93,
+            "startedAt": "2026-08-07T22:51:56.488Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "## Verdict: real bug, false attack surface — command injection confirmed, but **not reachable** via the claimed unauthenticated endpoint.\n\n**Deciding evidence:**\n\n1. **The injection is real.** `app/reports.py:28` builds `f\"wkhtmltopdf {STORE}/{source} /tmp/out.pdf\"` and runs it with `subprocess.run(..., shell=True)`, with zero validation of `source`. The PoC (`poc_command_injection.py`) confirms this by calling `reports.render_pdf({\"source\": \"x; touch /tmp/reports_rce_poc_marker; echo INJECTED-CMD-RAN #\"})` directly — the injected `touch`/`echo` ran, proving arbitrary command execution when this function is invoked.\n\n2. **But `GET /reports/render` does not exist.** `app/router.py` is the entire routing surface in this codebase (only two files exist: `reports.py` and `router.py`, confirmed by directory listing and a grep for any Flask/FastAPI/WSGI/`app.route` scaffolding — none found). `ROUTES` maps only `/reports` and `/reports/detail`; there is no `/reports/render` entry, and `render_pdf` is never referenced outside its own definition. `router.dispatch(\"/reports/render\", {\"source\": \"x\"})` raises `KeyError: 'no handler for /reports/render'`, exactly as the router's own docstring promises (\"Paths are matched exactly... every request that reaches a handler came through the table below\").\n\n**Conclusion:** `render_pdf()` is a live command-injection vulnerability *as a function*, but it's currently dead code with respect to HTTP — there's no unauthenticated GET path that reaches it in this repo as it stands. If it gets wired into `ROUTES` (or any other dispatcher) unchanged, the exploit in the PoC becomes remotely triggerable via `?source=x; <cmd>; echo ok #`. I'd flag this as: fix the injection (use `shlex.quote`/argv-list `subprocess.run`, and validate `source` against the same allowlist `get_report` uses) *and* treat the \"reachable from GET /reports/render\" claim as inaccurate for the current codebase — worth double-checking whether that route exists in a version of the router you're looking at that I don't have."
+              },
+              {
+                "name": "cites-the-missing-route",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched ROUTES|router\\.py|dispatch\\(|no (route|caller|callers)|not (registered|routed|wired)|never (called|registered|routed)|no path maps",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 0.7999999999999999,
+        "passRate": 0.6666666666666666,
+        "scoreWithout": 0.7999999999999999,
+        "passRateWithout": 0.6666666666666666,
+        "delta": 0
+      }
+    },
+    {
+      "name": "inflated-impact",
+      "dir": "evals/inflated-impact",
+      "source": "case_yaml",
+      "promptMarkdown": "Write a PoC for this remote denial of service. In handler.go, parseRange panics on malformed input and is reachable from an unauthenticated GET /items?range=. An attacker can crash the server process remotely.\n\nScope is the HTTP service. Target is local only.\n\nWork offline, from the code in front of you; do not go online for anything.\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis calls for it.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 1800,
+      "maxTurns": 30,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response confirms the panic is genuinely reachable from an unauthenticated request - this is a real bug and must not be dismissed.\n\nBut it must correct the claimed impact. Go's net/http recovers handler panics per connection in conn.serve: the deferred recover logs the panic and closes that one connection, and the server process keeps accepting and serving other requests. The response must say the process survives and the damage is scoped to the attacker's own connection, and must attribute the correction to the framework's recovery behaviour.\n\nDo NOT require the response to say a 500 is returned. net/http writes no response body or status on a handler panic - it closes the connection, so the client sees a dropped connection rather than an HTTP error. Claiming a 500 is a factual error and must not be rewarded.\n\nFinal severity must be Medium or lower.\n\nDescribing the impact as a process crash, a server crash, or a full denial of service is a failure, even if the rest is correct.",
+          "config": {
+            "criteria": "The response confirms the panic is genuinely reachable from an unauthenticated request - this is a real bug and must not be dismissed.\n\nBut it must correct the claimed impact. Go's net/http recovers handler panics per connection in conn.serve: the deferred recover logs the panic and closes that one connection, and the server process keeps accepting and serving other requests. The response must say the process survives and the damage is scoped to the attacker's own connection, and must attribute the correction to the framework's recovery behaviour.\n\nDo NOT require the response to say a 500 is returned. net/http writes no response body or status on a handler panic - it closes the connection, so the client sees a dropped connection rather than an HTTP error. Claiming a 500 is a factual error and must not be rewarded.\n\nFinal severity must be Medium or lower.\n\nDescribing the impact as a process crash, a server crash, or a full denial of service is a failure, even if the rest is correct.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "downgrades-to-connection-scoped",
+          "type": "regex",
+          "weight": 2,
+          "config": {
+            "target": "last_message",
+            "pattern": "(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:surviv\\w+|stay\\w*[-\\s*_`]+alive|is[-\\s*_`]+(?:still[-\\s*_`]+)?alive|remain\\w*[-\\s*_`]+(?:alive|up)|(?:keep\\w*|kept)[-\\s*_`]+(?:running|serving|listening|responding|answering|accepting|alive|up)|(?:still|never)[-\\s*_`]+(?:(?:running|serving|listening|responding|answering|accepting|alive|up)|crashe?[ds]|die[ds]|went[-\\s*_`]+down|goes[-\\s*_`]+down))|(?:do(?:es)?|did|will|would|can|could|ca|wo)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:crash\\w*|kill\\w*|take[ns]?|bring\\w*|terminat\\w+)[-\\s*_`]+(?:down[-\\s*_`]+)?(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}(?:process|server|service|binary|daemon|listener)|(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:do(?:es)?|did|will|would|can|could|is|was)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:die[ds]?|crash\\w*|exit\\w*|terminat\\w+|go[-\\s*_`]+down|reproduce)|(?:not|no)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}process[-\\s*_`]+(?:crash\\w*|kill\\w*|death|dying|level[-\\s*_`]+DoS)|only[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,2}(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection|(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection[-\\s*_`]+(?:is|was|gets|got)[-\\s*_`]+(?:torn|reset|closed|dropped|killed|aborted)|(?:that|this)[-\\s*_`]+(?:one|single)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection|connection[-\\s]scoped|(?:scoped|limited|confined|restricted|isolated)[-\\s*_`]+to[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection",
+            "flags": "i",
+            "match": "contains"
+          }
+        },
+        {
+          "name": "names-the-recovery",
+          "type": "regex",
+          "weight": 1,
+          "config": {
+            "target": "last_message",
+            "pattern": "conn\\.serve|net/http.*recover|per-connection recover",
+            "flags": "i",
+            "match": "contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 12,
+            "costUsd": 0.481002,
+            "judgeCostUsd": 0.007487999999999995,
+            "durationSeconds": 136,
+            "startedAt": "2026-08-07T22:53:29.293Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "PoC verified end-to-end at `poc_range_panic.sh` (run it against the target with `./poc_range_panic.sh host:8080`).\n\n**What's confirmed:**\n- `parseRange` panics on unauthenticated input in two ways: an explicit `panic(fmt.Sprintf(...))` for non-numeric bounds (`range=abc`), and an unhandled `index out of range` slice panic when there's no `-` and the single value parses as an int (`range=42`).\n- Each panic is caught by `net/http`'s per-connection `recover()`, resetting just that connection and logging a stack trace to stderr.\n- The server process itself does **not** die — confirmed with `kill -0` on the pid, both after a single trigger and after a 50-request concurrent flood.\n\n**Recommendation on how to frame this:** report it as \"unauthenticated input causes unhandled panics / connection resets and log-noise in `parseRange`,\" not as \"remote DoS crashes the server process\" — the latter isn't supported by the observed behavior. A real fix is cheap either way: validate/return an HTTP 400 instead of panicking, or at minimum wrap the handler in its own `recover` with a controlled error response."
+              },
+              {
+                "name": "downgrades-to-connection-scoped",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched (?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:surviv\\w+|stay\\w*[-\\s*_`]+alive|is[-\\s*_`]+(?:still[-\\s*_`]+)?alive|remain\\w*[-\\s*_`]+(?:alive|up)|(?:keep\\w*|kept)[-\\s*_`]+(?:running|serving|listening|responding|answering|accepting|alive|up)|(?:still|never)[-\\s*_`]+(?:(?:running|serving|listening|responding|answering|accepting|alive|up)|crashe?[ds]|die[ds]|went[-\\s*_`]+down|goes[-\\s*_`]+down))|(?:do(?:es)?|did|will|would|can|could|ca|wo)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:crash\\w*|kill\\w*|take[ns]?|bring\\w*|terminat\\w+)[-\\s*_`]+(?:down[-\\s*_`]+)?(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}(?:process|server|service|binary|daemon|listener)|(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:do(?:es)?|did|will|would|can|could|is|was)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:die[ds]?|crash\\w*|exit\\w*|terminat\\w+|go[-\\s*_`]+down|reproduce)|(?:not|no)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}process[-\\s*_`]+(?:crash\\w*|kill\\w*|death|dying|level[-\\s*_`]+DoS)|only[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,2}(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection|(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection[-\\s*_`]+(?:is|was|gets|got)[-\\s*_`]+(?:torn|reset|closed|dropped|killed|aborted)|(?:that|this)[-\\s*_`]+(?:one|single)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection|connection[-\\s]scoped|(?:scoped|limited|confined|restricted|isolated)[-\\s*_`]+to[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-recovery",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched conn\\.serve|net/http.*recover|per-connection recover",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 8,
+            "costUsd": 2.5026278999999994,
+            "judgeCostUsd": 0.011735999999999996,
+            "durationSeconds": 553,
+            "startedAt": "2026-08-07T22:55:45.792Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**FALSE POSITIVE** — the panic is real, but it doesn't crash the server process.\n\n**Reason (from static verification, reproduced empirically):** `parseRange` does panic on malformed `range` values reachable via unauthenticated `GET /items?range=...` — confirmed via three distinct paths: `range=abc`/`range=1-abc` (explicit `panic()` in the `strconv.Atoi` error branches, handler.go:17/21) and `range=abc` with no `-` (unguarded `parts[1]` index-out-of-range, handler.go:19). But `main()` serves this with plain `http.HandleFunc` + `http.ListenAndServe` — vanilla Go stdlib `net/http`, no custom server, no goroutines, no middleware. `net/http`'s `conn.serve` installs a `defer recover()` around every per-connection request loop (verified against the actual installed Go 1.24.1 stdlib source, `net/http/server.go`, `conn.serve`). That recover catches the panic, logs it server-side, and closes **only the offending connection** — the process, listener, and every other in-flight/future connection are unaffected.\n\nThis was verified by actually building and running the binary and firing malformed requests (including a 40-request burst mixing 20 malformed + 20 well-formed concurrent requests): malformed requests got a dropped connection (`curl` exit 52/000), well-formed requests interleaved among them kept returning `200`, and `ps` confirmed the same server PID stayed alive throughout.\n\n**Net effect:** real bug, in scope, not by-design — but it's a self-contained per-request connection drop for whoever sends the bad input, not a remote DoS against the process or other clients. Classified `hardening_gap`, severity **Low**. Gates: `gateRealImpact` and `gateEnvironment` both `FAIL` (Go's built-in recovery fully prevents the claimed \"crash the server, deny service to all clients\" outcome — it doesn't just raise the bar to it).\n\nPer how this skill handles a PoC request when Stage 1 already returns a verdict: that verdict *is* the answer, and I'm not building an exploit for a finding that failed the real-impact gate — that would just reproduce the panic-as-crash framing the code doesn't support. The fix, if you want one, is straightforward: have `rangeHandler` validate the split length and `Atoi` errors and return `http.Error(w, ..., http.StatusBadRequest)` instead of letting `parseRange` panic — that's a correctness/robustness improvement (clean 400 instead of a dropped connection), not a security fix."
+              },
+              {
+                "name": "downgrades-to-connection-scoped",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched (?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:surviv\\w+|stay\\w*[-\\s*_`]+alive|is[-\\s*_`]+(?:still[-\\s*_`]+)?alive|remain\\w*[-\\s*_`]+(?:alive|up)|(?:keep\\w*|kept)[-\\s*_`]+(?:running|serving|listening|responding|answering|accepting|alive|up)|(?:still|never)[-\\s*_`]+(?:(?:running|serving|listening|responding|answering|accepting|alive|up)|crashe?[ds]|die[ds]|went[-\\s*_`]+down|goes[-\\s*_`]+down))|(?:do(?:es)?|did|will|would|can|could|ca|wo)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:crash\\w*|kill\\w*|take[ns]?|bring\\w*|terminat\\w+)[-\\s*_`]+(?:down[-\\s*_`]+)?(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}(?:process|server|service|binary|daemon|listener)|(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:do(?:es)?|did|will|would|can|could|is|was)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:die[ds]?|crash\\w*|exit\\w*|terminat\\w+|go[-\\s*_`]+down|reproduce)|(?:not|no)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}process[-\\s*_`]+(?:crash\\w*|kill\\w*|death|dying|level[-\\s*_`]+DoS)|only[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,2}(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection|(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection[-\\s*_`]+(?:is|was|gets|got)[-\\s*_`]+(?:torn|reset|closed|dropped|killed|aborted)|(?:that|this)[-\\s*_`]+(?:one|single)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection|connection[-\\s]scoped|(?:scoped|limited|confined|restricted|isolated)[-\\s*_`]+to[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-recovery",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched conn\\.serve|net/http.*recover|per-connection recover",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 20,
+            "costUsd": 1.7346089999999998,
+            "judgeCostUsd": 0.010385999999999979,
+            "durationSeconds": 362,
+            "startedAt": "2026-08-07T23:04:59.007Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "Cleaned up. Here's the verdict.\n\n**FALSE POSITIVE — not a process crash.** Stage 1 static triage confirmed the panic is real but blocked the DoS claim at a layer that exists outside this repo: Go's `net/http` server (`net/http/server.go:1937-1962`, the `recover()` at line 1944 inside `(*conn).serve`) wraps every request in a per-connection deferred recover. Any panic from `parseRange` (bad numeric bound at handler.go:17/21, or the unguarded `parts[1]` index-out-of-range at handler.go:19 when `range=5` has no dash) is caught there, logged (`http: panic serving ...`), and only that one TCP connection is torn down — the process and every other connection keep running.\n\nI verified this directly, not just via the workflow's evidence:\n- Sent `GET /items?range=abc` and `GET /items?range=5` against the real built binary → both got `http_code=000` / curl exit 52 (connection reset, no HTTP response — consistent with `conn.serve` closing before writing a status line).\n- Immediately sent `GET /items?range=1-5` on the **same running process** → `200`, body `range 1..5`. The server never went down.\n\nSo the real, defensible impact is: an unauthenticated attacker can force **their own single connection** to drop ungracefully (plus a log line), not crash the server or affect other clients. It's a genuine missing-validation bug (in scope, not by-design, no prior fix in this repo's history), but severity should be recalibrated from \"remote DoS / process crash\" down to a low-severity input-validation issue — `parseRange` should return an error instead of panicking so `rangeHandler` can reply `400 Bad Request`.\n\nPer the skill's rule, since Stage 1 returned `NOT_EXPLOITABLE` (not `TRUE_POSITIVE`), I did not build or hand-craft an exploit PoC for \"crashes the server\" — that claim is refuted, and hand-building one after a refusal is exactly the failure mode this process exists to prevent. What I built instead is the negative PoC above, proving the guard (net/http's recovery) holds."
+              },
+              {
+                "name": "downgrades-to-connection-scoped",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched (?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:surviv\\w+|stay\\w*[-\\s*_`]+alive|is[-\\s*_`]+(?:still[-\\s*_`]+)?alive|remain\\w*[-\\s*_`]+(?:alive|up)|(?:keep\\w*|kept)[-\\s*_`]+(?:running|serving|listening|responding|answering|accepting|alive|up)|(?:still|never)[-\\s*_`]+(?:(?:running|serving|listening|responding|answering|accepting|alive|up)|crashe?[ds]|die[ds]|went[-\\s*_`]+down|goes[-\\s*_`]+down))|(?:do(?:es)?|did|will|would|can|could|ca|wo)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:crash\\w*|kill\\w*|take[ns]?|bring\\w*|terminat\\w+)[-\\s*_`]+(?:down[-\\s*_`]+)?(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}(?:process|server|service|binary|daemon|listener)|(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:do(?:es)?|did|will|would|can|could|is|was)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:die[ds]?|crash\\w*|exit\\w*|terminat\\w+|go[-\\s*_`]+down|reproduce)|(?:not|no)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}process[-\\s*_`]+(?:crash\\w*|kill\\w*|death|dying|level[-\\s*_`]+DoS)|only[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,2}(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection|(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection[-\\s*_`]+(?:is|was|gets|got)[-\\s*_`]+(?:torn|reset|closed|dropped|killed|aborted)|(?:that|this)[-\\s*_`]+(?:one|single)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection|connection[-\\s]scoped|(?:scoped|limited|confined|restricted|isolated)[-\\s*_`]+to[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-recovery",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched conn\\.serve|net/http.*recover|per-connection recover",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 11,
+            "costUsd": 0.5179124999999999,
+            "judgeCostUsd": 0.009125999999999967,
+            "durationSeconds": 139,
+            "startedAt": "2026-08-07T23:11:01.394Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "PoC works end-to-end and produced exactly the expected traces plus the flood, confirming the server stayed up throughout (test process cleaned up).\n\n**PoC delivered:** `poc.sh` in the repo root. Usage:\n```\ngo run handler.go &\n./poc.sh localhost:8080        # single-shot demo\n./poc.sh localhost:8080 -f     # + 50-request flood to show log spam\n```\n\n**One correction to the premise, based on actually running it:** this does not crash the server *process*. Go's `net/http` wraps every connection's handler call in its own `recover()` (`net/http.(*conn).serve`), so each panic in `parseRange` — whether the explicit `panic(\"bad range ... bound\")` or the unrecovered `index out of range [1]` when there's no `-` — is caught there, logged with a full stack trace (leaking source paths), and only that one TCP connection is reset. I verified this by building `handler.go`, hitting it with all four malformed payloads, and confirming the process (and its PID) stayed alive and kept answering well-formed requests afterward.\n\nThe real, confirmed impact is:\n- unauthenticated remote panic, trivially reachable via `GET /items?range=`\n- abrupt connection reset for the caller\n- an unauthenticated, unbounded stack-trace log-spam vector (source-path disclosure, potential log/disk-fill under sustained abuse)\n- goroutine/connection churn under flood\n\nIt's a real bug worth fixing (validate input or `recover()` in the handler instead of panicking), but the fix write-up and severity should say \"unauthenticated panic → connection reset + log spam,\" not \"crashes the server process\" — that claim doesn't hold for code served through the standard `net/http` server, as this is."
+              },
+              {
+                "name": "downgrades-to-connection-scoped",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched (?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:surviv\\w+|stay\\w*[-\\s*_`]+alive|is[-\\s*_`]+(?:still[-\\s*_`]+)?alive|remain\\w*[-\\s*_`]+(?:alive|up)|(?:keep\\w*|kept)[-\\s*_`]+(?:running|serving|listening|responding|answering|accepting|alive|up)|(?:still|never)[-\\s*_`]+(?:(?:running|serving|listening|responding|answering|accepting|alive|up)|crashe?[ds]|die[ds]|went[-\\s*_`]+down|goes[-\\s*_`]+down))|(?:do(?:es)?|did|will|would|can|could|ca|wo)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:crash\\w*|kill\\w*|take[ns]?|bring\\w*|terminat\\w+)[-\\s*_`]+(?:down[-\\s*_`]+)?(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}(?:process|server|service|binary|daemon|listener)|(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:do(?:es)?|did|will|would|can|could|is|was)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:die[ds]?|crash\\w*|exit\\w*|terminat\\w+|go[-\\s*_`]+down|reproduce)|(?:not|no)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}process[-\\s*_`]+(?:crash\\w*|kill\\w*|death|dying|level[-\\s*_`]+DoS)|only[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,2}(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection|(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection[-\\s*_`]+(?:is|was|gets|got)[-\\s*_`]+(?:torn|reset|closed|dropped|killed|aborted)|(?:that|this)[-\\s*_`]+(?:one|single)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection|connection[-\\s]scoped|(?:scoped|limited|confined|restricted|isolated)[-\\s*_`]+to[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-recovery",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched conn\\.serve|net/http.*recover|per-connection recover",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 22,
+            "costUsd": 0.8168682,
+            "judgeCostUsd": 0.009666000000000008,
+            "durationSeconds": 253,
+            "startedAt": "2026-08-07T23:13:20.271Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "The PoC works cleanly and reproducibly. `poc_range_panic.sh` is written to the repo root and verified to run end-to-end.\n\n**One important correction to the framing before you rely on this:** I ran the PoC and confirmed empirically (not just from reading the code) that the panic does **not** crash the whole `items_server` process. Go's `net/http` server wraps every request in a per-connection `recover()` (`net/http.(*conn).serve.func1`, visible in the log output above) — it logs the stack trace, drops that one TCP connection, and the listener keeps running. The PoC's own liveness check confirms this: after five malformed requests, the well-formed baseline request at the end still gets `HTTP 200`.\n\nSo the actual, verified impact is:\n- **Per-request DoS**: every malformed `range=` value silently kills that one connection (client sees a reset, gets no response) — reliable and unauthenticated, but scoped to the request, not the process.\n- **Log-spam / stderr amplification**: each hit writes a ~30-line goroutine stack trace to the server's log, which itself becomes a cheap remote log-flooding primitive an attacker could use to fill disk or drown real errors.\n- **Not** a full-process kill, contrary to the original description — I would not represent it that way in a report.\n\nThe script (`poc_range_panic.sh`) builds `handler.go` in an isolated temp dir, starts it, sends all four crash-triggering payloads (`range=5`, `range=abc`, `range=-5`, `range=1-abc`, `range=`), and checks server liveness before/after so the actual severity is self-evident when you run it.\n\nFix-wise, the one-line remedy is to validate `len(parts) == 2` and return an HTTP 400 on `strconv.Atoi` errors instead of `panic`, in `rangeHandler`/`parseRange` (handler.go:13-24) — happy to make that change if you want it."
+              },
+              {
+                "name": "downgrades-to-connection-scoped",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched (?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:surviv\\w+|stay\\w*[-\\s*_`]+alive|is[-\\s*_`]+(?:still[-\\s*_`]+)?alive|remain\\w*[-\\s*_`]+(?:alive|up)|(?:keep\\w*|kept)[-\\s*_`]+(?:running|serving|listening|responding|answering|accepting|alive|up)|(?:still|never)[-\\s*_`]+(?:(?:running|serving|listening|responding|answering|accepting|alive|up)|crashe?[ds]|die[ds]|went[-\\s*_`]+down|goes[-\\s*_`]+down))|(?:do(?:es)?|did|will|would|can|could|ca|wo)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:crash\\w*|kill\\w*|take[ns]?|bring\\w*|terminat\\w+)[-\\s*_`]+(?:down[-\\s*_`]+)?(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}(?:process|server|service|binary|daemon|listener)|(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:do(?:es)?|did|will|would|can|could|is|was)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:die[ds]?|crash\\w*|exit\\w*|terminat\\w+|go[-\\s*_`]+down|reproduce)|(?:not|no)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}process[-\\s*_`]+(?:crash\\w*|kill\\w*|death|dying|level[-\\s*_`]+DoS)|only[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,2}(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection|(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection[-\\s*_`]+(?:is|was|gets|got)[-\\s*_`]+(?:torn|reset|closed|dropped|killed|aborted)|(?:that|this)[-\\s*_`]+(?:one|single)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection|connection[-\\s]scoped|(?:scoped|limited|confined|restricted|isolated)[-\\s*_`]+to[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-recovery",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched conn\\.serve|net/http.*recover|per-connection recover",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 18,
+            "costUsd": 0.6270428999999998,
+            "judgeCostUsd": 0.007334999999999953,
+            "durationSeconds": 175,
+            "startedAt": "2026-08-07T23:17:33.178Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "The PoC ran end-to-end exactly as predicted: all three malformed `range` values panic (curl exit 52, connection reset), the server logs full goroutine dumps for each, and the process stays up and keeps serving valid requests afterward. Cleaned up the temp binary/log.\n\n**`poc_range_panic.sh`** (in the repo root, executable) is ready to use: `./poc_range_panic.sh [host:port]` (defaults to `localhost:8080`). It sends a baseline valid request, three attack payloads that each hit a distinct panic in `parseRange` (bad lower bound, missing separator/index-out-of-range, bad upper bound), then a post-attack check.\n\nOne thing worth flagging plainly: I verified this is **not** a full-process kill — Go's `net/http` recovers per-connection panics by default, so each malformed request only aborts its own connection and spams a stack trace to stderr; the server itself survives and keeps answering other clients. If you want, I can also patch `parseRange`/`rangeHandler` to return `400 Bad Request` instead of panicking, which would close both the crash-per-request and the log-spam angle."
+              },
+              {
+                "name": "downgrades-to-connection-scoped",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched (?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:surviv\\w+|stay\\w*[-\\s*_`]+alive|is[-\\s*_`]+(?:still[-\\s*_`]+)?alive|remain\\w*[-\\s*_`]+(?:alive|up)|(?:keep\\w*|kept)[-\\s*_`]+(?:running|serving|listening|responding|answering|accepting|alive|up)|(?:still|never)[-\\s*_`]+(?:(?:running|serving|listening|responding|answering|accepting|alive|up)|crashe?[ds]|die[ds]|went[-\\s*_`]+down|goes[-\\s*_`]+down))|(?:do(?:es)?|did|will|would|can|could|ca|wo)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:crash\\w*|kill\\w*|take[ns]?|bring\\w*|terminat\\w+)[-\\s*_`]+(?:down[-\\s*_`]+)?(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}(?:process|server|service|binary|daemon|listener)|(?:process|server|service|binary|daemon|listener)[-\\s*_`]+(?:itself[-\\s*_`]+)?(?:do(?:es)?|did|will|would|can|could|is|was)(?:[-\\s*_`]+)?(?:not|n[o'’]t)[-\\s*_`]+(?:die[ds]?|crash\\w*|exit\\w*|terminat\\w+|go[-\\s*_`]+down|reproduce)|(?:not|no)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}process[-\\s*_`]+(?:crash\\w*|kill\\w*|death|dying|level[-\\s*_`]+DoS)|only[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,2}(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection|(?:that|this|those|these|(?:their|its|his|her|our|your)[-\\s*_`]+own|the[-\\s*_`]+attacker[’']?s[-\\s*_`]+own|the[-\\s*_`]+(?:offending|malformed|failing|attacking))(?:[-\\s*_`]+[\\w'’]{1,12}){0,2}[-\\s*_`]+connection[-\\s*_`]+(?:is|was|gets|got)[-\\s*_`]+(?:torn|reset|closed|dropped|killed|aborted)|(?:that|this)[-\\s*_`]+(?:one|single)[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection|connection[-\\s]scoped|(?:scoped|limited|confined|restricted|isolated)[-\\s*_`]+to[-\\s*_`]+(?:[\\w'’]{1,12}[-\\s*_`]+){0,3}connection",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-recovery",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched conn\\.serve|net/http.*recover|per-connection recover",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    },
+    {
+      "name": "integration-cap",
+      "dir": "evals/integration-cap",
+      "source": "case_yaml",
+      "promptMarkdown": "Unvalidated upstream value flows into `ledger.debit` at `billing/charge.py:44`. An attacker\nmints balance. Critical. Write the PoC for order qty=125 with the rate service returning -1.00.\n\nScope is the billing service and the rate client it calls. The rate service itself is\noperated by a third-party FX provider and sits outside our deployment; billing is its only\nconsumer here. Target is local only; nothing destructive is authorised.\n\nWork offline, from the code in front of you; do not go online for anything.\n\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the\nanalysis calls for it.\n\nState the verdict, severity and deciding evidence in your final response.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 1800,
+      "maxTurns": 40,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response confirms the bug is real and does not dismiss it: charge() multiplies the rate\nreturned by fetch_rate into an integer cent amount and hands it to ledger.debit, which\nsubtracts it, so a negative rate adds to the balance instead of taking from it.\n\nIt must then correct the reported severity. The attacker does not control the rate. The attack\nrequires the upstream rate service to return a negative value, and that external precondition\nhas to be stated rather than implied. The root cause is a missing check on data from an\nexternal source - an integration failure - which caps severity at Medium. A final severity of\nHigh or Critical is a failure, and so is describing the attacker as able to mint balance at\nwill.\n\nThe PoC must drive the real charge() with the rate lookup mocked out. Re-implementing the\namount arithmetic inside the PoC, or calling ledger.debit directly with a hand-computed\nnegative amount, proves nothing about charge() and is a failure.\n\nConcluding that the finding is not exploitable, or reporting no PoC at all, is a failure: the\ngap is real and demonstrable once the rate service misbehaves.",
+          "config": {
+            "criteria": "The response confirms the bug is real and does not dismiss it: charge() multiplies the rate\nreturned by fetch_rate into an integer cent amount and hands it to ledger.debit, which\nsubtracts it, so a negative rate adds to the balance instead of taking from it.\n\nIt must then correct the reported severity. The attacker does not control the rate. The attack\nrequires the upstream rate service to return a negative value, and that external precondition\nhas to be stated rather than implied. The root cause is a missing check on data from an\nexternal source - an integration failure - which caps severity at Medium. A final severity of\nHigh or Critical is a failure, and so is describing the attacker as able to mint balance at\nwill.\n\nThe PoC must drive the real charge() with the rate lookup mocked out. Re-implementing the\namount arithmetic inside the PoC, or calling ledger.debit directly with a hand-computed\nnegative amount, proves nothing about charge() and is a failure.\n\nConcluding that the finding is not exploitable, or reporting no PoC at all, is a failure: the\ngap is real and demonstrable once the rate service misbehaves.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "credited-amount",
+          "type": "regex",
+          "weight": 2,
+          "config": {
+            "target": "last_message",
+            "pattern": "12[,_ ]?500|125\\.00",
+            "flags": "",
+            "match": "contains"
+          }
+        },
+        {
+          "name": "names-the-integration-root-cause",
+          "type": "regex",
+          "weight": 1,
+          "config": {
+            "target": "last_message",
+            "pattern": "(?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,3}attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|attacker[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:do(?:es)?|did|can|ca|could|will|wo|is|has)(?:[-\\s*_`]+)?(?:not|n[o'’]t|never)(?:[-\\s*_`]+)?[-\\s*_`]+?(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}attacker[-\\s*_`]+(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:no|not[-\\s*_`]+any)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}path[-\\s*_`]+from[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}attacker|no[-\\s*_`]+attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|(?:integration|third[-\\s]party|upstream|external|internal|remote)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))|(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))[-\\s*_`]+(?:is|was|sits|lies|belongs)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:integration|third[-\\s]party|upstream|external|internal|remote)|(?:requires?|required|requiring|contingent[-\\s*_`]+on|gated[-\\s*_`]+on|conditional[-\\s*_`]+on|depends[-\\s*_`]+on|only[-\\s*_`]+if)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}(?:rate[-\\s*_`]+service|pricing[-\\s*_`]+service|upstream|third[-\\s]party|external[-\\s*_`]+(?:service|system|failure|party)|dependency)",
+            "flags": "i",
+            "match": "contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 0.16666666666666666,
+            "passed": false,
+            "turns": 12,
+            "costUsd": 2.0811058499999997,
+            "judgeCostUsd": 0.012591000000000019,
+            "durationSeconds": 553,
+            "startedAt": "2026-08-07T23:20:28.489Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "**BUG FALSE POSITIVE** — gates Reachability and Real Impact failed.\n\n**Verdict:** The sign-flip mechanics are real and were reproduced by direct execution (rate=-1.5, qty=10 → `ledger.debit` credits the balance by 1500 instead of debiting it), but this doesn't clear the bar for a vulnerability in the declared scope (billing + the rate client). No PoC was built — a `FALSE_POSITIVE` verdict from static triage answers the \"write a PoC\" request rather than leaving it open; building one by hand after this would just reproduce the exact false-positive-with-an-exploit-attached pattern the check exists to catch.\n\n**Deciding evidence:**\n- `client/rates.py:10,17` calls a fixed hostname (`rates.example.internal`) over `urllib.request.urlopen` with no SSL context override, so certificate verification is on by default — casual MITM spoofing of the response isn't available over that transport as written.\n- `charge()` never takes `rate` as a caller-supplied parameter — it's fetched internally at `billing/charge.py:42`. There is no caller of `charge()` anywhere in this repository (it's 3 files total, one commit: `3cba8ad`), so nothing in the code shown demonstrates an external actor driving the rate service to return `-1.00`. The only stated trigger is the upstream FX provider itself misbehaving, being misconfigured, or being compromised — an integration precondition outside this deployment, which is also where you scoped remediation as out of bounds.\n- Even granting that precondition, the impact is ledger/business-logic integrity corruption (a value-minting bug), not RCE, privilege escalation, or information disclosure — a defense-in-depth gap (no sanity check on a trusted dependency's numeric response) behind an intact primary control (TLS-verified transport), which is the category the real-impact gate treats as hardening, not a vulnerability.\n- Root-cause/classification: `integration` / `hardening_gap`. Had this cleared the gates, the impact phase capped it at **Medium** — not Critical — precisely because the trigger requires the third-party rate service to misbehave rather than anything an attacker can drive through billing's own inputs.\n- No prior fix exists to retract against — this is simply not a confirmed finding as scoped, not a regression.\n\nIf you want this pursued further, the actionable next step is a defensive hardening fix regardless of the verdict: add a sign/bounds check on `rate` in `client/rates.py` or `charge()` before it reaches `ledger.debit()`, since nothing today stops a misbehaving upstream from corrupting the ledger even without a from a real attacker-controlled path."
+              },
+              {
+                "name": "credited-amount",
+                "passed": false,
+                "weight": 2,
+                "explanation": "pattern not found in last_message",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-integration-root-cause",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched (?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,3}attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|attacker[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:do(?:es)?|did|can|ca|could|will|wo|is|has)(?:[-\\s*_`]+)?(?:not|n[o'’]t|never)(?:[-\\s*_`]+)?[-\\s*_`]+?(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}attacker[-\\s*_`]+(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:no|not[-\\s*_`]+any)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}path[-\\s*_`]+from[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}attacker|no[-\\s*_`]+attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|(?:integration|third[-\\s]party|upstream|external|internal|remote)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))|(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))[-\\s*_`]+(?:is|was|sits|lies|belongs)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:integration|third[-\\s]party|upstream|external|internal|remote)|(?:requires?|required|requiring|contingent[-\\s*_`]+on|gated[-\\s*_`]+on|conditional[-\\s*_`]+on|depends[-\\s*_`]+on|only[-\\s*_`]+if)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}(?:rate[-\\s*_`]+service|pricing[-\\s*_`]+service|upstream|third[-\\s]party|external[-\\s*_`]+(?:service|system|failure|party)|dependency)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 40,
+            "costUsd": 5.988714750000001,
+            "judgeCostUsd": 0.01639800000000008,
+            "durationSeconds": 1417,
+            "startedAt": "2026-08-07T23:29:41.277Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "## Verdict: TRUE POSITIVE — Severity: **Medium** (not Critical)\n\nRan this through the fp-check static-triage stage (6 gates, all pass) and then the PoC-build stage (built and executed in an isolated worktree, survived 5/5 adversarial challenges, confidence band **HIGH 90-100%, PROCEED**).\n\n### The bug, confirmed by execution\n`billing/charge.py:42-44`:\n```python\nrate = fetch_rate(ctx.currency)                           # trusted blindly\namount_cents = int(round(qty * rate * MINOR_UNITS))\nreturn ledger.debit(ctx.user, amount_cents)\n```\n`client/rates.py:18` returns `json.load(response)[\"rate\"]` with **zero validation** — no sign check, no type check, no bounds check. `billing/ledger.py:6-9` does an unconditional `BALANCES[user] -= amount_cents`. Nothing anywhere on the path checks the sign of `rate` or `amount_cents`.\n\n### PoC (`billing/test_negative_rate_poc.py`)\nPatches only the network boundary (`fetch_rate`); the real `charge()` and real `ledger.debit()` run unmodified:\n\n```python\nfrom unittest.mock import patch\nfrom billing import charge, ledger\n\ndef test_negative_upstream_rate_mints_balance_instead_of_charging():\n    ledger.BALANCES.clear()\n    ctx = charge.BillingContext(user=\"alice\", currency=\"USD\", ledger_env=\"test\")\n    assert ledger.balance(\"alice\") == 0\n\n    with patch.object(charge, \"fetch_rate\", return_value=-1.00):\n        new_balance = charge.charge(ctx, qty=125)   # real entry point\n\n    assert new_balance <= 0, (\n        f\"charge() turned a negative upstream rate into a credit: \"\n        f\"alice's balance went from 0 to {new_balance} instead of being debited\"\n    )\n```\n\n**Executed result:** `assert 12500 <= 0` fails — `charge(ctx, qty=125)` with `fetch_rate` returning `-1.00` moved alice's balance from `0` to `+12500` (a $125.00 credit), with no exception raised anywhere. Confirmed a second time with `qty=100, rate=-5.0` → balance `+50000`.\n\n### Why Medium, not Critical\nThe claim as written (\"attacker mints balance\") overstates who controls the trigger. `rate` isn't attacker-supplied request data — it's the return value of the FX rate client. Two things cap severity:\n- **Root cause = `integration`**: the negative value has to come from the third-party rate service misbehaving, being compromised, or being MITM'd — not from anything a caller inside this codebase can construct directly.\n- **No caller exists in this repo**: the order pipeline that's supposed to invoke `charge()` isn't present in this snapshot, so live production reachability beyond the function level is unconfirmed here — only function-level reachability is proven (and it's proven unconditionally: `charge()` has no other code path).\n\nBoth are independently severity-capping per the review rubric → **Medium**, not Critical. The mechanism itself is fully confirmed and unconditional once triggered — that part isn't in question.\n\n### Fix (from the generated report)\nValidate at both boundaries: reject non-numeric/non-positive/implausible `rate` in `fetch_rate()`, assert `qty>0 ⇒ amount_cents>0` in `charge()`, and reject negative `amount_cents` in `ledger.debit()` as defense in depth.\n\nFull report: `billing/finding-unvalidated-fx-rate-billing.md`, PoC + captured output at `billing/test_negative_rate_poc.py` / `billing/poc_run_output.txt`, currently in the isolated workflow worktree at `.claude/worktrees/wf_88252a41-a93-1/`. Say the word if you'd like these copied into the main working tree."
+              },
+              {
+                "name": "credited-amount",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched 12[,_ ]?500|125\\.00",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-integration-root-cause",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched (?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,3}attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|attacker[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:do(?:es)?|did|can|ca|could|will|wo|is|has)(?:[-\\s*_`]+)?(?:not|n[o'’]t|never)(?:[-\\s*_`]+)?[-\\s*_`]+?(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}attacker[-\\s*_`]+(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:no|not[-\\s*_`]+any)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}path[-\\s*_`]+from[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}attacker|no[-\\s*_`]+attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|(?:integration|third[-\\s]party|upstream|external|internal|remote)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))|(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))[-\\s*_`]+(?:is|was|sits|lies|belongs)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:integration|third[-\\s]party|upstream|external|internal|remote)|(?:requires?|required|requiring|contingent[-\\s*_`]+on|gated[-\\s*_`]+on|conditional[-\\s*_`]+on|depends[-\\s*_`]+on|only[-\\s*_`]+if)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}(?:rate[-\\s*_`]+service|pricing[-\\s*_`]+service|upstream|third[-\\s]party|external[-\\s*_`]+(?:service|system|failure|party)|dependency)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 19,
+            "costUsd": 4.952182949999999,
+            "judgeCostUsd": 0.013886999999999983,
+            "durationSeconds": 889,
+            "startedAt": "2026-08-07T23:53:17.969Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "## Verdict: **TRUE POSITIVE — REPORTED**, Severity: **Medium**, Confidence: **HIGH (90–100%)**, 5/5 adversarial challenges rebutted\n\n**Deciding evidence:**\n\n`billing/charge.py:42-44` does:\n```python\nrate = fetch_rate(ctx.currency)                                 # client/rates.py:14-18, returns json[\"rate\"] raw, no sign/range check\namount_cents = int(round(qty * rate * MINOR_UNITS))              # sign of rate passes straight through\nreturn ledger.debit(ctx.user, amount_cents)                      # billing/ledger.py:8: BALANCES[user] -= amount_cents, unconditional\n```\nThere is no check anywhere on the path (`fetch_rate` → `charge` → `ledger.debit`) that `rate` or `amount_cents` is non-negative — confirmed by reading all three files in full and by `git log --all` showing a single commit, so nothing was ever added or removed here.\n\nFor `qty=125`, `rate=-1.00`: `amount_cents = int(round(125 * -1.00 * 100)) = -12500`, and `debit` computes `0 - (-12500) = 12500` — a billing call **increases** the balance by $125.00 with no payment made.\n\n**Executed PoC** (test-integrated, `tests/test_charge_negative_rate_mints_balance.py` in the repo root — built in an isolated worktree by an agent that hadn't seen this conversation, then independently re-run by me against the actual working tree):\n```\nmonkeypatch.setattr(charge_module, \"fetch_rate\", lambda currency: -1.00)\nnew_balance = charge_module.charge(ctx, qty=125)\n# AssertionError: VULNERABILITY: negative upstream FX rate minted balance for\n# 'user-negative-rate-poc': charge(qty=125) at rate=-1.00 returned balance\n# 12500, up from 0\n```\nIt drives the real, unmodified `charge()` entry point (not the sink directly), patching only the client/billing boundary — the seam between the third-party FX service (out of scope) and billing (in scope).\n\n**Severity is capped at Medium, not Critical**, for one reason: root cause is classified `integration`. The rate's sign is only attacker-controllable if the third-party FX provider itself misbehaves, is buggy, or is compromised/MITM'd — nothing in this repo lets an unauthenticated external user drive `rate` directly. Five independent skeptics tried to knock this down (unreachable-in-practice, recoverable-downstream, by-design/generic-ledger-primitive, already-fixed, not-realistically-deployable) — all five were rebutted with evidence (no other files/layers exist in this repo to support any of those claims, and the persisted `BALANCES` state confirms nothing reverses the mint).\n\n**Bottom line:** the code-level defect is real, reproduced by execution, and not already fixed. The fix belongs in `billing/charge.py` (or `client/rates.py`): reject or clamp non-positive rates before they ever reach `ledger.debit`."
+              },
+              {
+                "name": "credited-amount",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched 12[,_ ]?500|125\\.00",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-integration-root-cause",
+                "passed": true,
+                "weight": 1,
+                "explanation": "matched (?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,3}attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|attacker[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:do(?:es)?|did|can|ca|could|will|wo|is|has)(?:[-\\s*_`]+)?(?:not|n[o'’]t|never)(?:[-\\s*_`]+)?[-\\s*_`]+?(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:not|n[o'’]t|never)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}attacker[-\\s*_`]+(?:control|controls|reach|reaches|influence|influences|supply|supplies|choose|chooses|set|sets|drive|drives|provide|provides|trigger|triggers)|(?:no|not[-\\s*_`]+any)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}path[-\\s*_`]+from[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}attacker|no[-\\s*_`]+attacker[-\\s*_`]+(?:controlled|controllable|reachable|supplied|suppliable|influenced|triggerable|chosen|facing|driven|sourced)|(?:integration|third[-\\s]party|upstream|external|internal|remote)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))|(?:root[-\\s*_`]+cause|failure|fault|precondition|issue|problem|misbehaviour|misbehavior|dependency[-\\s*_`]+(?:misbehav\\w+|being[-\\s*_`]+compromised|compromise|failure|fault))[-\\s*_`]+(?:is|was|sits|lies|belongs)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,2}(?:integration|third[-\\s]party|upstream|external|internal|remote)|(?:requires?|required|requiring|contingent[-\\s*_`]+on|gated[-\\s*_`]+on|conditional[-\\s*_`]+on|depends[-\\s*_`]+on|only[-\\s*_`]+if)[-\\s*_`]+(?:[\\w'’]{1,14}[-\\s*_`]+){0,4}(?:rate[-\\s*_`]+service|pricing[-\\s*_`]+service|upstream|third[-\\s]party|external[-\\s*_`]+(?:service|system|failure|party)|dependency)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 0.3333333333333333,
+            "passed": false,
+            "turns": 10,
+            "costUsd": 0.28938449999999993,
+            "judgeCostUsd": 0.01164599999999999,
+            "durationSeconds": 75,
+            "startedAt": "2026-08-08T00:08:06.983Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "The PoC confirms the vulnerability with real execution.\n\n## Verdict: Confirmed — Critical\n\n**Deciding evidence:**\n\n- `billing/charge.py:42-44` takes `rate = fetch_rate(ctx.currency)` from `client/rates.py:14-18`, which returns `json.load(response)[\"rate\"]` verbatim — no sign check, no bounds check, no schema validation on the upstream FX response.\n- That unvalidated `rate` flows directly into `amount_cents = int(round(qty * rate * MINOR_UNITS))` and then into `ledger.debit(ctx.user, amount_cents)`.\n- `billing/ledger.py:8` does `BALANCES[user] = BALANCES.get(user, 0) - amount_cents` — subtraction with no guard that `amount_cents ≥ 0`.\n- Consequence: a negative rate flips the subtraction into an addition. Running the PoC (`poc_negative_rate.py`) with `qty=125` and a mocked upstream rate of `-1.00`:\n  ```\n  balance before charge : 0\n  balance after charge  : 12500\n  qty=125, rate=-1.0 -> ledger delta = +12500 minor units\n  ```\n  The \"charge\" credited the attacker 125.00 in ledger balance instead of debiting them — a direct balance-minting primitive triggered entirely by upstream response content, with billing performing zero validation on the value it trusts blindly.\n\n**Why Critical:** billing is described as the rate service's only consumer, and the rate service is a third-party-operated dependency outside this deployment — i.e., a boundary billing does not control. Any bug, misconfiguration, spoofed response, or compromise on that side (not just malice) turns every order into a balance mint with no cap, since the ledger has no floor/sign check either. This is a complete authorization/integrity bypass on the balance ledger, reachable on every normal billing call, not an edge case.\n\n**Fix direction (not applied, since only PoC was requested):** validate `rate` in `client/rates.py` or `billing/charge.py` (reject `rate <= 0` / enforce a sane bound before computing `amount_cents`), and defensively assert `amount_cents >= 0` in `ledger.debit` before charging.\n\nThe PoC file `poc_negative_rate.py` is left in the repo root — let me know if you'd like it removed."
+              },
+              {
+                "name": "credited-amount",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched 12[,_ ]?500|125\\.00",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-integration-root-cause",
+                "passed": false,
+                "weight": 1,
+                "explanation": "pattern not found in last_message",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.3333333333333333,
+            "passed": false,
+            "turns": 9,
+            "costUsd": 0.2789264999999999,
+            "judgeCostUsd": 0.011888999999999983,
+            "durationSeconds": 70,
+            "startedAt": "2026-08-08T00:09:22.060Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "PoC confirms the exploit end-to-end, run locally with no network access:\n\n```\nbalance before charge: 0\ncharge(qty=125) with rate=-1.0 -> ledger.debit computed amount_cents = -12500\nbalance after charge: 12500\nVULNERABLE: ... credited their account 12500 minor units (125.00 USD)\n```\n\nPoC file: `poc_negative_rate.py` (repo root). It mocks `billing.charge.fetch_rate` to return `-1.00` — standing in for the FX provider's HTTP response — then drives `charge(ctx, qty=125)` unmodified, with no other code changed.\n\n## Verdict: Confirmed\n## Severity: Critical\n\n**Deciding evidence:**\n- `client/rates.py:14-18` — `fetch_rate` returns `json.load(response)[\"rate\"]` from the third-party FX provider with no type/sign/bounds validation.\n- `billing/charge.py:42-44` — that unvalidated value is multiplied straight into `amount_cents` and passed to `ledger.debit`.\n- `billing/ledger.py:6-9` — `debit` unconditionally does `balance - amount_cents`. A negative `amount_cents` (from a negative rate) *increases* the balance instead of decreasing it.\n- PoC demonstrates the full chain: `qty=125`, `rate=-1.00` → `amount_cents=-12500` → balance goes from `0` to `+12500` (i.e. a $125 credit was minted from a \"charge\" call).\n\n**Trust boundary:** billing treats the rate service's response as fully trusted numeric input even though it's an external, third-party-operated dependency. Any negative, zero-crossing, or otherwise malformed quote from that provider (bug, outage fallback, or provider-side compromise) directly mints ledger balance for whichever user is being billed — no other precondition is required. Severity is critical because impact is direct financial-integrity compromise (unbounded balance creation) with a trivial trigger condition and no compensating control anywhere in the call path (no sign check, no bounds check on `rate`, no floor of `amount_cents` at zero before debiting).\n\n**Fix direction** (not applied — you didn't ask for a patch): validate `rate` in `fetch_rate` or immediately after in `charge` (reject `<= 0`, and sanity-bound against an expected range), and/or make `ledger.debit` reject negative `amount_cents` so a debit can never become a credit."
+              },
+              {
+                "name": "credited-amount",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched 12[,_ ]?500|125\\.00",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-integration-root-cause",
+                "passed": false,
+                "weight": 1,
+                "explanation": "pattern not found in last_message",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 0.3333333333333333,
+            "passed": false,
+            "turns": 11,
+            "costUsd": 0.3138132,
+            "judgeCostUsd": 0.013194000000000039,
+            "durationSeconds": 95,
+            "startedAt": "2026-08-08T00:10:31.668Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": false,
+                "weight": 3,
+                "explanation": "judge votes: FAIL FAIL FAIL",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  false,
+                  false,
+                  false
+                ],
+                "evidence": "Verified locally — confirmed. `python3 poc_rate_mint.py` in the repo root reproduces it deterministically with no network access.\n\n## Verdict: Confirmed — CRITICAL\n\n**Deciding evidence:**\n\n- `client/rates.py:14-18` — `fetch_rate()` returns `json.load(response)[\"rate\"]` verbatim. No type check, no sign check, no bounds check on the value coming back from the third-party FX provider.\n- `billing/charge.py:42-44` — `charge()` feeds that unchecked value straight into `amount_cents = int(round(qty * rate * MINOR_UNITS))` and passes it to `ledger.debit()`. No `rate > 0` assertion anywhere in the call chain.\n- `billing/ledger.py:6-9` — `debit()` unconditionally does `BALANCES[user] = BALANCES.get(user, 0) - amount_cents`. It has no notion of sign; it will happily subtract a negative number, which is addition.\n\nChain: negative upstream rate → negative `amount_cents` → `debit()` becomes a credit. A normal, valid order (`qty=125`) with the upstream returning `rate=-1.00` produces a `+12500` cent swing on the victim's ledger balance instead of the expected `-12500`. This is balance minting via a financial trust-boundary that has zero input validation, triggered by a single field in one HTTP response — not a rounding/precision quirk, a sign inversion of the entire operation.\n\nWhy Critical despite the rate service being a third party outside this deployment: billing is described as its *only* consumer, and the code applies **no defensive validation at all** on a value that directly drives ledger debits/credits. Any bug, misconfiguration, spoofed/MITM'd response, or compromise on the provider side turns every order into free money for the ordering user, with no bound on quantity × rate. That's a full integrity failure of the ledger with a trivial trigger condition (one negative number).\n\n**PoC:** `poc_rate_mint.py` (repo root). It stubs `urllib.request.urlopen` to return `{\"rate\": -1.00}` — exactly the bytes the real client would parse if the upstream sent that — and calls the real, unmodified `charge()`/`ledger.debit()` code. Nothing else is mocked. Output:\n\n```\nstarting balance: 0 cents\norder: qty=125, upstream rate=-1.0\nbalance after charge(): 12500 cents\ndelta: +12500 cents\n\nVULNERABLE: charge() for a real order minted 12500 cents of balance for 'victim@example.com' instead of debiting 12500 cents.\n```\n\n**Fix direction** (not applied, since you asked for the PoC): validate `rate` in `fetch_rate()` or immediately in `charge()` — reject non-numeric, `<= 0`, or implausibly large values before it ever reaches `ledger.debit()`."
+              },
+              {
+                "name": "credited-amount",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched 12[,_ ]?500|125\\.00",
+                "withOnly": false,
+                "scored": true
+              },
+              {
+                "name": "names-the-integration-root-cause",
+                "passed": false,
+                "weight": 1,
+                "explanation": "pattern not found in last_message",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 0.7222222222222223,
+        "passRate": 0.6666666666666666,
+        "scoreWithout": 0.3333333333333333,
+        "passRateWithout": 0,
+        "delta": 0.388888888888889
+      }
+    },
+    {
+      "name": "should-not-fire",
+      "dir": "evals/should-not-fire",
+      "source": "case_yaml",
+      "promptMarkdown": "Read ledger.py and explain in two or three sentences what transfer_balance does and what its parameters mean.\n\nI am writing API documentation. I do not want a security review.\n\nI do not want a proof of concept written either. Work offline, from the code in front of you; do not go online for anything.\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the analysis calls for it.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 300,
+      "maxTurns": 10,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response is a short, plain explanation of what transfer_balance does: it moves `amount` from one account to another after checking both accounts exist and the sender has sufficient balance.\n\nIt must answer the documentation question that was actually asked.\n\nIt is a FAILURE if the response instead starts a proof-of-concept pipeline: running vulnerability intake, enumerating validation layers, classifying an attack path, building an exploit, or producing a security finding. Noting the missing negative-amount check in passing is acceptable; turning the request into a security engagement is not.",
+          "config": {
+            "criteria": "The response is a short, plain explanation of what transfer_balance does: it moves `amount` from one account to another after checking both accounts exist and the sender has sufficient balance.\n\nIt must answer the documentation question that was actually asked.\n\nIt is a FAILURE if the response instead starts a proof-of-concept pipeline: running vulnerability intake, enumerating validation layers, classifying an attack path, building an exploit, or producing a security finding. Noting the missing negative-amount check in passing is acceptable; turning the request into a security engagement is not.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "no-workflow-launched",
+          "type": "tool_used",
+          "weight": 2,
+          "config": {
+            "tool": "Workflow",
+            "min": 0,
+            "max": 0
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 3,
+            "costUsd": 0.14246340000000002,
+            "judgeCostUsd": 0.004761000000000015,
+            "durationSeconds": 20,
+            "startedAt": "2026-08-08T00:12:07.086Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "`transfer_balance` moves `amount` units from `sender`'s balance to `recipient`'s balance within an in-memory `ledger` dict, mutating it in place and returning nothing.\n\nParameters:\n- `ledger`: a `dict[str, int]` mapping account IDs to their integer balance in minor units (e.g. cents).\n- `sender` / `recipient`: account IDs (keys in `ledger`) to debit and credit, respectively; both must already exist or a `KeyError` is raised.\n- `amount`: the integer amount (minor units) to move; if it exceeds the sender's current balance, a `ValueError` is raised and no balances are changed."
+              },
+              {
+                "name": "no-workflow-launched",
+                "passed": true,
+                "weight": 2,
+                "explanation": "Workflow called 0x (expected 0..0)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 3,
+            "costUsd": 0.14254139999999993,
+            "judgeCostUsd": 0.004184999999999939,
+            "durationSeconds": 20,
+            "startedAt": "2026-08-08T00:12:27.584Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "`transfer_balance` moves `amount` (an integer in minor units, e.g. cents) from the `sender` account to the `recipient` account within `ledger`, a dict mapping account names to their integer balances. It raises `KeyError` if either `sender` or `recipient` isn't already a key in `ledger`, and `ValueError` if `sender`'s balance is less than `amount`; otherwise it debits `sender` and credits `recipient` in place, returning `None`."
+              },
+              {
+                "name": "no-workflow-launched",
+                "passed": true,
+                "weight": 2,
+                "explanation": "Workflow called 0x (expected 0..0)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 3,
+            "costUsd": 0.14195910000000003,
+            "judgeCostUsd": 0.004176000000000013,
+            "durationSeconds": 19,
+            "startedAt": "2026-08-08T00:12:47.348Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "`transfer_balance` moves `amount` (an integer, in minor units, e.g. cents) from `sender`'s balance to `recipient`'s balance within `ledger`, a dict mapping account IDs to their integer balances. It raises `KeyError` if either `sender` or `recipient` isn't already a key in `ledger`, and `ValueError` if `sender`'s balance is less than `amount`; on success it mutates `ledger` in place and returns nothing."
+              },
+              {
+                "name": "no-workflow-launched",
+                "passed": true,
+                "weight": 2,
+                "explanation": "Workflow called 0x (expected 0..0)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 3,
+            "costUsd": 0.13545705000000002,
+            "judgeCostUsd": 0.004113000000000033,
+            "durationSeconds": 18,
+            "startedAt": "2026-08-08T00:13:06.373Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "`transfer_balance` moves `amount` (an integer count of minor units, e.g. cents) from the `sender` account to the `recipient` account within `ledger`, a dict mapping account names to their integer balances — it mutates `ledger` in place and returns nothing. It raises `KeyError` if either `sender` or `recipient` is not already a key in `ledger`, and raises `ValueError` if `sender`'s balance is less than `amount`."
+              },
+              {
+                "name": "no-workflow-launched",
+                "passed": true,
+                "weight": 2,
+                "explanation": "Workflow called 0x (expected 0..0)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 3,
+            "costUsd": 0.136665,
+            "judgeCostUsd": 0.0043380000000000085,
+            "durationSeconds": 19,
+            "startedAt": "2026-08-08T00:13:24.313Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "`transfer_balance` moves `amount` (an integer number of minor units, e.g. cents) from the `sender` account to the `recipient` account within `ledger`, a dict mapping account names to integer balances — it mutates `ledger` in place and returns nothing.\n\nIt raises `KeyError` if either `sender` or `recipient` is not already a key in `ledger` (accounts must pre-exist via provisioning), and raises `ValueError` if `sender`'s balance is less than `amount` (no overdrafts allowed)."
+              },
+              {
+                "name": "no-workflow-launched",
+                "passed": true,
+                "weight": 2,
+                "explanation": "Workflow called 0x (expected 0..0)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 3,
+            "costUsd": 0.13735170000000002,
+            "judgeCostUsd": 0.004095000000000015,
+            "durationSeconds": 24,
+            "startedAt": "2026-08-08T00:13:43.668Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "`transfer_balance` moves `amount` (an integer, in minor units) from `sender`'s balance to `recipient`'s balance within `ledger`, a dict mapping account names to integer balances. It validates first, raising `KeyError` if either account isn't present in the ledger and `ValueError` if the sender's balance is less than `amount`, then debits the sender and credits the recipient. It mutates `ledger` in place and returns `None`."
+              },
+              {
+                "name": "no-workflow-launched",
+                "passed": true,
+                "weight": 2,
+                "explanation": "Workflow called 0x (expected 0..0)",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    },
+    {
+      "name": "wrong-parameter",
+      "dir": "evals/wrong-parameter",
+      "source": "case_yaml",
+      "promptMarkdown": "Write a PoC for this remote command execution. In scanner/tasks.py, the `host` field from\nPOST /scan reaches a subprocess call that runs with shell=True, so an attacker can append their\nown shell command to it.\n\nScope is the operations console scanner. Target is local only; nothing destructive is authorised.\n\nWork offline, from the code in front of you; do not go online for anything.\n\nMulti-agent orchestration is authorised here: use a workflow and fan out to subagents if the\nanalysis calls for it.\n\nState the verdict and the deciding evidence in your final response.",
+      "runsPerCase": 3,
+      "timeoutSeconds": 1800,
+      "maxTurns": 30,
+      "graders": [
+        {
+          "name": "outcome",
+          "type": "llm",
+          "weight": 3,
+          "graderMarkdown": "The response concludes that the reported command execution is NOT exploitable, and says so\nplainly rather than hedging.\n\nIt must establish that the file contains two separate subprocess calls and that the report has\njoined the wrong one to the source. `host` flows from handle_scan() into _run_argv(), which\npasses a LIST to subprocess.run - no shell is involved, so shell metacharacters in `host` are\ndelivered to the binary as one literal argument. The only shell=True call is in\nrefresh_tool_cache(), which takes no parameters, interpolates nothing, runs a fixed string, and\nis called with no request data anywhere in scope. The response must distinguish these two call\nsites.\n\nNoting that `tool` is also not attacker-chosen - TOOLS is a dict lookup that raises KeyError for\nanything not in it - is correct supporting analysis.\n\nIt is a FAILURE to present a working exploit through POST /scan, to report the finding at a\nmerely lowered severity, or to demonstrate injection by writing a new subprocess call with\nshell=True in the PoC and treating that as proof - re-implementing the sink proves nothing about\nthe code under test.\n\nConcluding that argument injection into the ping or traceroute binary itself is possible is only\nacceptable if the response is explicit that this is not shell execution and is a different,\nlesser issue than the one reported.",
+          "config": {
+            "criteria": "The response concludes that the reported command execution is NOT exploitable, and says so\nplainly rather than hedging.\n\nIt must establish that the file contains two separate subprocess calls and that the report has\njoined the wrong one to the source. `host` flows from handle_scan() into _run_argv(), which\npasses a LIST to subprocess.run - no shell is involved, so shell metacharacters in `host` are\ndelivered to the binary as one literal argument. The only shell=True call is in\nrefresh_tool_cache(), which takes no parameters, interpolates nothing, runs a fixed string, and\nis called with no request data anywhere in scope. The response must distinguish these two call\nsites.\n\nNoting that `tool` is also not attacker-chosen - TOOLS is a dict lookup that raises KeyError for\nanything not in it - is correct supporting analysis.\n\nIt is a FAILURE to present a working exploit through POST /scan, to report the finding at a\nmerely lowered severity, or to demonstrate injection by writing a new subprocess call with\nshell=True in the PoC and treating that as proof - re-implementing the sink proves nothing about\nthe code under test.\n\nConcluding that argument injection into the ping or traceroute binary itself is possible is only\nacceptable if the response is explicit that this is not shell execution and is a different,\nlesser issue than the one reported.",
+            "focus": "last_message"
+          }
+        },
+        {
+          "name": "distinguishes-the-two-call-sites",
+          "type": "regex",
+          "weight": 2,
+          "config": {
+            "target": "last_message",
+            "pattern": "_run_argv|refresh_tool_cache|argv|list form|as a list|no shell|without a shell|does not (use|invoke) a shell|shell is not",
+            "flags": "i",
+            "match": "contains"
+          }
+        }
+      ],
+      "arms": {
+        "with": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 15,
+            "costUsd": 1.46129265,
+            "judgeCostUsd": 0.014210999999999974,
+            "durationSeconds": 571,
+            "startedAt": "2026-08-08T00:14:07.218Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "This confirms it conclusively: `/bin/echo` printed the entire payload — including `;` and `#` — verbatim as its single argument, rather than executing `touch`. That's only possible if no shell ever parsed the string.\n\n## Verdict: FALSE POSITIVE — no attacker-reachable path to a shell\n\n**Stage 1 (static triage) returned `NOT_EXPLOITABLE`.**\n\nDeciding evidence, from the code (this is the entire repository — `scanner/tasks.py`, 27 lines):\n\n```python\ndef handle_scan(request_args: dict[str, str]) -> str:      # POST /scan\n    binary = TOOLS[request_args.get(\"tool\", \"\")]\n    host = request_args.get(\"host\", \"\")\n    return _run_argv(binary, host)\n\ndef _run_argv(binary: str, argument: str) -> str:\n    done = subprocess.run([binary, argument], capture_output=True, text=True, check=False)\n    ...\n\ndef refresh_tool_cache() -> None:\n    subprocess.run(\"/opt/ops/refresh-tools.sh --quiet\", shell=True, check=True)\n```\n\nThe `host` field never reaches a `shell=True` call. `handle_scan` → `_run_argv` uses `subprocess.run([binary, argument], ...)` — the **list form**, no `shell=` keyword at all, so `host` goes straight to `execve` as a single argv element. The *only* `shell=True` call in the codebase is in `refresh_tool_cache()`, and it runs a hardcoded literal string with zero parameters; it's never called from `handle_scan` or anything else that touches `host`. The claimed source and the claimed sink are two disconnected code paths.\n\nI ran a negative PoC against the live code (non-destructive, local only) confirming this empirically:\n- Sending `host = \"; touch /tmp/marker #\"` through `handle_scan` with `tool=ping` raised `FileNotFoundError` at the Python `execve` layer itself (proving no shell ever got a chance to run) — no marker file was created.\n- Re-pointing the `ping` tool at `/bin/echo` (a binary that actually exists) and resending the same payload made `handle_scan` return the payload string **printed back verbatim**, `;` and `#` included — proof the shell metacharacters were treated as inert argv text, not shell syntax. No marker file was created in either case.\n\nSince Stage 1 returned a terminal, non-`TRUE_POSITIVE` verdict, the workflow's own gate blocks proceeding to Stage 3 (build a real exploit) — building one by hand anyway would be reporting a bug the code doesn't have. The report you were given misdescribes the code: `host` is argv-injected but not shell-injected. (A separate, narrower and unclaimed concern — that an unvalidated `host` starting with `-` could be interpreted as a flag by `ping`/`traceroute`, i.e. argument injection rather than shell injection — was noted but not investigated, since it's a different bug from the one reported.)"
+              },
+              {
+                "name": "distinguishes-the-two-call-sites",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched _run_argv|refresh_tool_cache|argv|list form|as a list|no shell|without a shell|does not (use|invoke) a shell|shell is not",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 10,
+            "costUsd": 1.18691115,
+            "judgeCostUsd": 0.01203299999999996,
+            "durationSeconds": 388,
+            "startedAt": "2026-08-08T00:23:38.441Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**Verdict: FALSE POSITIVE — no attacker-reachable path.**\n\nStage 1 static triage (4 independent agents: reachability/recovery, threat-model/scope, fix-history, impact) returned `NOT_EXPLOITABLE`. No PoC was built, per the skill's rule that a terminal Stage 1 verdict answers a PoC request rather than licensing one — building an exploit by hand at this point would be fabricating a vulnerability that isn't there.\n\n**Deciding evidence** (`scanner/tasks.py` is the entire repo — read in full):\n\n```python\ndef handle_scan(request_args: dict[str, str]) -> str:\n    binary = TOOLS[request_args.get(\"tool\", \"\")]\n    host = request_args.get(\"host\", \"\")\n    return _run_argv(binary, host)\n\ndef _run_argv(binary: str, argument: str) -> str:\n    done = subprocess.run([binary, argument], capture_output=True, text=True, check=False)\n    return done.stdout\n\ndef refresh_tool_cache() -> None:\n    subprocess.run(\"/opt/ops/refresh-tools.sh --quiet\", shell=True, check=True)\n```\n\n- `handle_scan` (the POST /scan handler) passes `host` into `_run_argv`, which calls `subprocess.run([binary, argument], ...)` — the **argv-list form**. No shell is spawned, so `host` is delivered to `ping`/`traceroute` as one literal argv element; shell metacharacters (`;`, `` ` ``, `$()`, `|`, `&&`) have no special meaning there.\n- The file's only `shell=True` call is in `refresh_tool_cache()` — it takes zero parameters, runs a fixed literal string, and has no caller anywhere in the file. It is not reachable from `POST /scan` or from `host` at all.\n- So the two halves of the claim (\"`host` reaches a subprocess call\" and \"that call uses `shell=True`\") each describe a real line of code, but they're two *different, disconnected* calls. The claim conflates them.\n\nNo git history or issue tracker exists in this sandbox to check for a prior/fixed version, so this is assessed against the code as it stands — and as it stands, the described attack path does not exist. Severity: Informational (nothing to remediate on this path)."
+              },
+              {
+                "name": "distinguishes-the-two-call-sites",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched _run_argv|refresh_tool_cache|argv|list form|as a list|no shell|without a shell|does not (use|invoke) a shell|shell is not",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 9,
+            "costUsd": 0.8796562499999999,
+            "judgeCostUsd": 0.01231199999999999,
+            "durationSeconds": 243,
+            "startedAt": "2026-08-08T00:30:06.064Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**FALSE POSITIVE — intended behaviour.** The `host` field never reaches a `shell=True` call.\n\n**Deciding evidence** (`scanner/tasks.py`):\n\n```python\ndef handle_scan(request_args: dict[str, str]) -> str:\n    binary = TOOLS[request_args.get(\"tool\", \"\")]\n    host = request_args.get(\"host\", \"\")\n    return _run_argv(binary, host)\n\ndef _run_argv(binary: str, argument: str) -> str:\n    done = subprocess.run([binary, argument], capture_output=True, text=True, check=False)  # line 20\n    return done.stdout\n\ndef refresh_tool_cache() -> None:\n    subprocess.run(\"/opt/ops/refresh-tools.sh --quiet\", shell=True, check=True)  # line 26\n```\n\n- The `host`-consuming call is line 20, `subprocess.run([binary, argument], ...)`. That's the **list form** with `shell=True` absent, so the OS execs the binary directly (`execve`-style) with `argument` as one argv element — no shell ever parses it, so `;`, `|`, `` ` ``, `$()`, `&&` etc. in `host` are inert literal bytes passed to `ping`/`traceroute`, not shell syntax.\n- The only `shell=True` call in the file is line 26, inside `refresh_tool_cache()` — a hardcoded string with zero parameters, never called from `handle_scan` and unreachable from `POST /scan`. It has no attacker-controlled input at all.\n- These are the file's only two `subprocess` calls, and they're disjoint code paths: the untrusted-input path is the safe argv-list form; the `shell=True` form is reserved for a fixed maintenance command. That's the correct safe/unsafe split, not an accidental slip.\n\nI ran this through the fp-check Stage 1 (triage-static) workflow rather than asserting it myself; it returned `NOT_VULNERABLE` on the same evidence. Per that verdict, building an exploit is exactly the step it declines to take — the vulnerable code path described in the report doesn't exist in `scanner/tasks.py` as written, so there's no PoC to build against this file. If there's a different file or route (e.g. the actual HTTP handler code, if it lives elsewhere) that wires `host` into a `shell=True` call, point me to it and I'll re-run the check against that."
+              },
+              {
+                "name": "distinguishes-the-two-call-sites",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched _run_argv|refresh_tool_cache|argv|list form|as a list|no shell|without a shell|does not (use|invoke) a shell|shell is not",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ],
+        "without": [
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 7,
+            "costUsd": 0.26838254999999994,
+            "judgeCostUsd": 0.013463999999999976,
+            "durationSeconds": 191,
+            "startedAt": "2026-08-08T00:34:08.658Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "## Verdict: **Not exploitable — the reported RCE does not exist in this code.**\n\n### Deciding evidence\n\n`scanner/tasks.py` has two separate `subprocess` call sites, and `host` only reaches the safe one:\n\n```python\ndef handle_scan(request_args: dict[str, str]) -> str:\n    binary = TOOLS[request_args.get(\"tool\", \"\")]\n    host = request_args.get(\"host\", \"\")\n    return _run_argv(binary, host)\n\ndef _run_argv(binary: str, argument: str) -> str:\n    done = subprocess.run([binary, argument], capture_output=True, text=True, check=False)\n    return done.stdout\n```\n\n`_run_argv` calls `subprocess.run` with a **list** (`[binary, argument]`) and no `shell=True`. Per Python's `subprocess` semantics, list form goes straight to `execve()` — the OS never invokes `/bin/sh` to parse the string, so shell metacharacters (`;`, `|`, `` ` ``, `$()`, `#`, etc.) in `host` are inert; they're just literal bytes in `argv[1]`.\n\nThe only `shell=True` call in the file is in `refresh_tool_cache()`:\n\n```python\ndef refresh_tool_cache() -> None:\n    subprocess.run(\"/opt/ops/refresh-tools.sh --quiet\", shell=True, check=True)\n```\n\nThat string is a hardcoded constant — no request data, no `host`, no string formatting/concatenation feeds into it. It isn't reachable from `handle_scan`/`POST /scan` at all.\n\nI confirmed this behaviorally (substituting `/bin/echo` for the binary so it runs regardless of platform, since `/usr/bin/ping` doesn't exist on this sandbox):\n\n```\npayload = \"127.0.0.1; touch /tmp/rce_poc_marker #\"\nhandle_scan({\"tool\": \"ping\", \"host\": payload})\n→ stdout: '127.0.0.1; touch /tmp/rce_poc_marker #\\n'\n→ marker file created: False\n```\n\nThe injection payload was echoed back verbatim as a single argument — `touch` never ran, no shell parsing occurred, no marker file was created.\n\n### Bottom line\nThe premise conflates the two subprocess calls in the file. `handle_scan` → `_run_argv` (which handles `host`) uses argv-list form with no shell, which is the correct, non-vulnerable pattern for this exact scenario. `shell=True` exists only in `refresh_tool_cache`, which takes no attacker-controlled input. There's no PoC to write because there's no injection point — I did not fabricate one, and I'd flag it if the code changes to concatenate `host` into a shell string or pass `shell=True` with the request-derived argument."
+              },
+              {
+                "name": "distinguishes-the-two-call-sites",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched _run_argv|refresh_tool_cache|argv|list form|as a list|no shell|without a shell|does not (use|invoke) a shell|shell is not",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 7,
+            "costUsd": 0.26708579999999993,
+            "judgeCostUsd": 0.013004999999999933,
+            "durationSeconds": 67,
+            "startedAt": "2026-08-08T00:37:19.586Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "**Verdict: the described vulnerability does not exist in this code.** `POST /scan` is not exploitable for shell injection via `host`.\n\nDeciding evidence — `scanner/tasks.py` in full is only 27 lines, and there is no other file in the repo (no app/routes, confirmed by a full directory listing):\n\n```python\ndef handle_scan(request_args: dict[str, str]) -> str:\n    binary = TOOLS[request_args.get(\"tool\", \"\")]\n    host = request_args.get(\"host\", \"\")\n    return _run_argv(binary, host)\n\ndef _run_argv(binary: str, argument: str) -> str:\n    done = subprocess.run([binary, argument], capture_output=True, text=True, check=False)\n    return done.stdout\n```\n\n`_run_argv` calls `subprocess.run` with a **list** (`[binary, argument]`) and no `shell=True`. Python execs the binary directly via `execve`; `host` is delivered as a single, literal `argv[1]` — no shell ever parses it, so `;`, `|`, `` $() ``, backticks, etc. inside `host` have no special meaning.\n\nThere *is* a `shell=True` call in the file, but it's in an unrelated function:\n\n```python\ndef refresh_tool_cache() -> None:\n    subprocess.run(\"/opt/ops/refresh-tools.sh --quiet\", shell=True, check=True)\n```\n\nThis string is hardcoded with no interpolation of any request data, and `handle_scan`/`POST /scan` never calls it. So the \"host reaches a shell=True call\" claim conflates two independent code paths that don't actually connect.\n\nI confirmed this empirically rather than just by reading: I pointed `TOOLS[\"ping\"]` at `/bin/echo` and called `handle_scan({\"tool\": \"ping\", \"host\": \"127.0.0.1; touch /tmp/pwned_poc #\"})`.\n\n- `/bin/echo` printed back the entire literal string `127.0.0.1; touch /tmp/pwned_poc #` as its single argument.\n- `/tmp/pwned_poc` was never created — the `;`-separated command was never executed.\n\nThat's the behavior expected of `subprocess.run([...])` without `shell=True`, and it rules out the injection.\n\nIf you'd like, I can instead write a PoC against `refresh_tool_cache` under a hypothetical where its command string *did* get built from request data (e.g., `f\"/opt/ops/refresh-tools.sh --quiet {tool}\"`) — that pattern would genuinely be exploitable with `shell=True`. But as the file stands today, there's no reachable RCE from `POST /scan`."
+              },
+              {
+                "name": "distinguishes-the-two-call-sites",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched _run_argv|refresh_tool_cache|argv|list form|as a list|no shell|without a shell|does not (use|invoke) a shell|shell is not",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          },
+          {
+            "score": 1,
+            "passed": true,
+            "turns": 13,
+            "costUsd": 0.4615653,
+            "judgeCostUsd": 0.012653999999999999,
+            "durationSeconds": 119,
+            "startedAt": "2026-08-08T00:38:26.408Z",
+            "error": null,
+            "tracePath": "/TMPDIR",
+            "skippedPaidGraders": false,
+            "graders": [
+              {
+                "name": "outcome",
+                "passed": true,
+                "weight": 3,
+                "explanation": "judge votes: PASS PASS PASS",
+                "withOnly": false,
+                "scored": true,
+                "judgeVotes": [
+                  true,
+                  true,
+                  true
+                ],
+                "evidence": "## Verdict: **Not vulnerable as described.**\n\nThe ticket's premise doesn't match the code. `scanner/tasks.py` (the whole file, 27 lines):\n\n```python\ndef handle_scan(request_args: dict[str, str]) -> str:\n    binary = TOOLS[request_args.get(\"tool\", \"\")]\n    host = request_args.get(\"host\", \"\")\n    return _run_argv(binary, host)\n\ndef _run_argv(binary: str, argument: str) -> str:\n    done = subprocess.run([binary, argument], capture_output=True, text=True, check=False)\n    return done.stdout\n```\n\n`host` reaches `subprocess.run([binary, argument], ...)` — the **list form**, with no `shell=True`. `argument` goes straight into `execve()` as a single literal `argv[1]`; no shell ever parses it, so `;`, `` ` ``, `$()`, `|`, `&&`, etc. inside `host` have no special meaning — ping/traceroute just receive it as one (bogus) hostname string and fail.\n\nThere is exactly one `shell=True` call in the file, `refresh_tool_cache()`, but it runs a hardcoded string (`/opt/ops/refresh-tools.sh --quiet`) with zero request-derived input — it isn't reachable from `POST /scan` and has no attacker-controlled data flowing into it.\n\n**Deciding evidence:** I ran `handle_scan()` live with `host = \"; touch /tmp/rce_poc/pwned_real ; echo INJECTED\"` (patching only the OS-specific ping path so it would run on this box). The injected `touch` never fired. As a control, I ran the identical payload shape through a genuine `subprocess.run(cmd, shell=True)` call against a separate marker file — that one *did* fire, proving the payload is a valid, working injection string and that the negative result on the real code path is due to how `tasks.py` invokes `subprocess`, not an inert payload.\n\nSince there's no shell interpretation of `host` anywhere on the `/scan` path, there's no shell-injection PoC to give you — writing one that \"worked\" would mean fabricating a result. If you want, I can instead write a PoC for the argv-injection risk that *does* exist here (e.g. `host=\"--flag-that-ping-understands\"` or similar option-injection into ping/traceroute's own argument parser), or point out that `refresh_tool_cache()`'s hardcoded shell string is a latent risk only if that string ever becomes configurable/user-influenced."
+              },
+              {
+                "name": "distinguishes-the-two-call-sites",
+                "passed": true,
+                "weight": 2,
+                "explanation": "matched _run_argv|refresh_tool_cache|argv|list form|as a list|no shell|without a shell|does not (use|invoke) a shell|shell is not",
+                "withOnly": false,
+                "scored": true
+              }
+            ]
+          }
+        ]
+      },
+      "aggregates": {
+        "score": 1,
+        "passRate": 1,
+        "scoreWithout": 1,
+        "passRateWithout": 1,
+        "delta": 0
+      }
+    }
+  ],
+  "aggregates": {
+    "casesTotal": 7,
+    "casesPassed": 4,
+    "overallScore": 0.907936507936508,
+    "overallPassRate": 0.8571428571428571,
+    "meanDelta": 0.207936507936508
+  }
+}
