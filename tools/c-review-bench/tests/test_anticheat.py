@@ -93,7 +93,7 @@ def test_unparseable_transcript_is_refused(tmp_path):
     ],
 )
 def test_bash_classification_matches_on_command_position(command, expected):
-    assert [severity for severity, _ in anticheat._classify_bash(command)] == expected
+    assert [hit[0] for hit in anticheat._classify_bash(command)] == expected
 
 
 def test_a_git_history_read_is_advisory_not_disqualifying():
@@ -127,26 +127,26 @@ def test_reading_the_corpus_is_not_an_answer_key_access(payload):
         {"command": "cat /w/sigil/bench-private/staged/src/field.c"},
         {"file_path": "/repo/plugins/c-review/bench/corpora/sigil/recipe.json"},
         {"command": "sed -n 1,50p /repo/plugins/c-review/bench/lib/grade.py"},
-        {"file_path": "/repo/C-REVIEW-EVALUATION.md"},
+        {"file_path": "/repo/tools/c-review-bench/MEASUREMENTS.md"},
     ],
 )
 def test_reading_the_answer_key_is_still_caught(payload):
     hits = anticheat._classify_tool("Read", json.dumps(payload))
-    assert [severity for severity, _ in hits] == ["violation"], payload
+    assert [hit[0] for hit in hits] == ["violation"], payload
 
 
 def test_an_oracle_hostname_in_a_read_is_advisory():
     result = anticheat._classify_tool(
         "Read", json.dumps({"file_path": "notes-from-github.com.txt"})
     )
-    assert [severity for severity, _ in result] == ["advisory"]
+    assert [hit[0] for hit in result] == ["advisory"]
 
 
 def test_mcp_search_tools_count_as_oracles():
     result = anticheat._classify_tool(
         "mcp__exa__web_search_exa", json.dumps({"query": "expat cve"})
     )
-    assert [severity for severity, _ in result] == ["violation"]
+    assert [hit[0] for hit in result] == ["violation"]
 
 
 # ------------------------------------------------------------------ declarations

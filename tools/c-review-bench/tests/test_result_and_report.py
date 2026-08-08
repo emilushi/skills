@@ -196,6 +196,53 @@ def test_collect_uses_the_plugins_own_definition_of_reported(tmp_path):
     assert collected["external_sources_consulted"] is True
 
 
+def test_collect_captures_judge_ran_ledger_and_severity_source(tmp_path):
+    """The plugin now emits `run.judge_ran`, `run.ledger` and a per-finding
+    `severity_source` (set when no judge validated the reviewer's own severity) — added
+    after `assemble_findings.py` grew them and this harness silently dropped all three on
+    the floor. Before this fix `collected["judge_ran"]` and `collected["ledger"]` did not
+    exist at all, and `finding["severity_source"]` was stripped by `OPTIONAL_FINDING_FIELDS`
+    even though it is the one marker that says a severity is an unadjudicated opinion."""
+    run = scaffold(tmp_path)
+    native = {
+        "run": {
+            "severity_filter": "all",
+            "judge_ran": False,
+            "ledger": {"total_pairs": 12, "unaccounted": 0},
+            "groups_attempted": ["memory-bounds"],
+        },
+        "stats": {"raw_findings": 1},
+        "coverage": [],
+        "findings": [
+            {
+                "id": "A-1",
+                "file": "src/a.c",
+                "line": 40,
+                "function": "decode_value",
+                "title": "t",
+                "description": "d",
+                "severity": "MEDIUM",
+                "severity_source": "reviewer",
+                "fp_verdict": "LIKELY_TP",
+            }
+        ],
+    }
+    path = write(tmp_path / "findings.json", native)
+    collected = result_mod.collect(
+        run_dir=run,
+        arm="bare",
+        corpus="sigil",
+        result_path=path,
+        meta_path=FIXTURES / "meta_ok.json",
+        transcripts=[],
+        settle_seconds=0.01,
+        timeout=1,
+    )
+    assert collected["judge_ran"] is False
+    assert collected["ledger"] == {"total_pairs": 12, "unaccounted": 0}
+    assert collected["findings"][0]["severity_source"] == "reviewer"
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
@@ -445,7 +492,7 @@ def test_partitioning_an_empty_tree_is_refused(tmp_path):
 
 def test_the_estimate_scales_with_corpus_size_and_has_a_floor():
     _, small = plan_mod.estimate_tokens("bare", 0.9, None)
-    _, reference = plan_mod.estimate_tokens("bare", 13.0, None)
+    _, reference = plan_mod.estimate_tokens("bare", plan_mod.REFERENCE_KLOC, None)
     _, big = plan_mod.estimate_tokens("bare", 86.0, None)
     assert small < reference < big
     assert small > plan_mod.ARM_MODEL["bare"]["per_agent"] * plan_mod.FLOOR_SHARE * 0.99
@@ -455,6 +502,20 @@ def test_the_estimate_scales_with_corpus_size_and_has_a_floor():
 def test_the_fanout_arm_needs_an_agent_count():
     with pytest.raises(plan_mod.PlanError, match="needs an agent count"):
         plan_mod.estimate_tokens("fanout", 1.0, None)
+
+
+def test_the_cost_model_is_calibrated_against_the_real_zstream_measurement():
+    """The model measured **5.4x low** against the real 2026-08-06 zstream cells recorded in
+    tools/c-review-bench/README.md (24-32 agents / 4.9-6.0M tokens for c-review; 0.40-0.75M for
+    bare) — the old anchor (a single 2026-08-04 cell on an unrelated 13 KLOC corpus) put a
+    9.26 KLOC c-review cell at ~1.29M tokens, so a `standard`-tier plan under-promised a run
+    that actually cost tens of millions of tokens. `REFERENCE_KLOC` is now zstream's own size,
+    so the model, evaluated at the corpus it was measured on, must land inside the observed
+    range rather than a few times below it."""
+    _, c_review_tokens = plan_mod.estimate_tokens("c-review", plan_mod.REFERENCE_KLOC, None)
+    assert 4_900_000 <= c_review_tokens <= 6_000_000, c_review_tokens
+    _, bare_tokens = plan_mod.estimate_tokens("bare", plan_mod.REFERENCE_KLOC, None)
+    assert 400_000 <= bare_tokens <= 750_000, bare_tokens
 
 
 def test_plan_refuses_a_corpus_with_no_verification_stamp(tmp_path):
@@ -747,5 +808,202 @@ def test_an_unfilled_placeholder_is_refused():
         plan_mod._render("hello {{MISSING}}", {"OTHER": "x"})
 
 
+# ------------------------------------------------- planning a *sealed* corpus
+#
+# `seal` deletes every corpora/*/recipe.json and writes recipe.public.json beside it.
+# Nothing read that file, so after a seal `bench.py plan` died with "no corpora found"
+# and the only way to get packets was to plan *before* sealing — the one ordering the
+# seal exists to prevent. `plan` needs the tier, scope and threat model and never needs
+# the bug list, so the sealed form has to be plannable.
+
+
+def sealed_public_recipe(tmp_path: Path) -> Path:
+    """What `seal` leaves on disk: the full recipe minus `bugs` and `decoys`."""
+    full = json.loads(SIGIL.read_text(encoding="utf-8"))
+    public = {k: v for k, v in full.items() if k not in ("bugs", "decoys")}
+    public["bug_count"] = len(full["bugs"])
+    public["decoy_count"] = len(full["decoys"])
+    public["_sealed"] = True
+    return write(tmp_path / "corpora" / "sigil" / "recipe.public.json", public)
+
+
+def test_a_sealed_corpus_can_still_be_planned(tmp_path):
+    public = recipe_mod.load_public(sealed_public_recipe(tmp_path))
+    assert "bugs" not in public and "decoys" not in public
+    workroot = stamped(tmp_path)
+    plan = plan_mod.build_plan(
+        tier="standard",
+        recipes={"sigil": public},
+        workroot=workroot,
+        run_dir=tmp_path / "run",
+        packet_dir=HERE.parent / "arms",
+        fanout_n=3,
+        allow_missing=True,
+        corpora=["sigil"],
+    )
+    assert plan["cells"], "a sealed corpus produced zero cells"
+    # The threat model and scope come from the recipe, so prove they survived the seal.
+    packet = (tmp_path / "run" / "packets" / "bare__sigil__bench.md").read_text(encoding="utf-8")
+    assert full_threat_model() in packet
+
+
+def full_threat_model() -> str:
+    return json.loads(SIGIL.read_text(encoding="utf-8"))["threat_model"]
+
+
+def test_load_public_refuses_a_recipe_that_still_holds_the_answers(tmp_path):
+    path = sealed_public_recipe(tmp_path)
+    leaky = json.loads(path.read_text(encoding="utf-8"))
+    leaky["bugs"] = [{"id": "B01"}]
+    write(path, leaky)
+    with pytest.raises(recipe_mod.RecipeError, match="not sealed"):
+        recipe_mod.load_public(path)
+
+
+def test_load_public_refuses_a_file_seal_did_not_write(tmp_path):
+    path = sealed_public_recipe(tmp_path)
+    unmarked = json.loads(path.read_text(encoding="utf-8"))
+    del unmarked["_sealed"]
+    write(path, unmarked)
+    with pytest.raises(recipe_mod.RecipeError, match="_sealed"):
+        recipe_mod.load_public(path)
+
+
+@pytest.mark.parametrize("field", ["bug_count", "decoy_count"])
+def test_a_sealed_corpus_claiming_zero_items_is_refused(tmp_path, field):
+    # The zero-item guard in the form that is still checkable once the answers are gone.
+    path = sealed_public_recipe(tmp_path)
+    empty = json.loads(path.read_text(encoding="utf-8"))
+    empty[field] = 0
+    write(path, empty)
+    with pytest.raises(recipe_mod.RecipeError, match="grades every arm 0/0"):
+        recipe_mod.load_public(path)
+
+
+# ------------------------------------------- the threatModel the workflow will accept
+#
+# `sigil`'s recipe threat_model is the prose "REMOTE and LOCAL_UNPRIVILEGED". c-review
+# validates its `threatModel` argument against ['REMOTE','LOCAL_UNPRIVILEGED','BOTH'] and
+# throws, so that cell died before spawning an agent while every baseline ran fine.
+
+
+@pytest.mark.parametrize(
+    "prose,expected",
+    [
+        ("REMOTE", "REMOTE"),
+        ("remote", "REMOTE"),
+        ("BOTH", "BOTH"),
+        ("LOCAL_UNPRIVILEGED", "LOCAL_UNPRIVILEGED"),
+        ("REMOTE and LOCAL_UNPRIVILEGED", "BOTH"),
+        ("Remote and local unprivileged attackers", "BOTH"),
+    ],
+)
+def test_prose_threat_models_map_onto_the_workflow_enum(prose, expected):
+    assert plan_mod.threat_model_enum(prose) == expected
+
+
+def test_an_unmappable_threat_model_is_refused_not_defaulted():
+    # Defaulting to REMOTE would give the arm under test a narrower threat model than
+    # every baseline, and nothing downstream would print that.
+    with pytest.raises(plan_mod.PlanError, match="does not map onto"):
+        plan_mod.threat_model_enum("whatever the auditor felt like writing")
+
+
+def test_the_c_review_packet_carries_an_enum_threat_model(tmp_path):
+    workroot = stamped(tmp_path)
+    recipe = recipe_mod.load(SIGIL)
+    assert recipe["threat_model"] == "REMOTE and LOCAL_UNPRIVILEGED", (
+        "this test is anchored on sigil's prose threat model; update it if the recipe changed"
+    )
+    plan_mod.build_plan(
+        tier="standard",
+        recipes={"sigil": recipe},
+        workroot=workroot,
+        run_dir=tmp_path / "run",
+        packet_dir=HERE.parent / "arms",
+        fanout_n=3,
+        corpora=["sigil"],
+        arms=["c-review"],
+    )
+    packet = (tmp_path / "run" / "packets" / "c-review__sigil__bench.md").read_text(
+        encoding="utf-8"
+    )
+    assert 'threatModel:      "BOTH"' in packet
+    assert (
+        "REMOTE and LOCAL_UNPRIVILEGED"
+        not in packet.split("## What to record")[0].split("Workflow({")[1].split("})")[0]
+    )
+
+
+def test_the_strict_loader_still_refuses_a_sealed_recipe(tmp_path):
+    # Building, verifying and grading must not silently accept a corpus with no answers.
+    with pytest.raises(recipe_mod.RecipeError, match="zero injected bugs"):
+        recipe_mod.load(sealed_public_recipe(tmp_path))
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------------------------- degraded collection
+
+
+def _finding(**over):
+    base = {
+        "id": "F-1",
+        "file": "src/a.c",
+        "line": 10,
+        "title": "Unchecked length before memcpy",
+        "description": "the wire length is copied without a bound",
+    }
+    base.update(over)
+    return base
+
+
+def test_a_missing_description_is_refused_by_default():
+    with pytest.raises(result_mod.ResultError) as exc:
+        result_mod.validate_findings([_finding(description="")])
+    assert "missing required field 'description'" in str(exc.value)
+    # The error has to name the escape hatch, or the next operator hand-edits the artifact.
+    assert "--allow-incomplete-findings" in str(exc.value)
+
+
+def test_allow_incomplete_admits_a_finding_that_keeps_other_graded_text():
+    """The measured case: c-review's sweep agent drops `description`, keeps title/impact."""
+    waived = result_mod.validate_findings(
+        [_finding(description="", impact="remote attacker overflows the field buffer")],
+        allow_incomplete=True,
+    )
+    assert waived == ["F-1:description"]
+
+
+def test_allow_incomplete_still_refuses_a_finding_with_no_graded_text_at_all():
+    """The guard that stops this becoming 'accept anything'. An empty finding cannot match
+    any bug, so admitting it would inflate the denominator with a structural non-hit."""
+    with pytest.raises(result_mod.ResultError) as exc:
+        result_mod.validate_findings(
+            [
+                {
+                    "id": "F-1",
+                    "file": "src/a.c",
+                    "line": 10,
+                    "title": "",
+                    "description": "",
+                }
+            ],
+            allow_incomplete=True,
+        )
+    assert "empty finding" in str(exc.value)
+
+
+def test_allow_incomplete_never_waives_file_or_line():
+    """A finding with no site is scored against nothing; the waiver must not reach it."""
+    for field in ("file", "line"):
+        with pytest.raises(result_mod.ResultError) as exc:
+            result_mod.validate_findings([_finding(**{field: ""})], allow_incomplete=True)
+        assert field in str(exc.value)
+
+
+def test_a_complete_finding_waives_nothing():
+    """The flag must be inert on good input, or 'waived' stops meaning anything."""
+    assert result_mod.validate_findings([_finding()], allow_incomplete=True) == []

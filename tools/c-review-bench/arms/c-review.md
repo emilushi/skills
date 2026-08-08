@@ -13,11 +13,11 @@ From a session whose working directory **is** `{{TREE}}`:
 
 ```
 Workflow({
-  scriptPath: "<plugin_root>/workflows/c-review.js",
+  scriptPath: "{{PLUGIN_ROOT}}/workflows/c-review.js",
   args: {
     outputDir:        "{{TREE}}/.c-review-results/<utc-timestamp>",
-    pluginRoot:       "<plugin_root>",
-    threatModel:      "{{THREAT_MODEL}}",
+    pluginRoot:       "{{PLUGIN_ROOT}}",
+    threatModel:      "{{THREAT_MODEL_ENUM}}",
     severityFilter:   "all",
     findingScopeRoot: "{{SCOPE}}",
     contextRoots:     ".",
@@ -25,6 +25,12 @@ Workflow({
   }
 })
 ```
+
+`threatModel` is c-review's **enum**, not the prose the baselines are given. The recipe's
+`threat_model` is written for a human prompt — `sigil`'s reads "REMOTE and
+LOCAL_UNPRIVILEGED" — and pasting that here throws at argument validation before a single
+agent spawns, which is how this cell came to be the only one that could not run. `plan`
+maps the prose onto the enum and refuses to guess when it cannot.
 
 - `severityFilter: "all"` — the grader distinguishes reported from suppressed findings,
   and a filter that drops a correct finding shows up as `SUPPRESSED` rather than as a

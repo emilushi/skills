@@ -61,6 +61,13 @@ def _finding_block(f: dict[str, Any], embed: bool) -> list[str]:
         )
     if f.get("severity_rationale"):
         out.append(f"- **Severity rationale:** {f['severity_rationale']}")
+    if f.get("severity_source") == "reviewer":
+        # Without this the line above reads as a judge's verdict. It is not one: no
+        # independent pass saw this finding, and the severity is the reviewer's own.
+        out.append(
+            "- **Severity source:** reviewer-assigned and unreviewed — no independent "
+            "false-positive or severity review ran in this configuration."
+        )
     if f.get("also_known_as"):
         out.append(f"- **Also reported as:** {', '.join(f['also_known_as'])}")
     if f.get("outside_assigned_classes"):
@@ -150,17 +157,32 @@ def render(doc: dict[str, Any]) -> str:
     for tier in SEVERITY_TIERS:
         lines.append(f"| {tier} | {counts[tier]} |")
     lines += [""]
+    if run.get("judge_ran") is False:
+        gate = (
+            f"{len(reported)} reported after the `{filter_name}` severity filter. No "
+            f"false-positive pass ran in this configuration: every severity below is the "
+            f"reviewer's own and was not independently reviewed."
+        )
+    else:
+        gate = (
+            f"{len(reported)} reported after the false-positive pass and the "
+            f"`{filter_name}` severity filter."
+        )
     lines += [
-        f"{len(all_primaries)} primary finding(s) after dedup; {stats.get('merged', 0)} merged as "
-        f"duplicates; {len(reported)} reported after the false-positive pass and the "
-        f"`{filter_name}` severity filter."
+        f"{len(all_primaries)} primary finding(s) after dedup; "
+        f"{stats.get('merged', 0)} merged as duplicates; {gate}"
     ]
     if unvalidated:
         lines.append(f"{unvalidated} of these carry an unvalidated severity (see Run warnings).")
     lines += [""]
 
     if not reported:
-        lines += ["No findings passed the false-positive pass and the severity filter.", ""]
+        passed = (
+            "the severity filter"
+            if run.get("judge_ran") is False
+            else "the false-positive pass and the severity filter"
+        )
+        lines += [f"No findings passed {passed}.", ""]
 
     for tier in SEVERITY_TIERS:
         tier_findings = [f for f in reported if str(f.get("severity", "")).upper() == tier]

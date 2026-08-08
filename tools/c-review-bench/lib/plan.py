@@ -9,12 +9,15 @@ Three tiers, and the difference between them is money:
 | `full` | + large + patched control | all four, plus control cells | the full picture, opt-in |
 
 The estimate is a **model, not a measurement**, and it says so wherever it prints.
-It is anchored on the one real measurement this plugin has (a 13 KLOC corpus: 116 K
-tokens for one bare agent, 110 K per agent across an 11-agent fan-out, 78 K per agent
-across c-review's 34) and scaled by corpus size with a floor, because an agent pays
-for its own prompt before it reads a single line. Actual cost comes back from
-`collect`, and `score` prints estimate and actual side by side so the model can be
-corrected rather than believed.
+It is anchored on the real 2026-08-06 zstream (9.26 KLOC) cells in
+tools/c-review-bench/README.md — roughly 610 K tokens for one bare agent, 332 K per
+agent across a 13-agent fan-out, 214 K per agent across c-review's ~25 — and scaled by
+corpus size with a floor, because an agent pays for its own prompt before it reads a
+single line. The previous anchor (one 2026-08-04 cell on an unrelated 13 KLOC corpus)
+measured **5.4x low** against these actuals, and real cost still varies 1.2-1.7x cell to
+cell at fixed arm and corpus, so this is a correction, not a promise that the model is
+now exact. Actual cost comes back from `collect`, and `score` prints estimate and
+actual side by side so the model can be corrected rather than believed.
 
 `plan` refuses a corpus that has no verification stamp. That is the ordering the
 harness enforces: no arm runs against a corpus whose bugs have not been shown to
@@ -55,27 +58,34 @@ TIERS: dict[str, dict[str, Any]] = {
     },
 }
 
-# Anchored on the 2026-08-04 measurement over a 13 KLOC corpus. `agents` for
-# c-review and fanout are overridden from the real run when one is available.
+# Anchored on the 2026-08-06 zstream (9.26 KLOC) cells in tools/c-review-bench/README.md —
+# the mean of the measured cells per arm (2 for bare/taxonomy/fanout, the 4 post-judge-removal
+# cells for c-review; the two 37-38-agent pre-removal cells are excluded as a superseded
+# architecture, matching the runbook's own exclusion). The previous anchor was one 2026-08-04
+# cell on an unrelated 13 KLOC corpus (libexpat) and measured **5.4x low** against these
+# actuals — a `standard`-tier plan printed low-single-digit millions for a run that actually
+# cost 45-50M. Real cost still varies ~1.2-1.7x cell to cell at fixed arm and corpus (bare
+# zstream alone: 472,786 and 747,633 across two runs), so this remains a model to be corrected
+# again, not a number to trust to the token.
 ARM_MODEL: dict[str, dict[str, Any]] = {
     "c-review": {
-        "agents": 20,
-        "per_agent": 78_000,
-        "note": "1 detect + 13-18 hunters + batched judges + persist",
+        "agents": 25,
+        "per_agent": 214_000,
+        "note": "1 detect + 4-14 reviewers + 2 sweep + 0-1 dedup + persist; no judge",
     },
-    "bare": {"agents": 1, "per_agent": 116_000, "note": "one agent, one prompt"},
+    "bare": {"agents": 1, "per_agent": 610_000, "note": "one agent, one prompt"},
     "fanout": {
         "agents": None,
-        "per_agent": 110_000,
+        "per_agent": 332_500,
         "note": "N generic agents partitioned by region",
     },
     "taxonomy": {
         "agents": 1,
-        "per_agent": 198_000,
+        "per_agent": 890_000,
         "note": "one agent holding the whole class catalogue",
     },
 }
-REFERENCE_KLOC = 13.0
+REFERENCE_KLOC = 9.26  # zstream, the corpus the anchor cells above were measured on
 FLOOR_SHARE = 0.4  # of a reference agent's cost is prompt and orientation, not reading
 
 
@@ -172,6 +182,43 @@ def estimate_tokens(arm: str, kloc: float, fanout_n: int | None) -> tuple[int, i
         raise PlanError(f"arm {arm!r} needs an agent count; pass --fanout-n")
     scale = FLOOR_SHARE + (1 - FLOOR_SHARE) * (kloc / REFERENCE_KLOC)
     return agents, int(agents * model["per_agent"] * scale)
+
+
+_THREAT_MODEL_ENUM = {
+    "REMOTE": "REMOTE",
+    "LOCAL_UNPRIVILEGED": "LOCAL_UNPRIVILEGED",
+    "BOTH": "BOTH",
+}
+
+
+def threat_model_enum(prose: str) -> str:
+    """c-review's `threatModel` argument, which is an enum, not prose.
+
+    A recipe's `threat_model` is written for a human reviewer's prompt — `sigil`'s is
+    "REMOTE and LOCAL_UNPRIVILEGED". The baselines take that verbatim, but c-review
+    validates the same string against ['REMOTE', 'LOCAL_UNPRIVILEGED', 'BOTH'] and
+    throws, so the c-review cell on `sigil` died at argument validation before spawning
+    a single agent while every baseline ran.
+
+    Unmappable values raise. Defaulting to REMOTE would hand c-review a narrower threat
+    model than the baselines got and bias the comparison in a direction nothing prints.
+    """
+    key = prose.strip().upper()
+    if key in _THREAT_MODEL_ENUM:
+        return _THREAT_MODEL_ENUM[key]
+    remote = "REMOTE" in key
+    local = "LOCAL_UNPRIVILEGED" in key or "LOCAL UNPRIVILEGED" in key
+    if remote and local:
+        return "BOTH"
+    if remote:
+        return "REMOTE"
+    if local:
+        return "LOCAL_UNPRIVILEGED"
+    raise PlanError(
+        f"threat_model {prose!r} does not map onto c-review's threatModel enum "
+        f"(REMOTE, LOCAL_UNPRIVILEGED, BOTH). Guessing would give the arm under test a "
+        f"different threat model from every baseline; fix the recipe instead."
+    )
 
 
 def _render(template: str, values: dict[str, str]) -> str:
@@ -299,6 +346,8 @@ def build_plan(
                     "TREE": str(tree),
                     "SCOPE": recipe.get("scope_subpath", "."),
                     "THREAT_MODEL": recipe.get("threat_model", "REMOTE"),
+                    "THREAT_MODEL_ENUM": threat_model_enum(recipe.get("threat_model", "REMOTE")),
+                    "PLUGIN_ROOT": str(plugin_root()),
                     "ATTACKER_CONTROLS": recipe.get("attacker_controls", ""),
                     "LOC": str(stamp["lines_of_code"]),
                     "RESULT_PATH": str(result_path),
@@ -346,7 +395,13 @@ def build_plan(
             "reference_kloc": REFERENCE_KLOC,
             "floor_share": FLOOR_SHARE,
             "arms": ARM_MODEL,
-            "provenance": "2026-08-04 libexpat measurement; scaled by corpus size, not re-measured",
+            "provenance": (
+                "2026-08-06 zstream measurement (tools/c-review-bench/README.md); scaled by "
+                "corpus size, not re-measured. The prior anchor (2026-08-04, an unrelated 13 "
+                "KLOC corpus) was 5.4x low against these actuals; real per-cell cost still "
+                "varies ~1.2-1.7x run to run at fixed arm and corpus, so treat this as an "
+                "order of magnitude, not a budget."
+            ),
         },
     }
     (run_dir / "plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
@@ -379,7 +434,9 @@ def format_plan(plan: dict[str, Any]) -> str:
     lines += [
         "",
         f"ESTIMATED TOTAL: {plan['estimated_tokens_total']:,} tokens. This is a model anchored on "
-        f"one 13 KLOC measurement, not a measurement of these corpora.",
+        f"the 2026-08-06 zstream cells (tools/c-review-bench/README.md), not a measurement of "
+        f"these corpora — and that anchor itself varied ~1.2-1.7x cell to cell, so treat this "
+        f"as an order of magnitude, not a budget.",
         f"packets: {plan['run_dir']}/packets/   results go to {plan['run_dir']}/results/",
         "",
         "Run each packet exactly as written, then `bench.py collect` each result and "

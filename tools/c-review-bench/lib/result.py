@@ -24,6 +24,23 @@ So collection is deliberately paranoid, in this order:
 Cost is part of the result, not a footnote: `agents`, `tokens` and `wall_seconds`
 are required, and a zero token count is refused. An arm that reports no cost cannot
 be compared with one that does.
+
+**There is no mangled-document recovery path here, deliberately.** An earlier iteration
+of the plugin's last phase handed one agent the whole findings payload as JSON and asked
+it to retype it into a heredoc; that agent sometimes summarised instead, once shipping
+an empty `findings` array while its own `stats` said `reported: 14`. That failure mode
+lived in an external driver (`recover_creview.py`, outside this repository) that clawed
+the payload back out of the persist agent's transcript, and it does not apply here: the
+plugin's `assemble_findings.py` builds `findings.json` in deterministic Python, never
+through an agent's retyping, so the document this module reads cannot be mangled that
+way. `validate_findings()` below still refuses a malformed document — schema drift is
+still possible from a *generic* arm's hand-written result — but refusing is the whole
+policy; there is nothing to reconstruct. One consequence worth stating plainly: `findings`
+is always a **superset** of what `findings_model.reported_findings()` selects — it also
+holds merged duplicates and judge-rejected (or, now, unjudged) candidates — so a check of
+the form `len(findings) < stats.reported` would never fire on a document this pipeline
+produced, not because such a check is unnecessary, but because the shorter list truly
+cannot happen from this code path.
 """
 
 from __future__ import annotations
@@ -63,6 +80,11 @@ OPTIONAL_FINDING_FIELDS = (
     "mitigations_checked",
     "severity_rationale",
     "fp_rationale",
+    # Set to "reviewer" when no judge ran and the hunter's own severity stands
+    # unvalidated (assemble_findings.py's `no_judge` path). Absent when a judge did
+    # validate it. Dropping it here would silently discard the one marker that says a
+    # severity is a single reviewer's opinion rather than an adjudicated one.
+    "severity_source",
 )
 REQUIRED_META_FIELDS = ("agents", "tokens", "wall_seconds", "model")
 # Which token definition `tokens` carries. Recorded per cell and printed by `score`,
@@ -196,6 +218,16 @@ def normalise_c_review(doc: dict[str, Any]) -> dict[str, Any]:
         "native_stats": doc.get("stats", {}),
         "groups_attempted": doc.get("run", {}).get("groups_attempted", []),
         "groups_failed": doc.get("run", {}).get("groups_failed", []),
+        # `judge_ran` is false on every current run: the false-positive/severity judge was
+        # removed from the plugin and severity is now the reviewer's own, unvalidated
+        # assessment (`severity_source: "reviewer"` on the findings above). Carried through
+        # rather than assumed, so a future run that reinstates a judge is visible here
+        # instead of silently read as if the current, judge-less shape still applied.
+        "judge_ran": doc.get("run", {}).get("judge_ran"),
+        # The ledger gate's compact summary (`assemble_findings.run_ledger_gate`): either the
+        # coverage-audit result or `{"error": ...}` when it could not run. Absent entirely on
+        # a run with no unit list, which is a legitimate configuration and not a failure.
+        "ledger": doc.get("run", {}).get("ledger"),
     }
 
 
@@ -220,8 +252,37 @@ def normalise_generic(doc: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validate_findings(findings: list[dict[str, Any]]) -> None:
+# The subset of REQUIRED_FINDING_FIELDS that `--allow-incomplete-findings` may waive.
+# `file` and `line` are never waivable: without them a finding has no site, and
+# `lib/grade.py::site_match` would score it against nothing at all.
+#
+# `description` and `title` are waivable only ONE AT A TIME and only while some graded
+# text survives, because both are members of `lib/grade.py::TEXT_FIELDS` alongside
+# `impact`, `recommendation` and the rest. A finding that keeps its title and impact is
+# fully visible to `mechanism_matches` with or without a description; a finding with no
+# text in any TEXT_FIELD is empty, and accepting it would inflate the denominator with
+# something that cannot match by construction.
+WAIVABLE_FINDING_FIELDS = ("description", "title")
+
+# Kept in step with lib/grade.py::TEXT_FIELDS. Only the fields an arm plausibly fills.
+GRADED_TEXT_FIELDS = ("title", "description", "impact", "recommendation", "code", "bug_class")
+
+
+def validate_findings(findings: list[dict[str, Any]], allow_incomplete: bool = False) -> list[str]:
+    """Raise on anything the grader cannot read. Return the ids that were waived.
+
+    `allow_incomplete` exists for one measured, recurring defect: c-review's sweep agent
+    hand-writes its own part file and omits `description` on every finding it files (7 of 7
+    on the 2026-08-07 container cell, 9 on the 2026-08-06 s2 cell). The text is not lost —
+    `title`, `impact` and `recommendation` are present and all three are already in
+    `TEXT_FIELDS`, so waiving the missing field changes what can be *collected* and nothing
+    about what can be *graded*.
+
+    It is opt-in, it is recorded in the collected document, and it still refuses a finding
+    with no graded text at all. Use it only with the degradation stated in the write-up.
+    """
     problems: list[str] = []
+    waived: list[str] = []
     seen: set[str] = set()
     for finding in findings:
         fid = str(finding.get("id"))
@@ -229,8 +290,19 @@ def validate_findings(findings: list[dict[str, Any]]) -> None:
             problems.append(f"duplicate finding id {fid!r}")
         seen.add(fid)
         for field in REQUIRED_FINDING_FIELDS:
-            if not str(finding.get(field, "")).strip():
-                problems.append(f"{fid}: missing required field {field!r}")
+            if str(finding.get(field, "")).strip():
+                continue
+            if allow_incomplete and field in WAIVABLE_FINDING_FIELDS:
+                # Waivable, but only if the finding is still gradeable on its other text.
+                if any(str(finding.get(f, "")).strip() for f in GRADED_TEXT_FIELDS):
+                    waived.append(f"{fid}:{field}")
+                    continue
+                problems.append(
+                    f"{fid}: missing {field!r} and every other graded text field, so it "
+                    f"cannot match any bug — this is an empty finding, not an incomplete one"
+                )
+                continue
+            problems.append(f"{fid}: missing required field {field!r}")
         try:
             line = int(finding.get("line", 0))
         except (TypeError, ValueError):
@@ -239,12 +311,23 @@ def validate_findings(findings: list[dict[str, Any]]) -> None:
         if line < 1:
             problems.append(f"{fid}: line {line} is not a source line")
     if problems:
+        hint = (
+            "\nFix the arm's output rather than the grader: an unexpected shape is not "
+            "something to infer meaning from."
+        )
+        if not allow_incomplete and any("missing required field" in p for p in problems):
+            hint += (
+                "\nIf the arm dropped a text field it cannot be made to re-emit, "
+                "`--allow-incomplete-findings` waives `description`/`title` for findings that "
+                "still carry other graded text, records which ones in the collected document, "
+                "and must be stated as a degradation in the write-up."
+            )
         raise ResultError(
             "the result does not match the schema the grader reads:\n  "
             + "\n  ".join(problems[:20])
-            + "\nFix the arm's output rather than the grader: an unexpected shape is not "
-            "something to infer meaning from."
+            + hint
         )
+    return waived
 
 
 def derive_cost(transcripts: list[Path]) -> dict[str, Any]:
@@ -351,6 +434,7 @@ def collect(
     variant: str = "bench",
     settle_seconds: float = 2.0,
     timeout: float = 120.0,
+    allow_incomplete: bool = False,
 ) -> dict[str, Any]:
     """Normalise one cell of the run matrix into `run_dir/collected/`.
 
@@ -394,7 +478,7 @@ def collect(
         )
 
     normalised = normalise_c_review(doc) if _looks_like_c_review(doc) else normalise_generic(doc)
-    validate_findings(normalised["findings"])
+    waived = validate_findings(normalised["findings"], allow_incomplete=allow_incomplete)
 
     collected = {
         "arm": arm,
@@ -405,6 +489,10 @@ def collect(
         "source_sha256": digest,
         "collected_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "meta": meta,
+        # Recorded, never silent: `score` and any human reading `collected/*.json` can see
+        # exactly which findings were admitted without a required text field, and how many.
+        "waived_fields": waived,
+        "waived_field_count": len(waived),
         "transcripts": [str(Path(t).resolve()) for t in transcripts],
         **normalised,
     }

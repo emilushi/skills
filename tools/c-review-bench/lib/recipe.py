@@ -91,7 +91,22 @@ DECOY_CLAIM_TERMS = {
     ],
     "strengthened-bound": ["bound", "limit", "threshold", "too strict", "off-by"],
     "equivalent-expression": ["expression", "arithmetic", "operator", "precedence", "rewrit"],
-    "reordered-independent": ["order", "reorder", "sequence", "before", "after"],
+    # Tightened after the first real run: the original list ("order", "reorder",
+    # "sequence", "before", "after") is ordinary English that appears in almost any
+    # use-after-free or ordering description. Combined with the grader's site window
+    # reaching into a neighbouring function, ~5 of 11 decoy charges on `sigil` were a
+    # correct finding that merely used a word like "after" and had nothing to do with
+    # this decoy. The replacement requires the finding to assert the mutation itself --
+    # that two statements were reordered or swapped -- not merely to use a temporal word.
+    "reordered-independent": [
+        "reorder",
+        "reordered",
+        "reordering",
+        "swapped order",
+        "swapped the order",
+        "wrong order",
+        "out of order",
+    ],
     "dead-branch": ["dead", "unreachable", "never taken", "cannot happen"],
     "hoisted-invariant": ["hoist", "invariant", "loop", "cached value", "stale"],
     "extra-assert": ["assert", "assertion"],
@@ -314,6 +329,54 @@ def load(path: str | Path) -> dict[str, Any]:
         raise RecipeError(f"{path} is not valid JSON: {exc}") from exc
     recipe.setdefault("_dir", str(path.parent))
     return validate(recipe, origin=str(path))
+
+
+def load_public(path: str | Path) -> dict[str, Any]:
+    """Load a *sealed* recipe — every field except the answers.
+
+    `seal` deletes `recipe.json` and writes `recipe.public.json` beside it, holding
+    everything but `bugs` and `decoys`. Nothing read that file, so after a seal
+    `bench.py plan` died with "no corpora found" and the mandated verify -> seal -> plan
+    order could not be run at all: the only way to get packets was to plan before
+    sealing, which is the one ordering the harness exists to prevent.
+
+    Deliberately NOT a fallback inside `load`. Building, verifying or grading a corpus
+    must still refuse a recipe with no ground truth — `plan` is the only step that needs
+    the tier, the scope and the threat model and never needs a bug list. The zero-item
+    guard is kept in the form that is still checkable here: a sealed recipe claiming zero
+    bugs or zero decoys is refused, because planning a run against an empty corpus would
+    grade every arm 0/0 and print it as a measurement.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise RecipeError(f"sealed recipe not found: {path}")
+    try:
+        recipe = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RecipeError(f"{path} is not valid JSON: {exc}") from exc
+    if not recipe.get("_sealed"):
+        raise RecipeError(
+            f"{path}: not marked _sealed. This loader skips every check that needs the bug "
+            f"list, so it must only ever be handed a file `seal` wrote."
+        )
+    if recipe.get("bugs") or recipe.get("decoys"):
+        raise RecipeError(
+            f"{path}: carries a 'bugs' or 'decoys' key. A sealed recipe holding the answers "
+            f"is not sealed; load it with `load` so it is fully validated."
+        )
+    for key in ("id", "tier", "base", "deidentify", "entry_points", "build"):
+        _need(recipe, key, str(path))
+    if recipe["tier"] not in TIERS:
+        raise RecipeError(f"{path}: tier must be one of {TIERS}")
+    for key in ("bug_count", "decoy_count"):
+        value = _need(recipe, key, str(path))
+        if not isinstance(value, int) or value < 1:
+            raise RecipeError(
+                f"{path}: {key} is {value!r}. A corpus with no ground truth and no decoys "
+                f"grades every arm 0/0 and reports it as a measurement."
+            )
+    recipe.setdefault("_dir", str(path.parent))
+    return recipe
 
 
 def counts(recipe: dict[str, Any]) -> dict[str, Any]:

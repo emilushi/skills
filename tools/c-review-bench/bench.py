@@ -44,23 +44,61 @@ DEFAULT_WORK = Path.home() / ".cache" / "c-review-bench" / "work"
 
 
 def _recipes() -> dict[str, Path]:
+    """Every corpus, by name, preferring the full recipe over a sealed one.
+
+    A sealed corpus has no `recipe.json` at all — `seal` deletes it and leaves
+    `recipe.public.json`, which holds the tier, scope and threat model but not the
+    answers. `plan` runs *after* `seal` by design, so it has to accept the sealed form;
+    `_load_for_plan` is what decides how strictly each one is validated.
+    """
     found = {p.parent.name: p for p in sorted(CORPORA.glob("*/recipe.json"))}
+    for pub in sorted(CORPORA.glob("*/recipe.public.json")):
+        found.setdefault(pub.parent.name, pub)
     if not found:
-        raise SystemExit("bench: no corpora found under corpora/*/recipe.json")
+        raise SystemExit(
+            "bench: no corpora found under corpora/*/recipe.json or */recipe.public.json"
+        )
     return found
 
 
+def _load_for_plan(path: Path) -> dict:
+    """Full validation for a plaintext recipe, public-field validation for a sealed one."""
+    if path.name == "recipe.public.json":
+        return recipe_mod.load_public(path)
+    return recipe_mod.load(path)
+
+
 def _recipe(name: str) -> dict:
+    """The full recipe, answers included. Refuses a sealed corpus by name.
+
+    Used by `verify` and `corpora`, which cannot do their jobs without the bug list.
+    """
     found = _recipes()
     if name not in found:
         raise SystemExit(f"bench: no corpus {name!r}; have {', '.join(sorted(found))}")
-    return recipe_mod.load(found[name])
+    path = found[name]
+    if path.name == "recipe.public.json":
+        raise SystemExit(
+            f"bench: corpus {name!r} is sealed — {path} holds no bugs or decoys, so this step "
+            f"cannot run. `bench.py unseal --corpus {name}` first (key in "
+            f"${seal_mod.KEY_ENV}); sealing is meant to outlast the arms, not the build."
+        )
+    return recipe_mod.load(path)
 
 
 def cmd_corpora(args: argparse.Namespace) -> int:
     del args
     rows = []
     for name, path in _recipes().items():
+        if path.name == "recipe.public.json":
+            # Sealed: the class and difficulty tallies are answers, so they are not on disk.
+            pub = recipe_mod.load_public(path)
+            rows.append(
+                f"  {name:<12} {pub['tier']:<7} {pub['bug_count']:>3} bugs  "
+                f"{pub['decoy_count']:>3} decoys  SEALED (unseal to see the breakdown)  "
+                f"base={pub['base']['kind']}"
+            )
+            continue
         recipe = recipe_mod.load(path)
         counts = recipe_mod.counts(recipe)
         rows.append(
@@ -145,7 +183,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     try:
         plan = plan_mod.build_plan(
             tier=args.tier,
-            recipes={name: recipe_mod.load(path) for name, path in _recipes().items()},
+            recipes={name: _load_for_plan(path) for name, path in _recipes().items()},
             workroot=Path(args.workdir) if args.workdir else DEFAULT_WORK,
             run_dir=Path(args.out),
             fanout_n=args.fanout_n,
@@ -211,10 +249,21 @@ def cmd_collect(args: argparse.Namespace) -> int:
             transcripts=[Path(t) for t in args.transcript or ()],
             settle_seconds=args.settle,
             timeout=args.wait,
+            allow_incomplete=args.allow_incomplete_findings,
         )
     except result_mod.ResultError as exc:
         print(f"bench: {exc}", file=sys.stderr)
         return 3
+    if collected.get("waived_field_count"):
+        print(
+            f"bench: WARNING: DEGRADED COLLECTION — {collected['waived_field_count']} finding(s) "
+            f"were admitted without a required text field: "
+            f"{', '.join(collected['waived_fields'][:10])}"
+            f"{' ...' if len(collected['waived_fields']) > 10 else ''}\n"
+            f"       They remain gradeable on their other TEXT_FIELDS. State this degradation "
+            f"wherever the number is reported.",
+            file=sys.stderr,
+        )
     print(
         f"collected {args.arm} on {args.corpus} [{args.variant}]: "
         f"{len(collected['findings'])} finding(s), "
@@ -343,6 +392,13 @@ def main(argv: list[str] | None = None) -> int:
         "--settle", type=float, default=2.0, help="seconds the artifact must be unchanged"
     )
     p.add_argument("--wait", type=float, default=120.0, help="how long to wait for it to settle")
+    p.add_argument(
+        "--allow-incomplete-findings",
+        action="store_true",
+        help="admit findings missing 'description' or 'title' when they still carry other "
+        "graded text; the waived ids are recorded in the collected document and printed as "
+        "a warning. For an arm with a known field-dropping defect — state it in the write-up",
+    )
     p.set_defaults(func=cmd_collect)
 
     p = sub.add_parser("cost", help="measure tokens and agents from transcripts")

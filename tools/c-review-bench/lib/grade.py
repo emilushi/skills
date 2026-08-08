@@ -75,6 +75,37 @@ TEXT_FIELDS = (
 CVE_RE = re.compile(r"\bCVE-\d{4}-\d{3,7}\b", re.IGNORECASE)
 DEFAULT_WINDOW = 12
 
+# Decoys are graded with a narrower window than bugs. The wide bug window exists because
+# a reviewer who names a neighbouring function and points at the right line has still
+# found the bug -- the ground truth's own idea of "the enclosing function" is a judgement
+# call. A decoy has no such excuse: the recipe validator requires a `function` on every
+# decoy specifically so a real claim about it can be checked by name. The demonstrated
+# failure mode (`sigil`, ~5 of 11 decoy charges) was the wide window pulling a correct
+# finding in a *different* function into a decoy's blast radius. Function-name matching for
+# decoys stays unrestricted, as it should be; the line-only fallback -- for a finding that
+# gives a line without naming a function -- is kept, but tight enough that it cannot reach
+# across an ordinary function boundary the way the 12-line bug window can.
+DECOY_WINDOW = 3
+
+# A double-free is textually indistinguishable from a use-after-free in a lot of correct
+# prose: freeing a pointer that was already freed *is* touching a dangling pointer, and a
+# reviewer who calls that "use-after-free" is describing the same defect as one who calls
+# it "double free". `SGL-B11`'s mechanism_all_of demands the literal phrase "double free",
+# so a correct finding phrased as a use-after-free scored NEAR_MISS -- and, before the decoy
+# fix above, was separately charged as a decoy false positive for the same finding. The
+# synonym below is scoped to `bug_class == "double-free"` items and only widens the specific
+# "double free" term, not the whole match: an unrelated bug still needs its own literal
+# keywords, so proximity plus borrowed vocabulary still cannot manufacture a hit.
+DOUBLE_FREE_LITERAL = ("double free", "double-free")
+DOUBLE_FREE_SYNONYMS = (
+    "use-after-free",
+    "use after free",
+    "freed twice",
+    "freed again",
+    "already freed",
+    "dangling pointer",
+)
+
 
 class GradeError(Exception):
     """Nothing to grade, or nothing to grade against. Callers exit non-zero."""
@@ -151,6 +182,18 @@ def site_match(finding: dict[str, Any], item: dict[str, Any], window: int) -> tu
     return False, "", ""
 
 
+def _term_matches(term: str, text: str, bug_class: str) -> bool:
+    low = term.lower()
+    if low in text:
+        return True
+    # See DOUBLE_FREE_SYNONYMS above: only a "double free"/"double-free" term on a
+    # bug_class == "double-free" item gets the widened equivalence. Every other term, on
+    # every other bug class, still needs its own literal keyword.
+    if bug_class == "double-free" and low in DOUBLE_FREE_LITERAL:
+        return any(synonym in text for synonym in DOUBLE_FREE_SYNONYMS)
+    return False
+
+
 def mechanism_matches(finding: dict[str, Any], item: dict[str, Any]) -> tuple[bool, list[str]]:
     groups = item.get("mechanism_all_of") or []
     if not groups:
@@ -164,10 +207,11 @@ def mechanism_matches(finding: dict[str, Any], item: dict[str, Any]) -> tuple[bo
             f"mechanism test would accept any finding at its site. A site match is not a hit."
         )
     text = finding_text(finding)
+    bug_class = str(item.get("bug_class", ""))
     missing = [
         "/".join(group[:3]) + ("/..." if len(group) > 3 else "")
         for group in groups
-        if not any(term.lower() in text for term in group)
+        if not any(_term_matches(term, text, bug_class) for term in group)
     ]
     return (not missing), missing
 
@@ -403,13 +447,21 @@ def grade(
     for finding in findings:
         # A finding that already matched an injected bug is correct, whatever else it
         # sits near. Counting it as a decoy hit too would charge an arm a false
-        # positive for a true positive.
+        # positive for a true positive. Kept deliberately: `matched` is populated whenever
+        # a finding's text satisfies *any* item's mechanism_all_of at that item's site, even
+        # if `_resolve_ambiguity` later declines to credit it as that item's HIT (it may be
+        # the better evidence for a sibling bug in the same function) -- the exemption from
+        # decoy scanning tracks "this finding demonstrably describes an injected bug",
+        # which does not change when the ambiguity tie-break picks a different bug for it.
         if str(finding.get("id", "?")) in matched or known_extra_for(finding):
             continue
         for decoy in decoys:
             if not file_matches(finding.get("file"), decoy["file"]):
                 continue
-            at_site, _why = site_matches(finding, decoy, window)
+            # Narrower than the bug-grading `window`: see DECOY_WINDOW above. `min` means a
+            # caller who tightens `window` further (e.g. a test) tightens decoy attribution
+            # too, but nothing ever widens it past DECOY_WINDOW.
+            at_site, _why = site_matches(finding, decoy, min(window, DECOY_WINDOW))
             terms = DECOY_CLAIM_TERMS.get(str(decoy.get("decoy_kind")), [])
             text = finding_text(finding)
             claims_it = any(term.lower() in text for term in terms) if terms else True

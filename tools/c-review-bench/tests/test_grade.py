@@ -466,6 +466,108 @@ def test_a_ground_truth_with_no_decoys_is_refused(gt):
         grade.grade(arm("result_perfect.json"), gt)
 
 
+def test_generic_ordering_words_no_longer_claim_the_reordered_decoy(gt):
+    """`DECOY_CLAIM_TERMS['reordered-independent']` used to be ['order', 'reorder',
+    'sequence', 'before', 'after'] -- ordinary English that shows up in almost any
+    use-after-free description. A correct, unrelated use-after-free finding that merely
+    uses the word "after" must not be charged as having claimed this decoy."""
+    gt["decoys"][0]["decoy_kind"] = "reordered-independent"
+    doc = {
+        "arm": "bare",
+        "corpus": "demo",
+        "variant": "bench",
+        "findings": [
+            {
+                "id": "F-9",
+                "file": "src/a.c",
+                "line": 10,
+                "function": "parse_header",
+                "title": "Use-after-free of the parsed header",
+                "description": ("the header struct is freed and then read again after being freed"),
+            }
+        ],
+    }
+    scored = grade.grade(doc, gt)
+    assert scored["false_positives"][grade.DECOY_FP] == []
+
+
+def test_a_finding_that_names_the_reordering_still_claims_the_decoy(gt):
+    """The tightened term list must still catch a finding that genuinely describes the
+    reordering mutation, or the decoy costs nothing."""
+    gt["decoys"][0]["decoy_kind"] = "reordered-independent"
+    doc = {
+        "arm": "bare",
+        "corpus": "demo",
+        "variant": "bench",
+        "findings": [
+            {
+                "id": "F-9",
+                "file": "src/a.c",
+                "line": 10,
+                "function": "parse_header",
+                "title": "Statements reordered",
+                "description": "these two independent statements were reordered",
+            }
+        ],
+    }
+    scored = grade.grade(doc, gt)
+    assert [d["decoy"] for d in scored["false_positives"][grade.DECOY_FP]] == ["DEC-1"]
+
+
+def test_decoy_attribution_uses_a_narrower_window_than_hit_attribution(gt):
+    """A decoy always records its own function (the recipe validator requires it), so a
+    claim that gives no function name and only a line ten lines away is weak evidence it
+    is about the decoy rather than something else in a different function. Before this
+    fix, decoys used the same ±12 bug window and this finding was charged."""
+    doc = {
+        "arm": "bare",
+        "corpus": "demo",
+        "variant": "bench",
+        "findings": [
+            {
+                "id": "F-9",
+                "file": "src/a.c",
+                "line": 20,
+                "function": "",
+                "title": "Unused value written",
+                "description": "this initializer produces an unused value on every path",
+            }
+        ],
+    }
+    scored = grade.grade(doc, gt)
+    assert scored["false_positives"][grade.DECOY_FP] == []
+
+
+def test_double_free_mechanism_accepts_use_after_free_phrasing(gt):
+    """`SGL-B11`'s mechanism_all_of demanded the literal phrase "double free", so a
+    correct finding calling the same defect a use-after-free scored NEAR_MISS. The
+    synonym table now credits UAF vocabulary for a bug_class == "double-free" item."""
+    gt["items"][0]["bug_class"] = "double-free"
+    gt["items"][0]["mechanism_all_of"] = [["double free"], ["record_cache"]]
+    doc = arm("result_perfect.json")
+    doc["findings"][0]["description"] = (
+        "record_cache's pointer is freed twice on the error path; describing it as a "
+        "use-after-free is the same defect"
+    )
+    scored = grade.grade(doc, gt)
+    assert outcomes(scored)["D-1"] == grade.HIT
+
+
+def test_double_free_synonym_is_scoped_to_the_double_free_bug_class(gt):
+    """The widened equivalence must not leak to other bug classes: a use-after-free
+    finding cannot borrow the synonym to satisfy an unrelated bug's literal "double
+    free" requirement. Proximity plus borrowed vocabulary still must not manufacture a
+    hit -- the mechanism test stays strict everywhere it was not demonstrably wrong."""
+    gt["items"][0]["mechanism_all_of"] = [["double free"], ["record_cache"]]
+    # bug_class is left as "buffer-overflow" from the fixture, not "double-free".
+    doc = arm("result_perfect.json")
+    doc["findings"][0]["description"] = (
+        "record_cache: use-after-free because the pointer is used after being freed twice"
+    )
+    scored = grade.grade(doc, gt)
+    assert outcomes(scored)["D-1"] == grade.NEAR_MISS
+
+
 def test_a_ground_truth_missing_the_decoys_key_is_refused(gt):
     del gt["decoys"]
     with pytest.raises(grade.GradeError, match="no `decoys` key"):

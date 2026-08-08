@@ -17,11 +17,32 @@ counted too — separately, and reported — because a run in which zero tools w
 defined and zero invoked is a transcript this scanner failed to understand, and that
 must fail loudly rather than pass quietly.
 
-Two severities:
+Three outcomes:
 
 - **violation** — disqualifying, and the arm's numbers are excluded from the
-  comparison: an oracle tool invoked, a network binary run, the harness's own
-  answer key read, or external sources declared by the arm itself.
+  comparison: an oracle tool invoked *and answered*, a network binary run, the
+  harness's own answer key read, a stray read outside the arm's own tree, an arm
+  running the wrong protocol, or external sources declared by the arm itself.
+- **blocked** — an oracle tool or a network command was invoked, and the platform's
+  own record of the result shows it was denied before it reached the network: a
+  `PreToolUse` guard runs during real measurements and rejects `WebFetch`/`WebSearch`
+  and network shell commands, and a denied attempt is not the same claim as a
+  successful one — no oracle data entered the arm's context, so it does not by
+  itself take the cell out of the comparison. It is reported just as loudly as a
+  violation, because intent still matters and a denial that is silently absorbed
+  into "clean" is a defence nobody can audit. What counts as *denied* is narrow and
+  literal, not inferred: the platform marks a denied call's `tool_result` record with
+  a top-level `toolDenialKind` (`"permission-rule"` for a hook denial, observed
+  verbatim in `~/c-review-bench-runs/2026-08-06-v3/n2` and `n1`) alongside
+  `is_error: true` on the content block itself — see `_denied_tool_use_ids`. Only the
+  violations a network guard could plausibly have intercepted are eligible for this
+  downgrade (an oracle tool invocation, a network binary, a remote git/gh
+  subcommand, a package-index fetch, an interpreter's inline network call); reading
+  the answer key, straying outside the arm's tree, running the wrong protocol, and a
+  self-declared consultation are never downgraded by a denial, because none of them
+  is a claim a network guard could have blocked in the first place — they are
+  established from the *content* of what the arm already has, or from what it says
+  about itself, not from whether a request reached the wire.
 - **advisory** — worth a human's eye, never disqualifying on its own: an oracle
   hostname or a CVE id mentioned in text, a `git` subcommand that reads nothing
   outside the tree.
@@ -225,9 +246,12 @@ ANSWER_KEY_PATTERNS = (
     # future layout change does not silently drop it.
     re.compile(r"/staged/"),
     # The harness's own source, not a corpus directory that happens to be called tests/.
-    re.compile(r"c-review[-/]bench/(?:lib|corpora|arms|tests|judge_bench)/"),
-    re.compile(r"c-review[-/]bench/(?:README\.md|bench\.py)"),
-    re.compile(r"\bC-REVIEW-EVALUATION\.md\b"),
+    # `judge_bench` is gone (the plugin's false-positive judge it benchmarked was removed
+    # along with it), so it is not listed here to be read in the first place.
+    re.compile(r"c-review[-/]bench/(?:lib|corpora|arms|tests)/"),
+    # MEASUREMENTS.md carries per-bug outcomes for scored cells, so reading it during a
+    # run is reading the answer key for any corpus already measured.
+    re.compile(r"c-review[-/]bench/(?:README\.md|bench\.py|MEASUREMENTS\.md)"),
 )
 
 CVE_RE = re.compile(r"\bCVE-\d{4}-\d{3,7}\b", re.IGNORECASE)
@@ -345,6 +369,49 @@ def _defined_tools(record: Any) -> list[str]:
     return names
 
 
+def _denied_tool_use_ids(files: list[Path]) -> dict[str, str]:
+    """Every `tool_use` id whose result shows the platform denied the call before it ran.
+
+    Maps the id to the denial kind, so a blocked-attempt entry can say which. Found by
+    inspecting two real transcripts recorded under a live network guard
+    (`~/c-review-bench-runs/2026-08-06-v3/n2/logs/.../agent-aba9406eaec1b175e.jsonl`, a
+    `WebFetch` to `raw.githubusercontent.com/madler/zlib`; `n1`'s `agent-a864e2b46bcf60ab0`,
+    a `Bash` command a `PreToolUse` hook rejected). In both, the `tool_result` record for the
+    denied call reads:
+
+        {"message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "PreToolUse:WebFetch hook error: ... BLOCKED: ...",
+             "is_error": true, "tool_use_id": "toolu_..."}
+        ]}, "toolUseResult": "Error: PreToolUse:...", "toolDenialKind": "permission-rule", ...}
+
+    `toolDenialKind` sits on the *record*, not inside the content block, and a broader scan
+    of local project transcripts turned up a second value, `"user-rejected"` (an interactive
+    decline rather than a hook), which is treated the same way: either means the call never
+    reached the tool. Both `is_error: true` on the block and a non-empty `toolDenialKind` on
+    the record are required before an id counts as denied — requiring both is the
+    conservative choice; a call this scanner cannot positively identify as denied is left a
+    full violation rather than guessed into the lighter category.
+    """
+    denied: dict[str, str] = {}
+    for file in files:
+        for raw in file.read_text(encoding="utf-8", errors="replace").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = record.get("toolDenialKind") if isinstance(record, dict) else None
+            if not kind:
+                continue
+            for block in _content_blocks(record):
+                tool_use_id = block.get("tool_use_id")
+                if block.get("type") == "tool_result" and block.get("is_error") and tool_use_id:
+                    denied[str(tool_use_id)] = str(kind)
+    return denied
+
+
 def _segments(command: str) -> list[list[str]]:
     out: list[list[str]] = []
     for chunk in SPLIT_RE.split(command):
@@ -389,15 +456,24 @@ def _subcommand(tokens: list[str]) -> str:
     return ""
 
 
-def _classify_bash(command: str) -> list[tuple[str, str]]:
-    """(severity, why) for one Bash command, matching only on command position."""
-    found: list[tuple[str, str]] = []
+def _classify_bash(command: str) -> list[tuple[str, str, bool]]:
+    """(severity, why, network_reaching) for one Bash command, matching on command position.
+
+    The third element marks a violation as one a `PreToolUse` network guard could plausibly
+    have denied before the command ran — a socket, a network binary, a remote git/gh
+    subcommand, a package-index fetch, or an interpreter paired with an inline network call.
+    Comparing the bench and control trees is deliberately excluded: that violation is about
+    the *content* of a local `diff`, not about reaching outside the sandbox, and no guard
+    that blocks network access would ever deny it — so a denial elsewhere in the same
+    transcript must never be read as covering this one too.
+    """
+    found: list[tuple[str, str, bool]] = []
     lowered = command.lower()
     # A shell redirect to /dev/tcp needs no binary at all: `exec 3<>/dev/tcp/host/80` has
     # `exec` stripped as a prefix word and then no recognisable command name, so nothing
     # matched it and the host only raised an advisory.
     if "/dev/tcp/" in lowered or "/dev/udp/" in lowered:
-        found.append(("violation", "opened a socket through a /dev/tcp or /dev/udp redirect"))
+        found.append(("violation", "opened a socket through a /dev/tcp or /dev/udp redirect", True))
     for tokens in _segments(command):
         binary = Path(tokens[0].strip("'\"")).name
         sub = _subcommand(tokens)
@@ -411,20 +487,25 @@ def _classify_bash(command: str) -> list[tuple[str, str]]:
                     "violation",
                     f"ran `{binary}` across the bench and control trees, which differ in exactly "
                     f"the injected bugs",
+                    False,
                 )
             )
         if binary in NETWORK_BINARIES:
-            found.append(("violation", f"ran network binary `{binary}`"))
+            found.append(("violation", f"ran network binary `{binary}`", True))
         elif binary == "git" and sub in GIT_REMOTE_SUBCOMMANDS:
-            found.append(("violation", f"ran `git {sub}`"))
+            found.append(("violation", f"ran `git {sub}`", True))
         elif binary == "git" and sub in GIT_HISTORY_SUBCOMMANDS:
             found.append(
-                ("advisory", f"ran `git {sub}`; the corpus tree has no history of its own")
+                (
+                    "advisory",
+                    f"ran `git {sub}`; the corpus tree has no history of its own",
+                    False,
+                )
             )
         elif binary == "gh" and sub in GH_SUBCOMMANDS:
-            found.append(("violation", f"ran `gh {sub}`"))
+            found.append(("violation", f"ran `gh {sub}`", True))
         elif (binary, sub) in PACKAGE_FETCH:
-            found.append(("violation", f"ran `{binary} {sub}`"))
+            found.append(("violation", f"ran `{binary} {sub}`", True))
         elif binary in SCRIPT_INTERPRETERS:
             # An interpreter is not evidence of anything on its own — the arms are
             # expected to run one. It becomes a violation only paired with a call that
@@ -434,13 +515,21 @@ def _classify_bash(command: str) -> list[tuple[str, str]]:
             call = next((i for i in NETWORK_CALLS if i in lowered), "")
             if call:
                 found.append(
-                    ("violation", f"ran `{binary}` with a network call in the script (`{call}`)")
+                    (
+                        "violation",
+                        f"ran `{binary}` with a network call in the script (`{call}`)",
+                        True,
+                    )
                 )
             else:
                 scheme = next((s for s in URL_SCHEMES if s in lowered), "")
                 if scheme:
                     found.append(
-                        ("advisory", f"ran `{binary}` on a script containing a {scheme} URL")
+                        (
+                            "advisory",
+                            f"ran `{binary}` on a script containing a {scheme} URL",
+                            False,
+                        )
                     )
     return found
 
@@ -454,7 +543,7 @@ FANOUT_TOOLS = {"task", "agent"}
 SUBJECT_MARKERS = ("c-review", "creview")
 
 
-def _classify_arm_protocol(name: str, payload: str, arm: str | None) -> list[tuple[str, str]]:
+def _classify_arm_protocol(name: str, payload: str, arm: str | None) -> list[tuple[str, str, bool]]:
     """Did this arm run as its packet says?
 
     The README lists this as something the harness "cannot check", and on the strength of
@@ -468,12 +557,17 @@ def _classify_arm_protocol(name: str, payload: str, arm: str | None) -> list[tup
 
     Whether that particular run was contaminated in the end is a judgement for a human.
     That it was never surfaced is the defect.
+
+    Neither violation here is network-reaching (the third element is always `False`): both
+    are established from the *name* of the tool the arm invoked, not from whether it reached
+    outside the sandbox, so a network guard would never deny either and there is nothing for
+    a denial to downgrade.
     """
     if not arm:
         return []
     lowered_name = name.lower()
     lowered_payload = payload.lower()
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, bool]] = []
     if arm != "c-review":
         subject = lowered_name in {"skill", "workflow"} and any(
             marker in lowered_payload for marker in SUBJECT_MARKERS
@@ -484,6 +578,7 @@ def _classify_arm_protocol(name: str, payload: str, arm: str | None) -> list[tup
                     "violation",
                     f"arm {arm!r} invoked the artifact under test (`{name}` -> c-review), so it is "
                     f"not the baseline it is being compared as",
+                    False,
                 )
             )
     if arm in SINGLE_AGENT_ARMS and lowered_name in FANOUT_TOOLS:
@@ -492,6 +587,7 @@ def _classify_arm_protocol(name: str, payload: str, arm: str | None) -> list[tup
                 "violation",
                 f"arm {arm!r} is defined as exactly one agent and invoked `{name}`; a fan-out is "
                 f"a different arm",
+                False,
             )
         )
     return found
@@ -502,16 +598,30 @@ def _classify_tool(
     payload: str,
     containment: Containment | None = None,
     arm: str | None = None,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, bool]]:
+    """(severity, why, network_reaching) for one tool invocation's name and input.
+
+    The third element is `True` only for the oracle-tool-invocation violation: that is the
+    one thing here a PreToolUse network guard can actually intercept before it runs. An
+    answer-key read, a stray read outside the arm's tree, and an arm running the wrong
+    protocol are all established from the payload's or the tool name's static content —
+    no guard denies a `Read`, and there is no "the call never reached the file" story for
+    them the way there is for a blocked `WebFetch`. See `assess`'s handling of `blocked` for
+    why that distinction matters.
+    """
     lowered = name.lower()
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, bool]] = []
     if lowered in ORACLE_TOOLS or any(hint in lowered for hint in ORACLE_MCP_HINTS):
-        found.append(("violation", f"invoked oracle tool `{name}`"))
+        found.append(("violation", f"invoked oracle tool `{name}`", True))
     for pattern in ANSWER_KEY_PATTERNS:
         match = pattern.search(payload)
         if match:
             found.append(
-                ("violation", f"`{name}` touched the harness answer key ({match.group(0)})")
+                (
+                    "violation",
+                    f"`{name}` touched the harness answer key ({match.group(0)})",
+                    False,
+                )
             )
             break
     if containment is not None:
@@ -522,13 +632,14 @@ def _classify_tool(
                     "violation",
                     f"`{name}` reached outside the tree this arm was given, into "
                     f"{', '.join(strayed[:3])}",
+                    False,
                 )
             )
     found += _classify_arm_protocol(name, payload, arm)
     if lowered not in ORACLE_TOOLS:
         for host in ORACLE_HOSTS:
             if host in payload.lower():
-                found.append(("advisory", f"`{name}` input mentions {host}"))
+                found.append(("advisory", f"`{name}` input mentions {host}", False))
                 break
     return found
 
@@ -551,8 +662,15 @@ def scan_transcripts(
             f"clear an arm it never inspected; point --transcript at the session JSONL."
         )
 
+    denied = _denied_tool_use_ids(files)
+
     violations: list[dict[str, Any]] = []
     advisories: list[dict[str, Any]] = []
+    # Attempted, and the platform's own record shows it was denied before it reached the
+    # network — see `_denied_tool_use_ids`. Reported like a violation (loudly, with the
+    # transcript and input quoted) but never folded into `violations`: no oracle data
+    # entered the context, so nothing here should cost the arm its place in the comparison.
+    blocked: list[dict[str, Any]] = []
     invocations = 0
     definitions = 0
     parsed = 0
@@ -582,10 +700,11 @@ def scan_transcripts(
                 invocations += 1
                 name = str(block.get("name", "?"))
                 payload = json.dumps(block.get("input", {}), ensure_ascii=False)
+                denial_kind = denied.get(str(block.get("id") or ""))
                 hits = _classify_tool(name, payload, containment, arm)
                 if name.lower() == "bash":
                     hits += _classify_bash(str((block.get("input") or {}).get("command", "")))
-                for severity, why in hits:
+                for severity, why, network_reaching in hits:
                     entry = {
                         "transcript": str(file),
                         "line": number,
@@ -593,7 +712,13 @@ def scan_transcripts(
                         "why": why,
                         "input": payload[:400],
                     }
-                    (violations if severity == "violation" else advisories).append(entry)
+                    if severity == "violation" and network_reaching and denial_kind:
+                        entry["denied_by"] = denial_kind
+                        blocked.append(entry)
+                    elif severity == "violation":
+                        violations.append(entry)
+                    else:
+                        advisories.append(entry)
 
     if parsed == 0:
         raise AntiCheatError(
@@ -616,6 +741,7 @@ def scan_transcripts(
         "invocations_seen": invocations,
         "violations": violations,
         "advisories": advisories,
+        "blocked": blocked,
         "cve_mentioned_in_text": sorted(cve_mentions),
     }
 
@@ -653,11 +779,18 @@ def assess(scan: dict[str, Any], declared: dict[str, Any] | None = None) -> dict
 
 def format_assessment(assessment: dict[str, Any]) -> str:
     declarations = assessment.get("declarations_seen", 0)
+    blocked = assessment.get("blocked", [])
     lines = [
         f"anti-cheat: {assessment['verdict']} — {assessment['invocations_seen']} "
         f"tool invocation(s) "
         f"inspected across {len(assessment['transcripts'])} transcript(s); "
-        f"{assessment['tool_definitions_seen']} tool definition(s) seen and not counted as use",
+        f"{assessment['tool_definitions_seen']} tool definition(s) seen and not counted as use"
+        + (
+            f"; {len(blocked)} attempt(s) BLOCKED before they reached the network (see below "
+            f"— reported, not disqualifying on their own)"
+            if blocked
+            else ""
+        ),
         f"  self-declared external-source records inspected: {declarations}"
         + (
             "  (none — the arm made no declaration either way, so this layer established "
@@ -666,6 +799,17 @@ def format_assessment(assessment: dict[str, Any]) -> str:
             else ""
         ),
     ]
+    # Printed ahead of the violations, at top volume, precisely because it must not read
+    # like a footnote: intent to reach outside the sandbox is real and worth a human's eye,
+    # even though — unlike everything in `violations` — no oracle data reached the arm, so
+    # it does not by itself take the cell out of the comparison.
+    for entry in blocked:
+        lines.append(
+            f"  BLOCKED   {entry['why']} — denied by the platform before it reached the "
+            f"network ({entry.get('denied_by', 'denied')}); not disqualifying on its own "
+            f"({Path(entry['transcript']).name}:{entry['line']})"
+        )
+        lines.append(f"    {entry['input'][:200]}")
     for violation in assessment["violations"]:
         lines.append(
             f"  VIOLATION {violation['why']} "
