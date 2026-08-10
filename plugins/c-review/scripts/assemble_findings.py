@@ -297,7 +297,7 @@ def normalize_path(value: Any, scope_root: str = "") -> str:
     same file. Collapsing them here is what makes the tier-1 `(file, line, bug_class)` merge
     and the SARIF URIs agree; without it the same bug filed twice reads as two locations.
 
-    `/home/u/proj/src/a.c` and `../src/a.c` are the same third and fourth spelling of it, and
+    `/build/proj/src/a.c` and `../src/a.c` are the same third and fourth spelling of it, and
     they merge with neither: the same bug is reported three times, and a code-scanning UI
     cannot resolve an absolute `uri` under a `%SRCROOT%` base id. So an absolute path inside
     the scope root is relativised against it, and `.`/`..` segments are folded away.

@@ -36,10 +36,11 @@ recall. Everything deterministic is code rather than an agent.
 
 ## The ledger
 
-Each unit owes a row per question in a fixed C question set — bounds at every write,
+Each unit owes a row per question in a fixed set of ten — bounds at every write,
 integer width and signedness, allocation/free pairing, `sizeof` arithmetic, NUL
-termination, unchecked returns, the caller contract, banned APIs, macro contracts. A
-question is only asked where `enumerate_units.py` counted a non-empty population for it.
+termination, unchecked returns, the caller contract, banned APIs, macro contracts and
+initialisation. A question is only asked where `enumerate_units.py` counted a non-empty
+population for it.
 
 Five rules make it a gate rather than a checkbox:
 

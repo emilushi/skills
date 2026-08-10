@@ -90,7 +90,7 @@ only when the user asks or when running an evaluation:
 |---|---|---|
 | `maxUnitLines` | `150` | Cap on a review unit; a larger function is split at syntactic seams. Raising it reintroduces the saturation the cap prevents |
 | `linesPerAgent` | `1500` | Source lines per review agent. **A no-op on a small tree** — `--agent-min` (default 4) floors the derived count, so two very different values can produce identical assignments. Use `reviewAgents` to pin the fan-out |
-| `reviewAgents` | derived | Pins the review fan-out outright. The derived count is clamped 4–14; an explicit value raises the cap to itself |
+| `reviewAgents` | derived | Pins the review fan-out, subject to the same floor as the derived count: both are clamped to 4–14, and an explicit value above 14 raises the cap to itself. A value below 4 is raised to 4, and a trailing slice too small to be worth an agent is folded into its neighbour, so the final count can come out one lower than asked |
 | `invariantAudit` | `false` | Adds the shared-state invariant audit to the sweep. A whole extra agent; turn it on for state-machine-heavy targets |
 | `benchmarkMode` | `false` | **Eval-only.** Adds an external-source declaration to reviewer prompts and two schema fields. Changes no finding; leave it off for a real audit |
 

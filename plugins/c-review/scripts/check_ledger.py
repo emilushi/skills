@@ -167,7 +167,7 @@ def _bind_to_enumeration(units: list[dict[str, Any]], fresh: dict[str, Any]) -> 
     invert — the preimage search is C(n, k) — and any weaker scheme rests on the agent not
     owning the file. There is nowhere in a run directory to keep a secret from an agent that
     can read it, so the gate does not claim to be one. See "What the gate claims, and what
-    it does not" in `skills/c-review/SKILL.md`.
+    it does not" in the plugin's `AGENTS.md`.
 
     A COUNT-PRESERVING source edit — a three-statement reorder — is invisible here for the
     same reason, and lands on the reviewer as `population-not-accounted` /

@@ -243,8 +243,8 @@ function workerOpts(extra) {
 // given. `--expect ID=COUNT` constrains a WORKER's part file against the findings the
 // workflow already received through the schema; nothing constrains the agent that runs the
 // assembler. Those two agents are TRUSTED, not controlled. The gate measures an honest
-// reviewer that skipped work; it is not an adversarial control, and SKILL.md says so where
-// the reader is.
+// reviewer that skipped work; it is not an adversarial control, and both README.md and
+// AGENTS.md say so where the reader is.
 const WORKER_AGENT = 'c-review:c-review-worker'
 
 // The control goes LAST. Assigned the other way round the caller's options win, including

@@ -47,9 +47,10 @@ Two things this buys, both of which a plain "review this code" prompt gives up:
 
 The bug-type catalogue — 56 classes in 18 groups — still exists, in two roles. Review
 agents get the class **names** so they can label what they find. Then a **sweep** phase
-takes any class that got no finding anywhere and sends one agent to look for it across the
-whole tree, which catches the scattered single-site slips a reader working through a region
-in order tends to walk past.
+takes the classes that got no finding anywhere — minus the ones the platform gate, the
+threat model or Detect's candidate-site check already removed — and sends one agent to look
+for them across the whole tree, which catches the scattered single-site slips a reader
+working through a region in order tends to walk past.
 
 ## Pipeline
 
@@ -68,7 +69,7 @@ in order tends to walk past.
 |---|---|
 | **Detect** | Runs the parser to build the unit list. Also works out which platform the code targets (from real API usage, not from a single `#include`), which structs hold shared state, and which bug classes have any candidate site at all |
 | **Review** | The main pass. One agent per contiguous slice of the unit list; each returns findings with severity, plus one coverage-record row per (unit × question) |
-| **Sweep** | The bug-type axis: one agent covering every class that got no finding anywhere. Plus the shared-state struct audit, only on request |
+| **Sweep** | The bug-type axis: one agent covering every class that got no finding anywhere and that Detect did not rule out. Plus the shared-state struct audit, only on request |
 | **Dedup** | Only the near-duplicate findings the assembler cannot merge by rule. Usually skipped |
 | **Assemble** | Runs the coverage check, merges duplicates, and writes every artifact |
 
