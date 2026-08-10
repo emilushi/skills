@@ -20,7 +20,7 @@
 /plugins/gh-cli/ @Ninja3047 @dguido @kz-tob
 /plugins/git-cleanup/ @hbrodin @dguido @kz-tob
 /plugins/github-triage/ @ESultanik @dguido @kz-tob
-/plugins/insecure-defaults/ @dariushoule @dguido @kz-tob
+/plugins/insecure-defaults/ @thomas-chauchefoin-tob @dguido @kz-tob
 /plugins/let-fate-decide/ @tob-scott-a @dguido @kz-tob
 /plugins/modern-python/ @Ninja3047 @dguido @kz-tob
 /plugins/mutation-testing/ @bohendo @dguido @kz-tob
@@ -39,5 +39,6 @@
 /plugins/trailmark/ @tob-scott-a @pbottine @tob-joe @dguido @kz-tob
 /plugins/variant-analysis/ @axelm-tob @dguido @kz-tob
 /plugins/vulnerability-triage-brocards/ @DarkaMaul @dguido @kz-tob
+/plugins/writing-lean-proofs/ @fegge @dguido @kz-tob
 /plugins/yara-authoring/ @dguido @kz-tob
 /plugins/zeroize-audit/ @kumarak @dguido @kz-tob
