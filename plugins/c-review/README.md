@@ -118,6 +118,7 @@ Two consequences worth knowing:
 | `scripts/findings_model.py` | Shared loader; decides which findings count as "reported", so the report and the SARIF cannot disagree |
 | `scripts/render_report.py` | Writes `REPORT.md` |
 | `scripts/generate_sarif.py` | Writes `REPORT.sarif` (SARIF 2.1.0) |
+| `tests/` | The suite, kept out of `scripts/` so what ships and what only proves it works are separable — the tests are larger than the code they cover |
 
 Everything under `scripts/` is plain Python with no agent in the loop, which is the point:
 merging, filtering and coverage-checking are deterministic, so they are code.

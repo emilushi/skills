@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from enumerate_units import (  # noqa: E402
     CPP_EXTS,
@@ -45,7 +45,7 @@ from enumerate_units import (  # noqa: E402
     write_outputs,
 )
 
-SCRIPT = Path(__file__).parent / "enumerate_units.py"
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "enumerate_units.py"
 
 
 # ------------------------------------------------------------------- split_span
@@ -62,7 +62,7 @@ def assert_tiles(chunks: list[tuple[int, int]], start: int, end: int, cap: int) 
     for first, last in chunks:
         assert first <= last, f"empty or inverted chunk {(first, last)}"
         assert last - first + 1 <= cap, f"chunk {(first, last)} exceeds the {cap}-line cap"
-    for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:]):
+    for (_, prev_end), (next_start, _) in zip(chunks, chunks[1:], strict=False):
         assert next_start == prev_end + 1, f"gap or overlap at {prev_end} -> {next_start}"
 
 
@@ -340,7 +340,7 @@ def test_source_extensions_are_pinned():
     silent coverage hole if it is absent, and dropping any of them leaves the rest of the
     suite green.
     """
-    assert SOURCE_EXTS == {
+    assert {
         ".c",
         ".h",
         ".cc",
@@ -356,7 +356,7 @@ def test_source_extensions_are_pinned():
         ".inl",
         ".ixx",
         ".cppm",
-    }
+    } == SOURCE_EXTS
     assert ".c" not in CPP_EXTS and ".h" not in CPP_EXTS
 
 
@@ -728,7 +728,7 @@ def test_a_ledger_fabricated_from_everything_the_reviewer_can_see_fails_the_gate
     Every strategy below is one a transcribing agent can actually execute against those
     files. Each is scored separately, because a mixture is only as good as its best part.
     """
-    sys.path.insert(0, str(Path(__file__).parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
     import check_ledger
 
     (tmp_path / "src").mkdir()
@@ -801,6 +801,7 @@ def test_a_ledger_fabricated_from_everything_the_reviewer_can_see_fails_the_gate
                     zip(
                         ("verdict", "sites_accounted"),
                         strategies(unit, question)[name],
+                        strict=True,
                     ),
                     unit_id=unit["id"],
                     question=question,
@@ -1785,7 +1786,8 @@ def test_a_source_edit_that_only_shrinks_a_population_fails_the_run(tmp_path):
     source = root / "src" / "a.c"
     lines = source.read_text(encoding="utf-8").splitlines()
     edited = ["    (void)src;" if "] = src[" in line else line for line in lines]
-    assert sum(1 for a, b in zip(lines, edited) if a != b) == 3, "the fixture stopped matching"
+    changed = sum(1 for a, b in zip(lines, edited, strict=True) if a != b)
+    assert changed == 3, "the fixture stopped matching"
     source.write_text("\n".join(edited) + "\n", encoding="utf-8")
     message = attach_sites_refusal(units_json)
     assert "site line(s) and the source now holds" in message

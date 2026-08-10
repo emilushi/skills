@@ -359,7 +359,7 @@ def test_every_operand_interpolated_into_a_command_goes_through_shq():
     ]
     assert offenders == [], offenders
     # The `${…}` half of the scan is not passing by matching nothing.
-    probe = " ".join("const cmd = `--scope ${SCOPE}`".split())
+    probe = " ".join(["const", "cmd", "=", "`--scope", "${SCOPE}`"])
     assert [m.group(1) for m in re.finditer(r"\$\{([^}]*)\}", probe)] == ["SCOPE"]
 
 

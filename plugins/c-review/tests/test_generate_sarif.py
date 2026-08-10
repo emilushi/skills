@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import findings_model  # noqa: E402
-from findings_model import FindingsError, load, reported_findings  # noqa: E402
 import generate_sarif  # noqa: E402
+from findings_model import FindingsError, load, reported_findings  # noqa: E402
 from generate_sarif import build_sarif, main  # noqa: E402
 
 

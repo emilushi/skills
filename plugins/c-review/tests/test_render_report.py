@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from findings_model import UNVALIDATED_MARKER, reported_findings  # noqa: E402
 from generate_sarif import build_sarif  # noqa: E402
