@@ -54,8 +54,11 @@ Two rules that decide whether the proof is worth anything:
   vulnerable". Inventing an unbounded input is how a bounds finding gets reported
   against code that validates upstream.
 
-If the finding is not arithmetic, return `UNCERTAIN` and say so. Manufacturing
-algebra for a logic bug produces a confident-looking proof of nothing.
+If the finding is not arithmetic, return `applies: false` with verdict
+`UNCERTAIN` and say so. Only `applies: true` can block the finding, so the flag is
+the part that matters: `UNCERTAIN` on its own leaves the proof looking like one
+that was attempted. Manufacturing algebra for a logic bug produces a
+confident-looking proof of nothing.
 
 ## Data flow
 
@@ -78,6 +81,14 @@ Layers to dispatch, in path order:
 the wrong code to read and it will report `UNCERTAIN` — correctly, since it was
 shown something that validates nothing.
 
-**If nothing validates the path, say so as one explicit layer.** An empty list is
-rejected before any agent runs: a forgotten field and a deliberate "nothing guards
-this" are the same value, and the second is a claim that deserves checking.
+**If nothing validates the path, send `layers: []` together with
+`layersSearched`** — the files and functions you read, and what you did not find.
+An empty list *alone* is rejected before any agent runs: a forgotten field and a
+deliberate "nothing guards this" are the same value, and the declaration is what
+tells them apart.
+
+**Never enumerate the absence of a check as a layer.** The layer agent is asked
+what happens to the payload at that layer, and a layer that does not exist cannot
+answer: a measured run passed one and got back `PAYLOAD_STOPPED_HERE` with a
+`reason` explaining the opposite, which killed the finding before the impact agent
+ran.

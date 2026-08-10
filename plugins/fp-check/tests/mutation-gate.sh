@@ -459,7 +459,7 @@ run_mutation "a forwarded verification field is undocumented" "L1" \
 # checkpoints.md 5.1 challenge 4 overrides the band. Reading it off the returned
 # verdicts let a dead challenge-4 agent escape the one unconditional rule.
 run_mutation "already-fixed rule skips a challenge that never answered" "L2" \
-  'perl -0pi -e "s/return \(unrebutted \|\| \[\]\)\.some\([^\n]*/return false/" "$SANDBOX/workflows/triage-poc.js"' \
+  'perl -0pi -e "s/if \(!\(unrebutted \|\| \[\]\)\.some\([^\n]*/return null;/" "$SANDBOX/workflows/triage-poc.js"' \
   'node --test "$SANDBOX/tests/review.test.mjs"'
 
 # checkpoints.md 2.4b and 2.5 cap severity. The report prompt states the caps;
@@ -470,6 +470,77 @@ run_mutation "integration root cause no longer caps severity" "L2" \
 
 run_mutation "hardening gap no longer caps severity" "L2" \
   'perl -0pi -e "s/if \(classification === .hardening_gap.\)/if (false)/" "$SANDBOX/workflows/triage-poc.js"' \
+  'node --test "$SANDBOX/tests/review.test.mjs"'
+
+# The cap's two halves, which took three rounds to get right and were unpinned
+# each time. The rating is the HIGHEST level the string names, matched
+# WORD-BOUNDED, and the cap applies only where it lowers. Drop the boundaries and
+# 'high' matches inside "highly", so a Low is raised to Medium under a note saying
+# it was lowered; read the lowest instead of the highest and 'Medium/High' or
+# 'Allowlist bypass — High' escape the cap entirely, which is the one mechanism
+# the head-to-head credits 3/3 against 0/3.
+run_mutation "severity level names lose their word boundaries" "L2" \
+  'perl -0pi -e "s/\\\\\\\\b\\\$\{name\}\\\\\\\\b/\\\$\{name\}/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/static.test.mjs"'
+
+# Every positional rule tried here — leftmost name, highest name, highest-only-
+# where-it-lowers — traded a false accept for a false reject, because
+# 'Critical (affects low-privilege users)' and 'Low (the path is not
+# business-critical)' are the same shape with opposite intent. The refusal is what
+# replaced them, and it is the part with no fallback: let the ambiguity through
+# and whichever level the code happens to read becomes the finding's rating.
+run_mutation "the cap guesses at an ambiguous rating instead of refusing it" "L2" \
+  'perl -0pi -e "s/  if \(named\.length > 1\) \{/  if (false) {/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/static.test.mjs"'
+
+# And the routing, which is the half a unit test cannot see: `capSeverity` can
+# refuse perfectly and the run still ship the string if nothing acts on it.
+run_mutation "Stage 1 carries an ambiguous severity into the verdict" "L2" \
+  'perl -0pi -e "s/if \(capped\.ambiguous\) \{\n  log/if (false) {\n  log/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/static.test.mjs"'
+
+run_mutation "Stage 2 adopts an unreadable severity from the summary agent" "L2" \
+  'perl -0pi -e "s/  : claimed\.ambiguous/  : \x27\x27/" "$SANDBOX/workflows/triage-online.js"' \
+  'node --test "$SANDBOX/tests/online.test.mjs"'
+
+# Stage 3 refuses in two places: the report gate, which is what the author sees,
+# and the cap itself as a backstop. Neither may become a silent pass — a rating
+# the code cannot read is the one SKILL.md tells the orchestrator to ship.
+#
+# This one guard covers all three unreadable shapes, which is why the separate
+# blank-severity mutation it replaced became equivalent: deleting the blank check
+# stopped changing the outcome once the level count caught blanks too.
+run_mutation "the report gate accepts a severity that is not exactly one level" "L2" \
+  'perl -0pi -e "s/  if \(levels\.length !== 1\) \{/  if (false) {/" "$SANDBOX/workflows/triage-poc.js"' \
+  'node --test "$SANDBOX/tests/review.test.mjs"'
+
+run_mutation "the Stage 3 cap passes an ambiguous rating as no violation" "L2" \
+  'perl -0pi -e "s/  if \(named\.length > 1\) \{/  if (false) {/" "$SANDBOX/workflows/triage-poc.js"' \
+  'node --test "$SANDBOX/tests/review.test.mjs"'
+
+# A citation rule that rejects a real advisory ID does not merely report a false
+# positive: it writes "no commit, PR, issue or advisory reference" over a
+# reference that is there, and the fixed bug is reported as live. Every SHAPE
+# rule tried did that in one direction or the other — "ends in a digit" threw out
+# 1 real GHSA ID in 20, "four-character segments" then threw out PYSEC-2021-19 and
+# USN-5678-1. This puts the shape rule back.
+run_mutation "the registry allowlist reverts to a shape rule" "L2" \
+  'perl -0pi -e "s/bound \+ .ghsa\(-\[0-9a-z\]\{4\}\)\{3\}.,\n(.*\n)*?      bound \+ .\(cve\|[^\n]*\n/bound + \x27[a-z]{2,}-(?=[0-9a-z-]*[0-9])[0-9a-z]{4,}(-[0-9a-z]{4,})+\x27,\n/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/static.test.mjs"'
+
+# The other direction, and the one that contradicted this function's own rule that
+# a bare `file:line` is not a citation: with `/` in the shared keyword separator
+# class, `src/bug/12.go` and `tests/issues/42/repro.py` became citations.
+run_mutation "a file path counts as a GitHub shorthand citation again" "L2" \
+  'perl -0pi -e "s/\x27\(\^\|\[\^0-9a-z\/\]\)\(pr\|pull/\x27(^|[^0-9a-z])(pr|pull/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/static.test.mjs"'
+
+# `required` checks presence, not content: a blank `evidence` clears Principle 5
+# on a comparison nobody made — the one check that decides it, turned back into a
+# self-report. (Its blank-`severity` twin is now covered by the one-level guard
+# above, which subsumed it.)
+run_mutation "Principle 5 clears without saying what was compared" "L2" \
+  'perl -0pi -e "s/  if \(!String\(check\.evidence \|\| ..\)\.trim\(\)\) \{\n[^\n]*\n  \}\n//" "$SANDBOX/workflows/triage-poc.js"' \
   'node --test "$SANDBOX/tests/review.test.mjs"'
 
 # "Only a TRUE POSITIVE justifies building." A failed Stage 1 return carries a
@@ -619,7 +690,7 @@ run_mutation "poc-lint narration misses single-quoted strings" "L4" \
   'cd "$REPO" && bats "$SANDBOX/tests/poc-lint.bats"'
 
 run_mutation "poc-lint empty --symbol silently skips Principle 5" "L4" \
-  'perl -0pi -e "s/      if \[ -z \"\\\$SYMBOL\" \]; then/      if false; then/" "$SANDBOX/skills/fp-check/scripts/poc-lint.sh"' \
+  'perl -0pi -e "s/      if \[ -z \"\\\$LEAF\" \]; then/      if false; then/" "$SANDBOX/skills/fp-check/scripts/poc-lint.sh"' \
   'cd "$REPO" && bats "$SANDBOX/tests/poc-lint.bats"'
 
 run_mutation "poc-lint accepts a file with no content as a clean PoC" "L4" \
@@ -661,6 +732,14 @@ run_mutation "checkpoint 4.3 trusts the builder self-report again" "L2" \
 
 run_mutation "a dead artifact-check agent reads as a pass" "L2" \
   'perl -0pi -e "s/  if \(!check\) return .the artifact-check agent returned nothing; the PoC was never independently verified./  if (!check) return null/" "$SANDBOX/workflows/triage-poc.js"' \
+  'node --test "$SANDBOX/tests/review.test.mjs"'
+
+# Principle 5. poc-lint.sh cannot decide facade-vs-copy with a grep, so it prints a
+# NOTE and exits 0; this gate is the only code that reads the reviewer's answer.
+# Demoted with the question routed nowhere, a PoC that pasted the vulnerable
+# function in passed the note AND the symbol rule and came back REPORTED.
+run_mutation "a PoC that copies the code under test is no longer blocked" "L2" \
+  'perl -0pi -e "s/  if \(check\.reimplementation !== .NOT_DEFINED. && check\.reimplementation !== .LOCAL_DRIVER.\) \{/  if (false) {/" "$SANDBOX/workflows/triage-poc.js"' \
   'node --test "$SANDBOX/tests/review.test.mjs"'
 
 run_mutation "an unguarded spread returns to a layer result" "L1" \
@@ -731,7 +810,7 @@ run_mutation "the tally denominator shrinks to what came back" "L2b" \
   "$WIRING"
 
 run_mutation "the already-fixed override is computed and ignored" "L2b" \
-  'perl -0pi -e "s/^if \(alreadyFixedStands\(lost\)\) \{/if (false) {/m" "$SANDBOX/workflows/triage-poc.js"' \
+  'perl -0pi -e "s/^if \(fixCitation\) \{/if (false) {/m" "$SANDBOX/workflows/triage-poc.js"' \
   "$WIRING"
 
 run_mutation "a LOW confidence band proceeds to the report" "L2b" \

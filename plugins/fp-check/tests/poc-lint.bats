@@ -64,11 +64,14 @@ passes() {
   fi
 }
 
-# reimpl / imports — the same two, for the --symbol rule.
-reimpl() {
+# redefines / imports — the same two, for the --symbol rule. Rule 6 REPORTS a
+# definition of the symbol's name and does not fail the lint, so both assert exit
+# 0 and differ on whether the note fired. Without the negative half the note
+# would be free to fire on everything and nothing would notice.
+redefines() {
   run "$LINT" --symbol vulnFn "$(scratch "$1" "$2")"
-  if [ "$status" -ne 1 ] || ! echo "$output" | grep -q reimplementation; then
-    echo "expected 'reimplementation' to fire on $1 (status was $status)"
+  if [ "$status" -ne 0 ] || ! echo "$output" | grep -q possible-reimplementation; then
+    echo "expected the redefinition NOTE on $1, and exit 0 (status was $status)"
     printf '%s\n' "$2"
     echo "$output"
     return 1
@@ -77,8 +80,8 @@ reimpl() {
 
 imports() {
   run "$LINT" --symbol vulnFn "$(scratch "$1" "$2")"
-  if [ "$status" -ne 0 ]; then
-    echo "expected $1 to be clean under --symbol vulnFn (status was $status)"
+  if [ "$status" -ne 0 ] || echo "$output" | grep -q possible-reimplementation; then
+    echo "expected $1 to be clean and unremarked under --symbol vulnFn (status was $status)"
     printf '%s\n' "$2"
     echo "$output"
     return 1
@@ -123,10 +126,12 @@ imports() {
   echo "$output" | grep -q "refusing to report success"
 }
 
-@test "--symbol flags a PoC that redefines the code under test" {
+@test "--symbol reports a PoC that redefines the code under test" {
   run "$LINT" --symbol transfer_balance "$DIRTY"
+  # 1 for the placeholder rules the dirty fixture also trips; the redefinition
+  # itself is a note and contributes nothing to the exit code.
   [ "$status" -eq 1 ]
-  echo "$output" | grep -q "reimplementation"
+  echo "$output" | grep -q "possible-reimplementation"
 }
 
 @test "--symbol without a value is a usage error" {
@@ -135,17 +140,27 @@ imports() {
 }
 
 # --------------------------------------------------------------------------
-# Rule 6 is the only one enforcing Principle 5, and it is guarded by
-# [ -n "$SYMBOL" ] — so an empty symbol silently switched it off and printed
+# Rules 6 and 8 are the two carrying Principle 5, and both are guarded by
+# [ -n "$SYMBOL" ] — so an empty symbol silently switched them off and printed
 # "clean" on a PoC that reimplements the code under test.
+#
+# `Ledger.` and `ledger::` are the same hole reached by the other door: both
+# rules key on the LAST segment, which a trailing separator leaves empty, and
+# rule 8's pattern then degenerated into one matching any two adjacent
+# non-alphanumerics — so a file naming neither `Ledger` nor `debit` was clean.
 # --------------------------------------------------------------------------
 
-@test "--symbol with an empty value is a usage error, not a silent skip" {
+@test "a symbol with no final segment is a usage error, not a silent skip" {
   f=$(scratch reimpl.py 'def transfer_balance(a, b, amount):
     return amount')
-  run "$LINT" --symbol '' "$f"
-  [ "$status" -eq 2 ]
-  echo "$output" | grep -q "non-empty name"
+  for sym in '' 'Ledger.' 'a.b.' 'ledger::'; do
+    run "$LINT" --symbol "$sym" "$f"
+    if [ "$status" -ne 2 ] || ! echo "$output" | grep -q "non-empty final segment"; then
+      echo "expected --symbol '$sym' to be a usage error (status was $status)"
+      echo "$output"
+      return 1
+    fi
+  done
 }
 
 @test "the clean message says whether Principle 5 was checked" {
@@ -158,39 +173,48 @@ imports() {
   echo "$output" | grep -q "Principle 5 checked against transfer_balance"
 }
 
-@test "reimplementation is caught behind a leading modifier or a receiver" {
-  # Every one of these defeated the line-start keyword anchor and reported clean.
-  run "$LINT" --symbol transfer_balance "$(scratch a.py 'async def transfer_balance(a):
-    return 1')"
-  [ "$status" -eq 1 ]
-
-  run "$LINT" --symbol transfer_balance "$(scratch b.js 'export function transfer_balance(a) {
+@test "a redefinition is spotted behind a leading modifier or a receiver" {
+  # Every one of these defeated the line-start keyword anchor and was invisible.
+  redefines a.py 'async def vulnFn(a):
+    return 1'
+  redefines b.js 'export function vulnFn(a) {
   return 1;
-}')"
-  [ "$status" -eq 1 ]
-
-  run "$LINT" --symbol transfer_balance "$(scratch c.rs 'pub fn transfer_balance(a: u32) -> u32 {
+}'
+  redefines c.rs 'pub fn vulnFn(a: u32) -> u32 {
     1
-}')"
-  [ "$status" -eq 1 ]
-
-  run "$LINT" --symbol transfer_balance "$(scratch d.go 'func (r *Repo) transfer_balance(a int) int {
+}'
+  redefines d.go 'func (r *Repo) vulnFn(a int) int {
 	return 1
-}')"
-  [ "$status" -eq 1 ]
-
-  run "$LINT" --symbol transfer_balance "$(scratch e.js 'transfer_balance = function (a) {
+}'
+  redefines e.js 'vulnFn = function (a) {
   return 1;
-}')"
-  [ "$status" -eq 1 ]
+}'
 }
 
-@test "a function literal bound to const, let or var is a reimplementation" {
-  reimpl v1.js 'const vulnFn = function (q) { return db.query(q) }'
-  reimpl v2.js 'const vulnFn = (q) => db.query(q)'
-  reimpl v3.js 'let vulnFn = async (q) => db.query(q)'
-  reimpl v4.js 'var vulnFn = q => db.query(q)'
-  reimpl v5.py 'vulnFn = lambda q: db.query(q)'
+# The rule keys on the last segment for BOTH separators, so a qualified symbol
+# gets the same note. Keyed on `.` alone, a Rust PoC was checked for the literal
+# `ledger::transfer_balance` and a copy of the function went unremarked; keyed on
+# the whole dotted string, so did a verbatim Python copy under
+# `target_app.ledger.transfer_balance`.
+@test "a qualified symbol is reduced to its last segment, dot or colon" {
+  f=$(scratch copy.py 'def transfer_balance(src, dst, amount):
+    src.balance -= amount')
+  for sym in target_app.ledger.transfer_balance 'ledger::transfer_balance' Ledger.transfer_balance; do
+    run "$LINT" --symbol "$sym" "$f"
+    if [ "$status" -ne 0 ] || ! echo "$output" | grep -q possible-reimplementation; then
+      echo "expected the redefinition NOTE under --symbol $sym (status was $status)"
+      echo "$output"
+      return 1
+    fi
+  done
+}
+
+@test "a function literal bound to const, let or var is a redefinition" {
+  redefines v1.js 'const vulnFn = function (q) { return db.query(q) }'
+  redefines v2.js 'const vulnFn = (q) => db.query(q)'
+  redefines v3.js 'let vulnFn = async (q) => db.query(q)'
+  redefines v4.js 'var vulnFn = q => db.query(q)'
+  redefines v5.py 'vulnFn = lambda q: db.query(q)'
 }
 
 @test "binding the real symbol to a const is not a reimplementation" {
@@ -206,6 +230,20 @@ imports() {
   imports i5.js 'const { vulnFn } = require("../lib/vuln")'
 }
 
+# Rule 6 only proves the PoC does not DEFINE the symbol, which a PoC that never
+# mentions it satisfies trivially — and the clean line then claimed Principle 5
+# had been "checked". A builder copying the vulnerable body under another name
+# while reporting the real symbol as invokedSymbol passed clean.
+@test "a PoC that never names the symbol under test is not clean" {
+  f=$(scratch copy.py 'def vulnerable_parse(data):
+    return data["offset"]
+
+vulnerable_parse({"offset": 1})')
+  run "$LINT" --symbol parse_request "$f"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "symbol-not-invoked"
+}
+
 @test "calling and importing the real symbol is not a reimplementation" {
   f=$(scratch caller.py 'from target_app.ledger import transfer_balance
 
@@ -214,6 +252,106 @@ def test_it():
     assert result is None')
   run "$LINT" --symbol transfer_balance "$f"
   [ "$status" -eq 0 ]
+}
+
+# A QUALIFIED symbol is what triage-poc's POC_SCHEMA asks the builder to report
+# as invokedSymbol, and the dotted string never appears contiguously in any of
+# these call forms. Matching it whole rejected a Principle-5-COMPLIANT PoC —
+# BUILD_FAILED at the builder's own lint, or BLOCKED at the reviewer's re-run of
+# it. Only the bare-identifier case was covered, so nothing caught that.
+@test "a qualified symbol matches the call site that imports its last segment" {
+  f=$(scratch qualified.py 'from target_app.ledger import transfer_balance
+
+def test_it():
+    assert transfer_balance({}, "a", "b", -500) is None')
+  for sym in target_app.ledger.transfer_balance Ledger.transfer_balance transfer_balance; do
+    run "$LINT" --symbol "$sym" "$f"
+    if [ "$status" -ne 0 ]; then
+      echo "expected --symbol $sym to be clean (status was $status)"
+      echo "$output"
+      return 1
+    fi
+  done
+}
+
+# `def main():` is the ordinary shape of a standalone PoC, and under
+# `--symbol cli.main` it was reported as REIMPLEMENTING `cli.main`: the lint
+# fails, the builder returns BUILD_FAILED, and an attempt is burnt on a PoC that
+# was calling the real code all along. `run`, `handler` and `parse` collide the
+# same way, and no condition added to the pattern told the two apart. The fact is
+# now reported and the exit code left alone.
+@test "a local helper sharing the leaf of a qualified symbol does not fail the lint" {
+  f=$(scratch wrapper.py 'import cli
+
+def main():
+    cli.main(["--user", "../../etc/passwd"])
+
+main()')
+  run "$LINT" --symbol cli.main "$f"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Principle 5 checked against cli.main"
+  echo "$output" | grep -q "possible-reimplementation"
+}
+
+# The three canonical shapes of a COMPLIANT PoC that the parent-segment
+# requirement rejected: a façade re-export, a pytest fixture and a factory. None
+# of them spells the parent, and each exited 1 — BUILD_FAILED at the builder or
+# BLOCKED at the reviewer's re-run, on a PoC that ran and reproduced.
+@test "a facade, a fixture and a factory all satisfy the symbol rule" {
+  # clean_under SYMBOL NAME CONTENT
+  clean_under() {
+    run "$LINT" --symbol "$1" "$(scratch "$2" "$3")"
+    if [ "$status" -ne 0 ]; then
+      echo "expected --symbol $1 on $2 to be clean (status was $status)"
+      echo "$output"
+      return 1
+    fi
+  }
+  clean_under flask.helpers.send_file facade.py 'from flask import send_file
+
+def run():
+    send_file("/etc/passwd")'
+  clean_under FlaskClient.get fixture.py 'def test_idor(client):
+    r = client.get("/api/orders/2")
+    assert r.status_code == 200'
+  clean_under Ledger.transfer_balance factory.py 'from helpers import make_account
+
+a = make_account()
+a.transfer_balance(a, -500)'
+}
+
+# What the rule gives up in exchange, stated rather than implied: a leaf this
+# common is satisfied by code with nothing to do with the symbol. The clean line
+# has to say MENTION rather than let the reader hear "invocation" — that wording
+# is the whole of what stops this from being an overclaim.
+@test "a coincidental leaf match is clean, and the clean line says only mention" {
+  f=$(scratch unrelated.py 'def main():
+    data = open("/etc/passwd").read()
+    print(data)
+
+main()')
+  run "$LINT" --symbol app.io.read "$f"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "MENTION, not invocation"
+}
+
+@test "a qualified symbol still fails a PoC that names no part of it" {
+  f=$(scratch nomention.py 'def test_it():
+    assert 1 == 1')
+  run "$LINT" --symbol target_app.ledger.transfer_balance "$f"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "symbol-not-invoked"
+}
+
+# Rules 3, 6 and 7 skip .pyi because a stub legitimately elides its bodies. Rule
+# 8 read FILES, so a stub DECLARING the symbol satisfied "the PoC names it" for
+# a PoC whose actual code never mentioned it.
+@test "a .pyi stub does not satisfy the symbol-is-named rule" {
+  real=$(scratch real.py 'x = 1')
+  stub=$(scratch s.pyi 'def parse_request(data): ...')
+  run "$LINT" --symbol parse_request "$real" "$stub"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "symbol-not-invoked"
 }
 
 # --------------------------------------------------------------------------

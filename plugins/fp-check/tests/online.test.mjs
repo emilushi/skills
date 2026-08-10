@@ -23,6 +23,9 @@ const scopeHalt = loadFn(ONLINE, 'scopeHalt')
 const summaryProblem = loadFn(ONLINE, 'summaryProblem')
 const needsUserCensus = loadFn(ONLINE, 'needsUserCensus')
 const censusProblem = loadFn(ONLINE, 'censusProblem')
+// `namedLevels` alongside it: `capSeverity` calls it, and `loadFn` evaluates one
+// function alone, where a call to a sibling is a ReferenceError.
+const { capSeverity } = loadFns(ONLINE, 'capSeverity', 'namedLevels')
 
 const GOOD = {
   baseDir: '/plugin/skills/fp-check',
@@ -34,7 +37,9 @@ const GOOD = {
   },
   verification: {
     status: 'TRUE_POSITIVE',
-    impact: { impact: 'reads arbitrary tables', rootCause: 'internal', classification: 'vulnerability' },
+    // `result` is required: `impactLine` branches on it, and a dispatch that omits
+    // it opens all five prompts with "Stage 1 graded it not at all".
+    impact: { result: 'VERIFIED', impact: 'reads arbitrary tables', rootCause: 'internal', classification: 'vulnerability' },
     severity: 'High',
   },
   project: { name: 'example-app', url: 'https://github.com/example/app' },
@@ -502,6 +507,131 @@ test('a confirmed public duplicate is reported as one', async () => {
   assert.match(result.reason, /GHSA-/)
 })
 
+// DUPLICATE returns BEFORE the summary gate on purpose, and it was the one
+// non-BLOCKED terminal status carrying a `summary` and no corrected severity — so
+// the pre-cap `summary.finalSeverity` was the only number a reader could reach,
+// on the very root cause the cap exists for.
+test('a terminal duplicate carries the CAPPED severity, not the summary agent number', async () => {
+  const { result } = await runScript('triage-online.js', {
+    args: {
+      ...GOOD,
+      verification: {
+        ...GOOD.verification,
+        impact: { ...GOOD.verification.impact, rootCause: 'integration' },
+      },
+    },
+    agents: agents({
+      summary: { ...SUMMARY, finalSeverity: 'Critical' },
+      'past-bugs': { result: 'similar-bugs-found', coverage: 'all pages', links: 'GHSA-xxxx-yyyy-zzzz', recommendedSeverity: 'High', duplicate: true, evidence: 'identical report' },
+    }),
+  })
+  assert.equal(result.status, 'DUPLICATE')
+  assert.equal(result.severity, 'Medium', 'the integration cap is not applied on the duplicate path')
+  assert.match(result.severityCorrection, /integration/)
+})
+
+// The same fallback the `Unknown` branch has, for the same reason and reached the
+// same way. This stage exists to narrow or correct Stage 1's rating; a
+// `finalSeverity` naming two levels does neither, and SKILL.md tells the
+// orchestrator to take the reported severity from here — so without the fallback
+// `Medium/High` was the number the finding shipped with, uncapped, on the very
+// root cause the cap exists for.
+test('a finalSeverity naming two levels falls back to Stage 1 rather than shipping', async () => {
+  const { result } = await runScript('triage-online.js', {
+    args: {
+      ...GOOD,
+      verification: {
+        ...GOOD.verification,
+        severity: 'Medium',
+        impact: { ...GOOD.verification.impact, rootCause: 'integration' },
+      },
+    },
+    agents: agents({ summary: { ...SUMMARY, finalSeverity: 'Critical (affects low-privilege users)' } }),
+  })
+  assert.equal(result.severity, 'Medium', "the summary agent's unreadable rating was adopted")
+  assert.match(result.severityCorrection, /names 2 levels/)
+  assert.match(result.severityCorrection, /Stage 1/)
+  // and the substitution is stated where the reader sees the reasoning it corrects
+  assert.match(result.reason, /names 2 levels/)
+})
+
+// Stage 2 carries its own copy of the cap, because this stage's census fires
+// precisely on the capped root causes and its `severityEffect: raise` invites the
+// number back up. The workflow-level test above proves the copy is WIRED; these
+// prove it decides the same way as Stage 1's, which is the half that drifted —
+// the copy had no direct test at all while the other two did.
+test('the online cap decides on one named level and refuses to guess at two', () => {
+  // Caps: exactly one level named, above the cap. Word boundaries are what stop
+  // `low` inside "Allowlist" from making a High uncappable.
+  for (const severity of ['Allowlist bypass — High', 'Critical (RCE)', 'CRITICAL', 'critical', 'High']) {
+    const r = capSeverity(severity, 'integration', 'vulnerability')
+    assert.equal(r.severity, 'Medium', `${severity} must not escape the cap`)
+    assert.match(r.note, /2\.4b/)
+    assert.equal(r.ambiguous, '')
+  }
+  // Refuses: two levels named. Round 7 read the highest and applied it only where
+  // it lowered, which let every one of these ship UNCHANGED — `Medium/High`
+  // uncapped, and `Critical (affects low-privilege users)` uncapped because the
+  // word `low` appears in "low-privilege".
+  for (const severity of [
+    'Medium/High',
+    'Medium-High',
+    'High/Critical',
+    'Critical (affects low-privilege users)',
+    'Low (the affected path is not business-critical)',
+    'Informational (no high-value data)',
+    'Critically low impact — Informational',
+  ]) {
+    const r = capSeverity(severity, 'integration', 'vulnerability')
+    assert.ok(r.ambiguous, `${severity} names two levels and must be refused, not guessed at`)
+    assert.equal(r.severity, severity)
+    assert.equal(r.note, '')
+  }
+})
+
+// A cap that raises is not a cap. Word boundaries are what stop 'highly' reading
+// as a rating on a finding whose only stated level is Low.
+test('the online cap never raises a severity below it', () => {
+  for (const severity of ['Medium', 'Low', 'Informational', 'Low — highly situational', 'Highly situational, ultimately Low']) {
+    const r = capSeverity(severity, 'external', 'hardening_gap')
+    assert.equal(r.severity, severity, `${severity} must not be raised`)
+    assert.equal(r.note, '')
+    assert.equal(r.ambiguous, '')
+  }
+})
+
+// `out-of-scope` is withheld from SUMMARY_SCHEMA's enum, and an enum is not a
+// gate: `required` is the only thing the runtime validator enforces. So the one
+// verdict that ends the analysis — which SCOPE_SCHEMA makes cost a quoted clause —
+// could still be written here, where there is no clause field, and SKILL.md read
+// the scope from `summary`. It printed "OUT OF SCOPE" with nothing after the dash.
+test('an out-of-scope written by the summary agent is not adopted', async () => {
+  const { result } = await runScript('triage-online.js', {
+    args: GOOD,
+    agents: agents({ summary: { ...SUMMARY, scopeVerdict: 'out-of-scope' } }),
+  })
+  assert.equal(result.status, 'TRIAGED')
+  assert.equal(result.scopeVerdict, 'unclear', 'the terminal verdict was taken from a schema nothing enforces')
+})
+
+test('the top-level scopeVerdict is what an in-scope summary produces too', async () => {
+  const { result } = await runScript('triage-online.js', { args: GOOD, agents: agents() })
+  assert.equal(result.scopeVerdict, 'in-scope')
+})
+
+// Zero results is not "nothing was found": it is "nothing was searched". The
+// summary prompt asserted the first, which is the same vacuous pass `missingArgs`
+// refuses an empty `sources` list for.
+test('a past-bug fan-out that returned nothing at all is not summarised as no duplicate', async () => {
+  const { calls } = await runScript('triage-online.js', {
+    args: GOOD,
+    agents: agents({ 'past-bugs': null }),
+  })
+  const summary = calls.find((c) => c.label === 'summary')
+  assert.ok(!/No source reported this as an existing duplicate/.test(summary.prompt))
+  assert.match(summary.prompt, /the duplicate check did not happen/)
+})
+
 // A source whose agent died was NOT searched, and "not searched" summarised as
 // "nothing found there" is how an absent duplicate check becomes a clean bill of
 // health. Reported rather than fatal: the other sources are still evidence.
@@ -661,7 +791,7 @@ const CLIENT_DRIVEN = {
   ...GOOD,
   verification: {
     ...GOOD.verification,
-    impact: { impact: 'a caller-built filter reaches the query', rootCause: 'integration', classification: 'vulnerability' },
+    impact: { result: 'VERIFIED', impact: 'a caller-built filter reaches the query', rootCause: 'integration', classification: 'vulnerability' },
   },
 }
 

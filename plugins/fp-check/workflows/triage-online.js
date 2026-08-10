@@ -153,7 +153,17 @@ const SUMMARY_SCHEMA = {
   required: ['finalSeverity', 'scopeVerdict', 'reasoning', 'confidence', 'openQuestions', 'evidence'],
   properties: {
     finalSeverity: { enum: ['Critical', 'High', 'Medium', 'Low', 'Informational', 'Unknown'] },
-    scopeVerdict: { enum: ['in-scope', 'out-of-scope', 'unclear'] },
+    // `out-of-scope` is deliberately NOT offered here, and this schema is the only
+    // place that can withhold it. It is the one verdict that ends the work, so
+    // SCOPE_SCHEMA makes it cost a quoted `clause` and `scopeHalt` refuses it
+    // without one — but this schema has no clause field at all, and SKILL.md tells
+    // the orchestrator to adopt `summary.scopeVerdict`, so an out-of-scope written
+    // here routed around the asymmetry and left SKILL.md's "OUT OF SCOPE — <the
+    // clause>" with no clause to print.
+    scopeVerdict: {
+      enum: ['in-scope', 'unclear'],
+      description: 'out-of-scope is decided in the Scope step, on a quoted clause; the honest answer here is unclear',
+    },
     duplicateOf: { type: 'string' },
     reasoning: { type: 'string' },
     confidence: { enum: ['high', 'medium', 'low'] },
@@ -198,7 +208,11 @@ function missingArgs(a) {
   // rather than risk mis-lexing one (test_a_regex_literal_is_rejected_rather_than_mis_lexed).
   // Adding one here failed 51 of its tests on unmutated code and took 27 mutations
   // with it, because a mutation whose baseline is red proves nothing.
-  const base = typeof (a && a.baseDir) === 'string' ? a.baseDir.trim() : ''
+  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir cleared
+  // `need` — it is neither undefined, null nor a blank string — and then read as
+  // '' here, so the shape check below was skipped entirely and every reference
+  // path became '[object Object]/references/...'.
+  const base = String((a && a.baseDir) ?? '').trim()
   const withoutSlash = base.endsWith('/') ? base.slice(0, -1) : base
   const shaped = withoutSlash.startsWith('/') && withoutSlash.endsWith('/skills/fp-check')
   if (base && !shaped) {
@@ -245,6 +259,22 @@ function missingArgs(a) {
   }
   const impact = (a && a.verification && a.verification.impact) || {}
   need('verification.impact.impact', impact.impact)
+  // `impactLine` branches on this, and it was the field the round that added
+  // rootCause and classification here missed. Omitted, it reads as `undefined`
+  // and every one of the five prompts below opens "Impact CLAIMED but NOT
+  // established offline — Stage 1 graded it not at all", priming each agent to
+  // talk down a finding whose impact Stage 1 may well have VERIFIED. IMPACT_SCHEMA
+  // requires it, so a verbatim forward always carries it; SKILL.md's Stage 2 arg
+  // list names it as read.
+  need('verification.impact.result', impact.result)
+  // Both are read by `needsUserCensus`, by the census prompt and by `censusWhy`,
+  // and neither was required — so a caller who trimmed the dispatch to the three
+  // fields SKILL.md named turned the integration/external trigger off silently
+  // (an absent rootCause matches neither branch) and put the literal string
+  // "undefined" in front of the census agent. triage-poc requires both; this is
+  // the same requirement, and SKILL.md's Stage 2 arg list now names them.
+  need('verification.impact.rootCause', impact.rootCause)
+  need('verification.impact.classification', impact.classification)
   need('verification.severity', a && a.verification && a.verification.severity)
 
   const srcs = a && a.sources
@@ -276,6 +306,17 @@ if (argProblems.length > 0) {
     reason: `triage-online received an unusable arg shape: ${argProblems.join(', ')}. See the Dispatch section of SKILL.md.`,
   }
 }
+
+// Stage 2 accepts NEEDS_MORE_INFO, and the commonest NEEDS_MORE_INFO Stage 1
+// returns is an impact agent that answered NOT_VERIFIED — "no impact could be
+// established either way". Every prompt below then told its agent "Impact
+// established offline: <it>", which is the self-report the comment above refuses
+// for OUT_OF_SCOPE arriving one field over: an unestablished impact asserted as
+// fact to the agents whose job is to price it.
+const impactVerified = verification.impact.result === 'VERIFIED'
+const impactLine = impactVerified
+  ? `Impact established offline: ${verification.impact.impact}`
+  : `Impact CLAIMED but NOT established offline — Stage 1 graded it ${verification.impact.result || 'not at all'}, so treat it as the reported claim: ${verification.impact.impact}`
 
 // ------------------------------------------------------------------ Policy
 
@@ -350,7 +391,7 @@ const reachability = await agent(
 Project: ${project.name} (${project.url})
 Finding: ${finding.summary}
 Sink: ${finding.sink}
-Impact established offline: ${verification.impact.impact}
+${impactLine}
 Severity so far: ${verification.severity}
 
 Stage 1 already traced the path in the code. You are answering the questions it
@@ -397,7 +438,7 @@ Project: ${project.name} (${project.url})
 Finding: ${finding.summary}
 Component: ${finding.component}
 Claimed impact: ${finding.claimedImpact}
-Impact established offline: ${verification.impact.impact}
+${impactLine}
 Severity so far: ${verification.severity}
 
 Read ${baseDir}/references/validation-dimensions.md before you decide. Its scope
@@ -475,7 +516,7 @@ Query or URL to start from: ${source.query}
 
 Finding: ${finding.summary}
 Component: ${finding.component}
-Impact: ${verification.impact.impact}
+${impactLine}
 Public reachability: ${reachability.evidence}
 
 Search only your assigned source. Exhaust its pagination or API cursors, and try
@@ -516,10 +557,15 @@ if (beyondCap.length > 0) {
 // summarised as "nothing found there" — that is how an absent duplicate check
 // becomes a clean bill of health. Reported rather than fatal: the remaining
 // sources are still evidence, and the summary is told which venues are blind.
+//
+// Matched by POSITION rather than by label: `parallel` preserves position and
+// substitutes null in place, and two sources sharing a label made the survivor
+// answer for its twin — one agent dies, `searched.some(r => r.source === label)`
+// finds the other, and the dead venue is summarised as searched.
 const unsearched = sources
   .slice(0, MAX_SOURCES)
+  .filter((s, i) => !pastBugs[i])
   .map((s) => s.label)
-  .filter((label) => !searched.some((r) => r.source === label))
 if (unsearched.length > 0) {
   log(`${unsearched.length} of ${attempted} source(s) returned nothing at all: ${unsearched.join(', ')}`)
 }
@@ -575,7 +621,7 @@ Project: ${project.name} (${project.url})
 Finding: ${finding.summary}
 Component: ${finding.component}
 Sink: ${finding.sink}
-Impact established offline: ${verification.impact.impact}
+${impactLine}
 Root cause: ${verification.impact.rootCause}
 Public reachability: ${reachability.evidence}
 
@@ -634,9 +680,15 @@ const censusIssue = censusWanted ? censusProblem(census) : null
 // summary as an absence and reads as a clean result. Both the summary prompt and
 // every return below get this.
 const censusState = !censusWanted ? 'not-applicable' : censusIssue ? 'unperformed' : 'performed'
+// `why` is answered on ALL THREE states, including the one where the census
+// SUCCEEDED. It used to be `censusIssue`, which is null exactly then — so every
+// terminal return carried `census.why: null` on the one path where there was
+// something to say, and a reader looking for the rationale found nothing.
+// `censusProblem` has already refused a blank `coverage` on this path, so the
+// fallback is unreachable rather than load-bearing.
 const censusWhy = !censusWanted
   ? `the bug is exploitable in the target itself — root cause ${verification.impact.rootCause}, classification ${verification.impact.classification}, and the published call sites are driven by ${reachability.driver}`
-  : censusIssue
+  : censusIssue || `consumers searched: ${String(census.coverage || '').trim() || 'the agent named no query'}`
 if (censusState !== 'performed') log(`downstream-users census ${censusState}: ${censusWhy}`)
 
 // A blind census is reported to the summary as unchecked rather than halting the
@@ -669,7 +721,15 @@ const duplicates = searched.filter((r) => r.duplicate)
 // presence rather than content, so `links: '   '` is schema-valid AND truthy — it
 // displaced the `evidence` it was meant to fall back to, and the retraction went out
 // citing blank space. DUPLICATE is terminal, so that citation is the deliverable.
-const dupCite = (r) => String(r.links || '').trim() || String(r.evidence || '').trim() || 'no link or evidence given'
+//
+// The literal fallback that used to close this expression — 'no link or evidence
+// given' — let an entirely uncited duplicate end the stage as a retraction citing
+// that sentence. `upstreamFixStands` and `alreadyFixedStands` refuse the same
+// thing at the other two retraction sites, for the reason all three share: an
+// unreferenced retraction is the one failure mode that silently discards a real
+// finding. An uncited one still reaches the summary agent, as a claim.
+const dupCite = (r) => String(r.links || '').trim() || String(r.evidence || '').trim()
+const cited = duplicates.filter(dupCite)
 
 const summary = await agent(
   `Write the online triage summary. Everything below was gathered by agents that
@@ -677,8 +737,9 @@ each saw one narrow question.
 
 Project: ${project.name} (${project.url})
 Finding: ${finding.summary}
-Severity Stage 1 arrived at, offline: ${verification.severity}
-Impact: ${verification.impact.impact}
+Severity Stage 1 arrived at, offline: ${verification.severity}${verification.severityCorrection ? ` — ${verification.severityCorrection}` : ''}
+${impactLine}
+Root cause: ${verification.impact.rootCause}, classification ${verification.impact.classification}
 
 Scope: ${scope.verdict}${String(scope.clause || '').trim() ? ` per ${scope.clause}` : ' — no controlling clause quoted'}
 Severity the policy rubric implies: ${scope.severity}
@@ -691,7 +752,7 @@ Past-bug searches, ${searched.length} of ${attempted} dispatched source(s) retur
   ${searched.map((r) => `${r.source}: ${r.result}${r.recommendedSeverity && r.recommendedSeverity !== 'Unknown' ? ` → ${r.recommendedSeverity}` : ''} — ${r.similarity || r.evidence} [coverage: ${r.coverage}]`).join('\n  ')}
 ${unsearched.length ? `NOT searched, because those agents returned nothing — treat these venues as unchecked, not as clear:\n  ${unsearched.join('\n  ')}` : ''}
 ${beyondCap.length ? `NOT searched, because they were beyond the cap of ${MAX_SOURCES} and no agent was dispatched — unchecked, not clear:\n  ${beyondCap.join('\n  ')}` : ''}
-${duplicates.length ? `Reported as an existing public duplicate:\n  ${duplicates.map((r) => `${r.source}: ${dupCite(r)}`).join('\n  ')}` : 'No source reported this as an existing duplicate.'}
+${duplicates.length ? `Reported as an existing public duplicate:\n  ${duplicates.map((r) => `${r.source}: ${dupCite(r) || 'NO link and no evidence given — a claim, not a citation; it belongs in openQuestions'}`).join('\n  ')}` : searched.length ? 'No source reported this as an existing duplicate.' : 'NOT ONE source returned a result, so the duplicate check did not happen. That is unchecked, not clear, and it belongs in openQuestions — "no source reported a duplicate" would be a claim about searches that were never completed.'}
 
 ${censusReport}
 
@@ -699,10 +760,21 @@ Give the final severity recommendation and the reasoning that gets you there,
 mapping the reachability facts onto the policy clauses. Where the online evidence
 contradicts the offline severity, say which one you are following and why.
 
+An integration or external root cause caps severity at Medium, and a hardening
+gap is not written up as an exploited vulnerability. Those caps are arithmetic and
+are applied in code after you answer, so a higher rating is corrected rather than
+adopted — and a confirmed downstream consumer is a reason to say the cap binds
+tightly, not a reason to exceed it.
+
 openQuestions is required and may not be empty. If the policy does not address
 this class of bug, if a venue went unsearched, if the consumer census could not be
 performed, or if the rubric is ambiguous, that belongs here — a summary that omits
-the gap reads as though the question was settled.`,
+the gap reads as though the question was settled.
+
+scopeVerdict cannot be out-of-scope: that verdict ended the analysis two steps
+ago, on a quoted clause, and none was. If you believe the policy excludes this
+finding, the verdict is unclear and the clause you could not find is an open
+question.`,
   { label: 'summary', phase: 'Summary', schema: SUMMARY_SCHEMA, effort: 'high' },
 )
 
@@ -718,6 +790,113 @@ function summaryProblem(result) {
   return null
 }
 
+// Pure, and the same arithmetic Stage 1 applies — checkpoints.md 2.4b and 2.5,
+// duplicated because a workflow script is standalone and cannot import Stage 1's
+// copy. Without it this stage undid the one mechanism the head-to-head credited
+// 3/3 against 0/3: Stage 1 caps an integration or external root cause at Medium,
+// then the summary agent was asked for a `finalSeverity` and SKILL.md told the
+// orchestrator to adopt it. The census that feeds that agent fires PRECISELY on
+// the capped root causes, and its `severityEffect: raise` invites the number back
+// up. The correction is reported, never silent.
+// Pure, and duplicated from triage-static.js with `capSeverity` — see the
+// reasoning there. Every DISTINCT rating level a string names, WORD-BOUNDED,
+// most severe first: `low` sits inside "Allowlist", `high` inside "highly".
+function namedLevels(severity) {
+  const LEVELS = ['critical', 'high', 'medium', 'low', 'informational']
+  return LEVELS.filter((name) => new RegExp(`\\b${name}\\b`, 'i').test(String(severity)))
+}
+
+function capSeverity(severity, rootCause, classification) {
+  const CAP = 'Medium'
+  // Affirmative — "is this rating at or above the cap?" — rather than by
+  // exclusion. `severity !== 'Critical' && severity !== 'High'` returned early
+  // for every spelling the enum does not enforce, and `required` is the only
+  // thing the runtime validator enforces: 'critical', 'CRITICAL' and
+  // 'Critical (RCE)' all escaped the cap uncorrected, which is the one mechanism
+  // the measured head-to-head credited 3/3 against 0/3.
+  //
+  // EXACTLY ONE level named is a rating. More than one is not: 'Medium/High',
+  // 'Critical (affects low-privilege users)' and 'Low (the affected path is not
+  // business-critical)' each name two, and no positional rule separates them —
+  // guess high and a Low is raised under a note saying it was lowered, guess low
+  // and an inflated Critical ships with `low` inside "low-privilege" as its
+  // licence. The ambiguity is handed back rather than resolved.
+  const named = namedLevels(severity)
+  if (named.length > 1) {
+    return {
+      severity,
+      note: '',
+      ambiguous: `severity "${String(severity).trim()}" names ${named.length} levels (${named.join(', ')}), so there is no single rating to cap: state exactly one of Critical, High, Medium, Low, Informational`,
+    }
+  }
+  const level = named[0] || ''
+  if (level !== 'critical' && level !== 'high') return { severity, note: '', ambiguous: '' }
+  if (rootCause === 'integration' || rootCause === 'external') {
+    return {
+      severity: CAP,
+      ambiguous: '',
+      note: `severity lowered from ${severity} to ${CAP}: a ${rootCause} root cause requires an external failure to trigger (checkpoints.md 2.4b)`,
+    }
+  }
+  if (classification === 'hardening_gap') {
+    return {
+      severity: CAP,
+      ambiguous: '',
+      note: `severity lowered from ${severity} to ${CAP}: a hardening gap is defense-in-depth, not an exploited vulnerability (checkpoints.md 2.5)`,
+    }
+  }
+  return { severity, note: '', ambiguous: '' }
+}
+
+// `Unknown` is not a correction. This stage may narrow or correct the severity
+// Stage 1 established; replacing a rated finding with "Unknown" — which the cap
+// passes through untouched — does neither, and SKILL.md tells the orchestrator to
+// take the reported severity from here. Falling back keeps the offline rating,
+// which is the one that was actually derived from evidence.
+// And the fallback is REPORTED, for the reason the cap two lines up is: this
+// stage substitutes a number the reader is told came from here, and `summary.
+// reasoning` is relayed verbatim beside it — so an unnoted substitution printed
+// Stage 1's `High` next to a paragraph saying no severity could be determined.
+// `summary` may be null or incomplete here: this block runs BEFORE the duplicate
+// and summary gates, so that DUPLICATE — a terminal, non-BLOCKED status carrying
+// a `summary` — is not the one path whose only available number is the UNCAPPED
+// `summary.finalSeverity`.
+const claimedSeverity = String((summary && summary.finalSeverity) || 'Unknown').trim()
+const unknownSeverity = claimedSeverity.toLowerCase() === 'unknown'
+const claimed = capSeverity(claimedSeverity, verification.impact.rootCause, verification.impact.classification)
+// An AMBIGUOUS claim falls back the same way an Unknown one does, and for the
+// same reason: `Medium/High` and `Critical (affects low-privilege users)` are
+// not corrections either — nobody can say which number they assert — and this
+// stage exists to narrow or correct Stage 1's rating, not to replace a decided
+// one with a string. `capSeverity` refuses to guess (see it), so the guess is not
+// made here either; Stage 1's number, which was derived from evidence, stands.
+// Reported, never silent.
+const unusable = unknownSeverity
+  ? `online triage returned finalSeverity Unknown, which is not a correction`
+  : claimed.ambiguous
+const finalSeverity = unusable ? verification.severity : claimedSeverity
+const capped = unusable
+  ? capSeverity(finalSeverity, verification.impact.rootCause, verification.impact.classification)
+  : claimed
+const severityNote = [
+  // `derived from the code` is claimed only where it is true. Stage 1 reaches
+  // NEEDS_MORE_INFO with `impact.result` NOT_VERIFIED, which is a rating on a
+  // CLAIMED impact — the same fact `impactLine` tells every agent above — and
+  // asserting it was derived from the code in the same run contradicts them.
+  unusable
+    ? `${unusable}: Stage 1's ${verification.severity} stands${impactVerified ? ', derived from the code' : ', which was rated on a CLAIMED impact Stage 1 did not establish'}`
+    : '',
+  capped.note,
+  // The fallback landed on a number that is itself unreadable. Stage 1 refuses to
+  // return one, so this needs an upstream that is not Stage 1 — but `verification`
+  // arrives as an argument, and a rating that no cap could be applied to must say
+  // so rather than ship under a note claiming Stage 1's number stands.
+  capped.ambiguous ? `and no cap could be applied to it: ${capped.ambiguous}` : '',
+]
+  .filter(Boolean)
+  .join('; ')
+if (severityNote) log(severityNote)
+
 // BEFORE the summary's own gate, and the order is load-bearing. A duplicate is a
 // fact a past-bug agent established with a link; the summary agent's job is to write
 // it up, and its failure to do so cannot unmake it. The other way round, the single
@@ -728,12 +907,17 @@ function summaryProblem(result) {
 //
 // `summary` is still returned, and may be null or incomplete: the duplicate finding
 // does not depend on it.
-if (duplicates.length > 0) {
-  const where = duplicates.map((r) => `${r.source}: ${dupCite(r)}`).join('; ')
+if (cited.length > 0) {
+  const where = cited.map((r) => `${r.source}: ${dupCite(r)}`).join('; ')
   log(`DUPLICATE: already publicly reported — ${where}`)
   return {
     status: 'DUPLICATE',
     reason: `already publicly reported — ${where}`,
+    // Under the same keys every other terminal return uses. Without them this was
+    // the one non-BLOCKED status carrying a `summary` and no corrected number, so
+    // the pre-cap `summary.finalSeverity` was the only one a reader could reach.
+    severity: capped.severity,
+    severityCorrection: severityNote,
     policy,
     reachability,
     scope,
@@ -761,10 +945,36 @@ if (summaryIssue) {
   }
 }
 
-log(`Online triage complete: ${summary.scopeVerdict}, severity ${summary.finalSeverity} (confidence ${summary.confidence}).`)
+
+// SUMMARY_SCHEMA withholds `out-of-scope` from this enum, and an enum is not a
+// gate: `required` is the only thing the runtime validator enforces, as three
+// comments in this file already say. So the one verdict that ends the analysis —
+// the one SCOPE_SCHEMA makes cost a quoted clause, and `scopeHalt` refuses
+// without one — could still be written here, where there is no clause field at
+// all, and SKILL.md tells the orchestrator to take the scope from `summary`.
+// It printed "OUT OF SCOPE" with nothing after the dash.
+//
+// Read affirmatively, like every other gate in this file, and surfaced at the top
+// level beside the corrected severity, which is where SKILL.md now reads it.
+const scopeVerdict = summary.scopeVerdict === 'in-scope' ? 'in-scope' : 'unclear'
+if (scopeVerdict !== summary.scopeVerdict) {
+  log(`summary returned scopeVerdict '${summary.scopeVerdict}', which this step cannot decide; reporting unclear`)
+}
+
+log(`Online triage complete: ${scopeVerdict}, severity ${capped.severity} (confidence ${summary.confidence}).`)
 return {
   status: 'TRIAGED',
-  reason: summary.reasoning,
+  // Normalised, not the agent's own string. See above.
+  scopeVerdict,
+  // The cap corrects the NUMBER, and `summary.reasoning` is the argument for the
+  // pre-cap one. Relayed verbatim, as SKILL.md's Completion Gate requires, it
+  // prints a Medium next to a paragraph arguing Critical, so the correction rides
+  // with the text it corrects rather than only in `severityCorrection`.
+  reason: severityNote ? `${summary.reasoning} — ${severityNote}` : summary.reasoning,
+  // The corrected number, under the same keys Stage 1 surfaces it with. Reading
+  // `summary.finalSeverity` directly reads the pre-cap one.
+  severity: capped.severity,
+  severityCorrection: severityNote,
   policy,
   reachability,
   scope,

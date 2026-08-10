@@ -12,10 +12,20 @@ repeated as prose.
 
 ## 1. Reimplementation — the failure that invalidates everything
 
-> This rule is what `poc-lint.sh` calls **Principle 5**, and it is the only rule
-> the linter cannot check without help: pass `--symbol <the symbol under test>` or
-> it prints `Principle 5 NOT checked` and rule 6 does not run. A clean report
-> without a symbol says nothing about this section.
+> This rule is what `poc-lint.sh` calls **Principle 5**, and the linter can only
+> carry half of it. Pass `--symbol <the symbol under test>` — qualified or not,
+> in the form the code uses; for `a.b.c` and `a::c` it keys on `c` — or it prints
+> `Principle 5 NOT checked` and neither rule behind that flag runs.
+>
+> With a symbol it enforces exactly one thing: **rule 8**, that the name appears
+> somewhere in your code. A PoC that never names the symbol cannot be calling it.
+> That is *mention*, not invocation, and the clean line says so.
+>
+> **Rule 6 is a note, not a gate.** It reports a definition of that name in your
+> PoC and does not change the exit code, because a grep cannot tell a copy of the
+> target from the `def main()` driver a standalone PoC legitimately has. A clean
+> exit is therefore not a finding that you did not reimplement — the rest of this
+> section is addressed to you and to the reviewer, not to the linter.
 
 **A PoC that copies the vulnerable code and calls the copy only proves the copy
 is broken.** It says nothing about the application. The real code may have
@@ -63,8 +73,19 @@ jest.mock("../src/auth", () => ({
 jest.mock("../src/database");
 const auth = require("../src/auth");
 
-const result = await auth.validateToken(craftMaliciousJWT({ admin: true }));
-expect(result.admin).toBe(true); // proves the real auth is bypassed
+// Assert the NEGATIVE — this is a TEST-INTEGRATED PoC, so it FAILS while the
+// real auth is bypassed and passes once the signature is verified. Asserting
+// that the exploit works is backwards HERE: it would go green while the bug
+// exists and red once it is fixed, which is a regression test for the bug. A
+// standalone PoC (the Python one above) asserts the opposite, because nothing
+// runs it in CI. See test-integration.md.
+//
+// Write the assertion against the behaviour the FIX will have. `const result =
+// await auth.validateToken(...); expect(result.admin).toBe(false)` looks like
+// the same thing and is not: a fixed validateToken never returns a token to
+// inspect, so that form is red before the fix AND after it, which is a broken
+// test rather than a demonstration.
+await expect(auth.validateToken(craftMaliciousJWT({ admin: true }))).rejects.toThrow();
 ```
 
 ### What is acceptable
@@ -75,6 +96,13 @@ expect(result.admin).toBe(true); // proves the real auth is bypassed
 - Minimal wrappers that call the real code with instrumentation
 
 ### If reimplementation is detected
+
+The linter's `possible-reimplementation` note is where you will usually see the
+candidate, and it exits 0 regardless — grep cannot tell a façade re-export or a
+local driver from a copy. The decision is made on the two files, by the reviewer
+who checks the artifact, and it is recorded as `reimplementation`:
+`COPY_OF_TARGET` returns BLOCKED for the whole stage. When it is a copy, say so
+in this form and stop:
 
 ```text
 ⚠️ REIMPLEMENTATION DETECTED — this PoC does not test real code.

@@ -1,8 +1,8 @@
 # TODO: the two capabilities that did not survive the merge
 
 **Written 2026-08-07**, against fp-check 2.2.0. Two items, independent of each
-other and of the measurement work in
-[HANDOFF-measure-v2.2.0.md](HANDOFF-measure-v2.2.0.md).
+other and of the measurement work recorded in
+[MEASUREMENTS.md](MEASUREMENTS.md).
 
 Both are **capability gaps, not bugs**. The plugin is honest about them today —
 `tests/coverage.test.mjs` pins each with a live guard that fails if anyone claims

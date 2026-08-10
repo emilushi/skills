@@ -68,9 +68,10 @@ validation, not "harmless" probing.
 ## Target validation
 
 Enforce the envelope in code, not in a comment. Note the ordering: the
-production-hostname check runs **before** the allowlist. Behind the allowlist it
-would only ever see hosts already accepted, which makes it dead code — this file
-shipped that bug for a long time.
+production-hostname check runs **before** the allowlist, so it fires whatever
+`SAFE_HOSTS` says and the error names the real problem. Editing `SAFE_HOSTS`
+cannot switch it off, which is precisely the case the allowlist itself cannot
+catch.
 
 ```python
 SAFE_HOSTS = {"localhost", "127.0.0.1", "::1", "test.internal"}

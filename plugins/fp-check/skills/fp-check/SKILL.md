@@ -203,10 +203,10 @@ args = {
 }
 ```
 
-Returns one of `TRUE_POSITIVE`, `FALSE_POSITIVE`, `DISMISSED`, `NOT_EXPLOITABLE`,
+Returns one of `TRUE_POSITIVE`, `FALSE_POSITIVE`, `NOT_EXPLOITABLE`,
 `NOT_VULNERABLE`, `ALREADY_FIXED`, `OUT_OF_SCOPE`, `NEEDS_MORE_INFO`, `BLOCKED` —
-each with a `reason`, and with `severity` and `severityCorrection` when it reached
-an impact.
+each with a `reason`, and with `severity` and `severityCorrection` when it
+reached an impact.
 
 A return that got as far as the verdict also carries `blockingProofs`: deep-route
 proofs that reported the finding impossible, carried to the six gates rather than
@@ -222,8 +222,9 @@ Workflow({ name: 'fp-check:triage-online', args })
 
 args = {
   baseDir, finding                  as above
-  verification:  triage-static's return value, forwarded VERBATIM
-                 (its status, impact.impact and severity are all read)
+  verification:  triage-static's return value, forwarded VERBATIM. status,
+                 severity, severityCorrection and every impact.* field are read —
+                 rootCause and classification cap and census, result grades impact
   project: { name, url }            the upstream project to look up
   sources: [ { label, query } ]     at least one public venue. Only the first 6
                                     get an agent; the rest come back named in
@@ -239,11 +240,10 @@ args = {
 on the code does not need a policy check, and running one invites the online
 evidence to argue a dead finding back to life.
 
-Stage 2 also requires `verification.impact.impact` and `verification.severity` to
-be non-empty, and a Stage 1 return only carries those if it reached the impact
-phase. So a `NEEDS_MORE_INFO` raised before that — an UNCERTAIN layer, an ambiguous
-scope — is rejected too: resolve the missing fact and re-run Stage 1 rather than
-forwarding a partial return.
+Stage 2 also requires `verification.severity` and all four `verification.impact`
+fields, which a Stage 1 return carries only if it reached the impact phase — so a
+`NEEDS_MORE_INFO` raised before that (an UNCERTAIN layer, an ambiguous scope) is
+rejected too: resolve the missing fact and re-run Stage 1, not a partial return.
 
 **A declared scope is overturned by re-running Stage 1, not here.** `OUT_OF_SCOPE`
 is decided before the impact agent runs, so such a return has no impact to forward
@@ -303,10 +303,9 @@ args = {
 }
 ```
 
-Returns `REPORTED`, `DO_NOT_SUBMIT`, `ALREADY_FIXED`, `BUILD_FAILED`,
-`NO_CANDIDATES`, `NEEDS_MORE_INFO`, or `BLOCKED`. `REPORTED` is the one terminal
-status with no `reason` of its own — relay `report.reportPath`, `band` and the
-`defeated` tally instead.
+Returns `REPORTED`, `DO_NOT_SUBMIT`, `ALREADY_FIXED`, `BUILD_FAILED`, `NO_CANDIDATES`,
+`NEEDS_MORE_INFO`, or `BLOCKED`. `REPORTED`'s `reason` is the severity rationale and its
+top-level `severity` the number; relay `report.reportPath`, `band` and the tally with it.
 
 ## When the user asked for a PoC and Stage 1 said no
 
@@ -342,7 +341,7 @@ history goes after it, never before.
 | `NOT_EXPLOITABLE` | `FALSE POSITIVE — no attacker-reachable path: <the blocking layer, verbatim>` | "The sink is genuinely injectable, however…" |
 | `NOT_VULNERABLE` | `FALSE POSITIVE — intended behaviour: <the evidence>` | "Arguably a bug, though by design" |
 | `OUT_OF_SCOPE` | `OUT OF SCOPE — <the clause>`, and say plainly that this answers scope and not whether the bug is real | a severity; nothing here established one |
-| `FALSE_POSITIVE`, `DISMISSED` | `FALSE POSITIVE — <the reason, verbatim>` | "unproven", which is NEEDS MORE INFO and a different answer |
+| `FALSE_POSITIVE` | `FALSE POSITIVE — <the reason, verbatim>` | "unproven", which is NEEDS MORE INFO and a different answer |
 
 `NEEDS_MORE_INFO` and `BLOCKED` are **not** on this list and must not be written
 up as any row of it. One is a fact still to establish, the other an analysis that
@@ -385,11 +384,11 @@ Before you report anything, check what actually came back.
    a result that looks complete may be a `NEEDS_MORE_INFO`. The one named
    exception is Stage 3's `settledBy`, below — a field the script sets rather
    than a shape you infer.
-3. **Relay the `reason` verbatim.** Every terminal status except Stage 3's
-   `REPORTED` carries one, and it names the layer, clause, gate or commit that
-   decided the outcome. That specificity is the deliverable, and for
-   `DO_NOT_SUBMIT` the `reason` is the only thing that says which of three very
-   different outcomes you got — see Verdicts below.
+3. **Relay the `reason` verbatim.** Every terminal status carries one, and it
+   names the layer, clause, gate or commit that decided the outcome. That
+   specificity is the deliverable, and for `DO_NOT_SUBMIT` the `reason` is the
+   only thing that says which of two very different outcomes you got — see
+   Verdicts below.
 4. **State the verdict in your final response**, with the severity and the
    evidence. Stage 3 writes its report to a file, and a file is not an answer.
    If Stage 3 ran, state the confidence band and the N/5 challenge tally too.
@@ -406,7 +405,7 @@ Stage statuses collapse onto three user-facing verdicts:
 | Verdict | From | Report as |
 |---|---|---|
 | **TRUE POSITIVE** | `TRUE_POSITIVE`, `REPORTED` | `BUG #N TRUE POSITIVE — <description>`, with severity |
-| **FALSE POSITIVE** | `DISMISSED`, `NOT_EXPLOITABLE`, `NOT_VULNERABLE`, `FALSE_POSITIVE` | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
+| **FALSE POSITIVE** | `NOT_EXPLOITABLE`, `NOT_VULNERABLE`, `FALSE_POSITIVE` | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
 | **NEEDS MORE INFO** | `NEEDS_MORE_INFO`, `BLOCKED`, `OFFLINE`, `BUILD_FAILED`, `NO_CANDIDATES` | `BUG #N NEEDS MORE INFO — <the missing fact>` |
 
 `ALREADY_FIXED` and `DUPLICATE` are reported as retractions with their reference,
@@ -415,25 +414,26 @@ retraction is **not** a false positive and **not** a lowered severity: the bug
 was real, a fix landed, and nothing is owed against current code. Say all three.
 The exact opening lines are in the table above.
 
-**Stage 3's `BLOCKED` is two outcomes, and the `settledBy` field tells them
-apart** — a field rather than a prefix of prose, which is the mistake
-`DO_NOT_SUBMIT` below records. With `settledBy` present, Stage 1 settled the
-finding and its verdict is what you report. Absent, the dispatch itself was
-malformed: that one is NEEDS MORE INFO and is re-dispatched with the shape fixed.
+**Stage 3's `BLOCKED` is four outcomes, and `settledBy` tells the first from the
+rest** — a field, not a prefix of prose, which is `DO_NOT_SUBMIT`'s mistake below.
+With `settledBy`, Stage 1 settled the finding and its verdict is what you report.
+Without it the `reason` says which: an unusable arg shape is re-dispatched with
+the shape fixed, while a failed independent artifact check or a severity above the
+cap names the artifact to correct and is not re-dispatched.
 
-`TRIAGED` is Stage 2 finishing, not a verdict of its own: keep the Stage 1 verdict
-and correct its severity and scope from `summary.finalSeverity`,
-`summary.scopeVerdict` and `summary.openQuestions`.
+`TRIAGED` is Stage 2 finishing, not a verdict of its own: keep the Stage 1 verdict,
+take its open questions from `summary`, and its scope and severity from the
+**top-level `scopeVerdict` and `severity`** — not `summary`'s, which are pre-cap
+and unvalidated. Out-of-scope ends the stage itself, on a quoted clause.
 
-**`DO_NOT_SUBMIT` is three outcomes wearing one status, and the `reason` is what
-tells them apart.** Mapping all three to FALSE POSITIVE is the rounding error this
-skill exists to prevent:
+**`DO_NOT_SUBMIT` is two outcomes wearing one status, and the `reason` tells them
+apart** — the third it carried now returns `ALREADY_FIXED` or `NEEDS_MORE_INFO`.
+Mapping the two below to FALSE POSITIVE is the rounding error this skill prevents:
 
 | The `reason` starts with | What actually happened | Report as |
 |---|---|---|
-| `already-fixed challenge unrebutted:` | a fix exists upstream; the bug was real | a **retraction**, with the reference — not a false positive |
-| `confidence LOW (…)` or `confidence NONE (…)` | reviewers rebutted the finding | **FALSE POSITIVE**, naming the unrebutted challenges |
-| `report omitted…` / `report gave no…` | the report agent left a required field blank; nothing about the bug was disproven | **NEEDS MORE INFO**, and re-dispatch |
+| `confidence NONE (0/5 defeated)` | not one challenge was rebutted; the reviewers refuted the finding | **FALSE POSITIVE**, naming the unrebutted challenges |
+| `confidence LOW (1/5 defeated)` or `(2/5 defeated)` | some challenges were rebutted with evidence and the rest were not. checkpoints.md 5.1 reads LOW as "gather evidence or downgrade", which is a missing fact, not a refutation | **NEEDS MORE INFO**, naming the unrebutted challenges as the facts to settle |
 
 **NEEDS MORE INFO is not a hedge and must not be rounded to FALSE POSITIVE.**
 "The claim as stated is unproven" is not "no vulnerability exists"; conflating the
@@ -490,8 +490,8 @@ dispatch each finding and keep your own record of which returned what.
   each runtime does on a panic, and the checklist before claiming a crash
 - [validation-dimensions.md]({baseDir}/references/validation-dimensions.md) —
   scope, security model, and design-intent judgement calls
-- [evidence-templates.md]({baseDir}/references/evidence-templates.md) — data
-  flow, algebraic bounds proofs, attacker control, devil's advocate
+- [evidence-templates.md]({baseDir}/references/evidence-templates.md) — the
+  algebraic bounds proof and the data-flow trace, as fillable forms
 - [poc-anti-patterns.md]({baseDir}/references/poc-anti-patterns.md) — PoC
   construction rules, enforced by `scripts/poc-lint.sh`
 - [test-integration.md]({baseDir}/references/test-integration.md) — framework

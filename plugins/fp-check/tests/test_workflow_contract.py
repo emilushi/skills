@@ -562,6 +562,12 @@ GATE_FIELD_CONTRACTS = [
     # change the decision, so it is not something this gate reads.
     ("triage-poc.js", "artifactProblem", "ARTIFACT_SCHEMA", ("check",), {"lintOutput"}),
     ("triage-poc.js", "tallyChallenges", "CHALLENGE_SCHEMA", ("v",), {"key"}),
+    # `complete` is the field this row exists for: the gate branches on it, and
+    # left out of `required` an omitted one reads as `undefined`, which is not
+    # `true`, which switches the retraction off entirely. `reference` is the same
+    # bargain one field over. `key` is exempt for the reason given on the
+    # tallyChallenges row — the dispatch wrapper puts it on, not the agent.
+    ("triage-poc.js", "alreadyFixedStands", "CHALLENGE_SCHEMA", ("verdict",), set()),
     ("triage-poc.js", "reportProblem", "REPORT_SCHEMA", ("result",), set()),
     ("triage-online.js", "offlineProblem", "POLICY_SCHEMA", ("result",), set()),
     ("triage-online.js", "scopeHalt", "SCOPE_SCHEMA", ("result",), set()),
@@ -1450,6 +1456,45 @@ def test_select_route_recognises_every_bug_class_name():
         f"selectRoute routes these bug classes against the decision table "
         f"(got, expected): {wrong}. The orchestrator reads these exact strings out of "
         f"{BUG_CLASS_REFERENCE.name}, so a mismatch is a routing coin flip."
+    )
+
+
+NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+
+
+def test_the_documented_impact_field_count_matches_what_stage_2_requires():
+    """SKILL.md's Stage 2 paragraph must name the number `missingArgs` enforces.
+
+    It said "all three `verification.impact` fields" while `missingArgs` required
+    four — `impact`, `result`, `rootCause`, `classification`. A caller who trimmed
+    the dispatch to the documented three got BLOCKED with no hint that the prose
+    was the stale half, and the two fields added last are exactly the ones whose
+    absence silently switches the cap and the census off.
+
+    Counted rather than spelled out, because the failure is drift: the count moved
+    twice while the sentence did not.
+    """
+    # Comment-stripped, not fully stripped: the field names ARE string literals,
+    # so the full stripper blanks the very thing being counted — while a
+    # commented-out `need` is not a requirement and must still not count.
+    src = strip_comments((WORKFLOW_DIR / "triage-online.js").read_text())
+    body = re.search(r"function\s+missingArgs\([\s\S]*?\n\}", src)
+    assert body, "missingArgs not found in triage-online.js; this pin is stale"
+    required = set(re.findall(r"need\(\s*'verification\.impact\.(\w+)'", body.group(0)))
+    assert required, "missingArgs requires no verification.impact field; refusing to report success"
+
+    prose = re.search(
+        r"requires `verification\.severity` and all (\w+) `verification\.impact`",
+        SKILL_MD.read_text(),
+    )
+    assert prose, (
+        "SKILL.md no longer states how many `verification.impact` fields Stage 2 requires; "
+        "this pin is stale, or the dispatch contract lost the sentence."
+    )
+    documented = NUMBER_WORDS.get(prose.group(1))
+    assert documented == len(required), (
+        f"SKILL.md documents '{prose.group(1)}' verification.impact fields; missingArgs requires "
+        f"{len(required)}: {sorted(required)}. A caller dispatching the documented set is BLOCKED."
     )
 
 

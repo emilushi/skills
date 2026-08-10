@@ -35,12 +35,12 @@ right verdict. Naming the blocker is not the same as concluding.
 Three, not two. The workflow returns a finer-grained status; these are what to
 report to a human. **SKILL.md's Verdicts table is the authoritative status →
 verdict mapping** and is not repeated here — in particular Stage 3's
-`DO_NOT_SUBMIT` covers three outcomes and only one of them is a FALSE POSITIVE.
+`DO_NOT_SUBMIT` covers two outcomes and only one of them is a FALSE POSITIVE.
 What follows is the shape to report once you have the verdict.
 
 | Verdict | Reached when | Report as |
 |---|---|---|
-| **TRUE POSITIVE** | all six gates pass, with a stated reason | `BUG #N TRUE POSITIVE — <description>`, with the severity |
+| **TRUE POSITIVE** | all six gates pass, with a stated reason, **and** nothing was left unresolved or deferred — an `unresolvedUncertainty` or a carried `blockingProofs` entry returns NEEDS MORE INFO on six passes | `BUG #N TRUE POSITIVE — <description>`, with the severity |
 | **FALSE POSITIVE** | any gate fails, a layer stops the payload, or it is by design | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
 | **NEEDS MORE INFO** | the review ran and the evidence does not decide | `BUG #N NEEDS MORE INFO — <the missing fact>` |
 

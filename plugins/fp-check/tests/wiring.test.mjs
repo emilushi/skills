@@ -178,7 +178,7 @@ test('by-design halts as NOT_VULNERABLE', async () => {
   const { result } = await runScript('triage-static.js', {
     args: VERIFY_ARGS,
     agents: verifyAgents({
-      'threat-model': { inScope: 'YES', byDesign: true, evidence: 'documented escape hatch' },
+      'threat-model': { inScope: 'YES', byDesign: true, byDesignIndicators: 2, evidence: 'documented escape hatch' },
     }),
   })
   assert.equal(result.status, 'NOT_VULNERABLE')
@@ -423,7 +423,7 @@ test('a destructive envelope above level 2 never reaches the builder', async () 
 
 // ------------------------------------------------- triage-poc, review half
 
-const CLEAN_ARTIFACT = { fileExists: true, lintExitZero: true, reRunSucceeded: true, evidence: 'ok' }
+const CLEAN_ARTIFACT = { fileExists: true, lintExitZero: true, reimplementation: 'NOT_DEFINED', reRunSucceeded: true, evidence: 'ok' }
 const rebutted = (key) => ({ challenge: `c:${key}`, rebuttal: 'r', winner: 'REBUTTAL', evidence: 'e' })
 const REPORT = {
   severity: 'High',
@@ -477,6 +477,37 @@ test('the artifact prompt re-runs poc-lint with the real symbol', async () => {
   )
 })
 
+// The linter cannot decide Principle 5 and the enum has to, so the two clearing
+// values must be exclusive of the case the linter misses: a copy pasted under a
+// DIFFERENT name. Rule 6 keys on the leaf, so it prints no note; rule 8 greps the
+// whole file, so a mention in a comment satisfies it — and the reviewer, asked
+// whether the PoC "does not define <symbol> at all", answered NOT_DEFINED
+// truthfully and cleared a pasted copy. The question has to be about the LOGIC
+// under any name, or the builder prompt's "renaming past the note buys nothing"
+// is false.
+test('the artifact prompt asks about a copy under ANY name, not about the symbol name', async () => {
+  const { calls } = await runScript('triage-poc.js', { args: BUILD_ARGS, agents: reviewAgents() })
+  const artifact = calls.find((c) => c.label === 'artifact-check')
+  assert.ok(artifact, 'the artifact check must be dispatched')
+  assert.match(artifact.prompt, /under ANY name/, 'NOT_DEFINED must not be satisfiable by a rename')
+  assert.match(artifact.prompt, /A copy under a DIFFERENT name is this/, 'COPY_OF_TARGET must claim the renamed case')
+  // and `evidence` is asked for on every answer, because artifactProblem now
+  // trims it on the clearing path too
+  assert.match(artifact.prompt, /whichever of the three you answer/)
+})
+
+// checkpoints: the PREFERRED PoC type is test-integrated, and the builder prompt
+// requires such a PoC to FAIL while the vulnerability exists. Step 4 asked the
+// reviewer to "report whether it reproduces the impact" and said nothing about
+// that, so a red test read as a PoC that did not reproduce and the report
+// recorded a boundary in `unproven` that was not one.
+test('the artifact prompt tells the reviewer a red test-integrated PoC is a reproduction', async () => {
+  const { calls } = await runScript('triage-poc.js', { args: BUILD_ARGS, agents: reviewAgents() })
+  const artifact = calls.find((c) => c.label === 'artifact-check')
+  assert.match(artifact.prompt, /Grade the impact, not the exit code/)
+  assert.match(artifact.prompt, /test-integrated/, 'and it must name the type the rule applies to')
+})
+
 // poc-lint.sh exits 2 on an empty --symbol rather than skipping the real-code
 // check silently, so a PoC without the field does not weaken the review — it
 // breaks it, and returns a BLOCKED that blames the builder's lintPassed claim.
@@ -516,13 +547,32 @@ test('a missing PoC file blocks', async () => {
   assert.equal(result.status, 'BLOCKED')
 })
 
+// End to end, because the unit test on `artifactProblem` cannot show that a
+// reimplementation verdict actually ends the stage. poc-lint.sh reports the
+// candidate as a NOTE and exits 0 — grep cannot tell a façade re-export from a
+// copy — so five defeated challenges and a lint-clean re-run are exactly the
+// state this arrives in, and before the verdict field existed it came back
+// REPORTED on a PoC proving only that a copy is broken.
+test('a reviewer finding the code under test copied into the PoC blocks', async () => {
+  const { result, calls } = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: reviewAgents({
+      'artifact-check': { ...CLEAN_ARTIFACT, reimplementation: 'COPY_OF_TARGET', evidence: 'parse_request pasted from target/parser.py:47' },
+    }),
+  })
+  assert.equal(result.status, 'BLOCKED')
+  assert.match(result.reason, /reimplements the code under test/)
+  assert.match(result.reason, /parser\.py:47/)
+  assert.ok(!calls.some((c) => c.label === 'report'), 'a copy is not written up')
+})
+
 test('a lost already-fixed challenge overrides the band', async () => {
   const { result, calls } = await runScript('triage-poc.js', {
     args: BUILD_ARGS,
     agents: reviewAgents({
       challenge: (prompt) =>
         prompt.includes('ALREADY FIXED')
-          ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', evidence: 'commit abc' }
+          ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', reference: 'commit 99a4704', complete: true, evidence: 'the fix landed one layer up' }
           : rebutted('x'),
     }),
   })
@@ -531,14 +581,153 @@ test('a lost already-fixed challenge overrides the band', async () => {
   assert.ok(!calls.some((c) => c.label === 'report'), 'a patched bug is not written up')
 })
 
-test('a dead challenge-4 agent also overrides the band', async () => {
-  const { result } = await runScript('triage-poc.js', {
+// A dead challenge-4 agent searched nothing, so it cited nothing, so it retracts
+// nothing: `ALREADY_FIXED` is a claim that a fix exists and SKILL.md relays it
+// with the reference. It used to fire here, discarding a built, executed,
+// lint-clean finding on a status with no evidence behind it — the same
+// unreferenced retraction triage-static refuses at `fixed: YES` with no
+// reference. The missing verdict is still counted against the finding: 4/5 is
+// MEDIUM, and the report has to address the challenge nobody answered.
+test('a dead challenge-4 agent costs a band step rather than retracting the finding', async () => {
+  const { result, calls } = await runScript('triage-poc.js', {
     args: BUILD_ARGS,
     agents: reviewAgents({
       challenge: (prompt) => (prompt.includes('ALREADY FIXED') ? null : rebutted('x')),
     }),
   })
-  assert.equal(result.status, 'ALREADY_FIXED')
+  assert.notEqual(result.status, 'ALREADY_FIXED')
+  assert.equal(result.defeated, 4)
+  assert.equal(result.band.label, 'MEDIUM')
+  const report = calls.find((c) => c.label === 'report')
+  assert.ok(report, 'a MEDIUM band still writes the report')
+  assert.match(report.prompt, /already-fixed: no verdict returned/)
+  // REPORTED is the only terminal status reachable WITH a challenge still
+  // standing, and it was the only one omitting `unrebutted` — so the standing
+  // challenge appeared in the report FILE and nowhere in the answer, while
+  // SKILL.md asks the orchestrator only for the band and the tally.
+  assert.equal(result.status, 'REPORTED')
+  assert.ok(
+    (result.unrebutted || []).some((u) => u.key === 'already-fixed'),
+    'REPORTED must name the challenge that is still standing',
+  )
+})
+
+// The opposite hole from the one above, opened by fixing it: challenge 4 AWARDED
+// on a WHOLE fix, naming it in `evidence` but citing nothing in `reference`. That
+// is not a retraction — a retraction has to point at something — but it must not
+// fall through to the band either, because 4/5 is MEDIUM and MEDIUM returns
+// REPORTED, which SKILL.md maps to TRUE POSITIVE. An already-patched bug reported
+// as live is the rounding error this plugin exists to prevent.
+test('an awarded but uncited WHOLE fix is not reported as live', async () => {
+  for (const reference of ['', 'n/a', 'see evidence']) {
+    const { result, calls } = await runScript('triage-poc.js', {
+      args: BUILD_ARGS,
+      agents: reviewAgents({
+        challenge: (prompt) =>
+          prompt.includes('ALREADY FIXED')
+            ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', reference, complete: true, evidence: 'the fix landed one layer up' }
+            : rebutted('x'),
+      }),
+    })
+    assert.equal(result.status, 'NEEDS_MORE_INFO', `reference ${JSON.stringify(reference)}`)
+    assert.match(result.reason, /already-fixed/)
+    assert.ok(!calls.some((c) => c.label === 'report'), 'an unestablished retraction is not written up')
+  }
+})
+
+// `winner` is an enum the runtime validator does not enforce — `required` is all
+// it enforces — and the two readers of it graded it differently: `tallyChallenges`
+// by exclusion (anything but REBUTTAL counts against the finding) and this gate
+// affirmatively (`=== 'CHALLENGE'`). An off-enum spelling therefore cost the
+// finding a band step AND escaped the gate: 4/5, MEDIUM, REPORTED, on a bug a
+// reviewer said was entirely patched. Both read it by exclusion now.
+test('an off-enum winner does not escape the uncited-fix gate', async () => {
+  const { result, calls } = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: reviewAgents({
+      challenge: (prompt) =>
+        prompt.includes('ALREADY FIXED')
+          ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'challenge', reference: 'n/a', complete: true, evidence: 'the fix landed one layer up' }
+          : rebutted('x'),
+    }),
+  })
+  assert.equal(result.status, 'NEEDS_MORE_INFO')
+  assert.match(result.reason, /already-fixed/)
+  assert.ok(!calls.some((c) => c.label === 'report'), 'an unestablished retraction is not written up')
+})
+
+// And the case the gate above used to swallow. `complete: false` says the finding
+// SURVIVES the fix, so the citation the retraction needed is not load-bearing
+// here: checkpoints.md 5.1, the challenge-4 prompt and the failure table all
+// promise this is reported with the partial fix recorded against it, and it ended
+// the stage as NEEDS_MORE_INFO instead — on a bug every party agreed was live.
+// Stage 1 makes the same call: `downgradeUnreferencedFix` marks an uncited fix
+// claim UNCERTAIN and carries on to a full verdict rather than halting.
+test('an awarded but uncited PARTIAL fix is reported, not parked', async () => {
+  const { result, calls } = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: reviewAgents({
+      challenge: (prompt) =>
+        prompt.includes('ALREADY FIXED')
+          ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', reference: '', complete: false, evidence: 'the other sink is untouched' }
+          : rebutted('x'),
+    }),
+  })
+  assert.equal(result.status, 'REPORTED')
+  assert.equal(result.defeated, 4, 'the challenge still costs a band step')
+  assert.ok(calls.some((c) => c.label === 'report'), 'a live finding is written up')
+})
+
+// The band and the artifact gate both outrank an uncited claim, and both used to
+// sit behind it. A finding that lost ALL FIVE challenges is the FALSE POSITIVE
+// SKILL.md maps `confidence NONE (0/5)` to, not a missing citation; and a PoC
+// whose file does not exist is BLOCKED whatever challenge 4 said about it.
+test('an uncited fix claim does not outrank the band or the artifact', async () => {
+  const uncitedWhole = (prompt) =>
+    prompt.includes('ALREADY FIXED')
+      ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', reference: '', complete: true, evidence: 'it felt familiar' }
+      : { challenge: 'x', rebuttal: 'none', winner: 'CHALLENGE', reference: '', complete: false, evidence: 'x' }
+
+  const refuted = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: reviewAgents({ challenge: uncitedWhole }),
+  })
+  assert.equal(refuted.result.status, 'DO_NOT_SUBMIT', '0/5 defeated is a refutation, not a missing fact')
+  assert.equal(refuted.result.band.label, 'NONE')
+
+  const noFile = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: reviewAgents({
+      'artifact-check': { ...CLEAN_ARTIFACT, fileExists: false },
+      challenge: (prompt) => (prompt.includes('ALREADY FIXED') ? uncitedWhole(prompt) : rebutted('x')),
+    }),
+  })
+  assert.equal(noFile.result.status, 'BLOCKED', 'an unverifiable artifact still blocks')
+})
+
+// A CITED but PARTIAL fix is the third shape, and it retracted like a whole one:
+// challenge 4's prompt asked for complete-or-partial, CHALLENGE_SCHEMA had
+// nowhere to put the answer, and `alreadyFixedStands` read any cited award as a
+// retraction. A demonstrated bug whose second sink is untouched then got
+// ALREADY_FIXED and no report at all. Stage 1 has gated on `complete` since it
+// was written; this is the same rule reaching the stage that holds the PoC.
+test('a cited but PARTIAL fix is reported, not retracted', async () => {
+  const { result, calls } = await runScript('triage-poc.js', {
+    args: BUILD_ARGS,
+    agents: reviewAgents({
+      challenge: (prompt) =>
+        prompt.includes('ALREADY FIXED')
+          ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', reference: 'commit 99a4704', complete: false, evidence: 'the other sink is untouched' }
+          : rebutted('x'),
+    }),
+  })
+  assert.equal(result.status, 'REPORTED')
+  assert.equal(result.defeated, 4, 'the challenge still costs a band step')
+  assert.ok(
+    (result.unrebutted || []).some((u) => u.key === 'already-fixed'),
+    'the partial fix is reported as still standing against the finding',
+  )
+  assert.ok(calls.some((c) => c.label === 'report'), 'a live finding is written up')
 })
 
 // checkpoints.md 5.1 says the already-fixed outcome "overrides everything else",
@@ -552,7 +741,7 @@ test('a dead challenge-4 agent also overrides the band', async () => {
 test('the already-fixed override outranks an unverifiable artifact', async () => {
   const patched = (prompt) =>
     prompt.includes('ALREADY FIXED')
-      ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', evidence: 'commit abc' }
+      ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', reference: 'commit 99a4704', complete: true, evidence: 'the fix landed one layer up' }
       : rebutted('x')
   const cases = [
     ['a dead artifact agent', null],
@@ -566,7 +755,7 @@ test('the already-fixed override outranks an unverifiable artifact', async () =>
     })
     assert.equal(result.status, 'ALREADY_FIXED', label)
     assert.match(result.reason, /already-fixed/, label)
-    assert.match(result.reason, /commit abc/, label)
+    assert.match(result.reason, /commit 99a4704/, label)
     assert.ok(!calls.some((c) => c.label === 'report'), `${label}: a patched bug is not written up`)
   }
 })
@@ -755,7 +944,7 @@ test('the three Stage 3 refusals are three distinct statuses', async () => {
       reviewAgents({
         challenge: (prompt) =>
           prompt.includes('ALREADY FIXED')
-            ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', evidence: 'commit abc' }
+            ? { challenge: 'patched in 1.2', rebuttal: 'none', winner: 'CHALLENGE', reference: 'commit 99a4704', complete: true, evidence: 'the fix landed one layer up' }
             : rebutted('x'),
       }),
     ],
@@ -782,9 +971,15 @@ test('the three Stage 3 refusals are three distinct statuses', async () => {
 
 // REPORTED was the one terminal status with no `reason`, while SKILL.md's
 // Completion Gate tells the orchestrator to relay it verbatim for every status.
-test('REPORTED carries a reason like every other terminal status', async () => {
+//
+// And with no top-level `severity`, which Stage 1 and Stage 2 both surface:
+// SKILL.md tells the orchestrator to state the verdict "with the severity", so
+// it read `undefined` and reported a TRUE POSITIVE carrying no severity at all.
+// The number existed only at `report.severity`, which nothing names.
+test('REPORTED carries a reason and a severity like every other terminal status', async () => {
   const { result } = await runScript('triage-poc.js', { args: BUILD_ARGS, agents: reviewAgents() })
   assert.equal(result.status, 'REPORTED')
   assert.ok(result.reason && result.reason.trim(), 'REPORTED must carry a reason')
   assert.equal(result.reason, REPORT.severityRationale)
+  assert.equal(result.severity, REPORT.severity)
 })

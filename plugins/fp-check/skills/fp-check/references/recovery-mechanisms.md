@@ -131,8 +131,11 @@ Record the impact that survives, not the fact that something caught it.
 - [ ] Goroutine boundaries checked, if Go
 - [ ] Crash actually observed in a dev environment
 
-**If any of these is uncertain, mark NEEDS_VERIFICATION and do not claim a
-process crash.** Downgrade to the impact you can evidence.
+**If any of these is uncertain, do not claim a process crash.** There is no
+"uncertain" value to return — the schema asks for a boolean `recoveryExists`, and
+`false` is rendered downstream as the affirmative "no recovery found". So put the
+unchecked item in `evidence` in as many words, and set `effectiveImpact` to the
+impact you can actually evidence, not to the crash you could not rule in.
 
 ---
 

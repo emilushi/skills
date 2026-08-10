@@ -25,13 +25,13 @@ the crosswalk between them, the stages in `SKILL.md`, and the six gates in
 | 1a Intake | 1.1, 1.2, 1.3 | 1 Process | `missingArgs` |
 | 1c Reachability | 2.1, 2.2 | 2 Reachability | `decideGate` |
 | 1c Threat model | 3.1, 3.2, 3.3 | 2 Reachability, 3 Real Impact | `decideGate` (the `threat` verdict) |
-| 1c Already-fixed | 5.1 challenge 4, on the cheap path | — | `upstreamFixStands`, `decideGate` |
+| 1c Already-fixed | 5.1 challenge 4, on the cheap path | — | `upstreamFixStands`, `downgradeUnreferencedFix`, `decideGate` |
 | 1c Deep route only | — | 5 Math Bounds, 6 Environment | the blocking-proof and dead-proof checks on `proofs` |
 | 1d Recovery | 2.3 | 3 Real Impact | `decideGate(!recovery)` |
 | 1e Impact + severity | 2.4, 2.4b, 2.5, 5.2 | 3 Real Impact | `missingPrecondition`, `capSeverity` |
 | 1f Adversarial | the 13 questions | 6 Environment | — synthesis |
 | 1g Verdict | all six gates | all | `decideVerdict` |
-| 2 Online | — see the online stage in `SKILL.md` | 2, 3 | `offlineProblem`, `scopeHalt`, `summaryProblem` |
+| 2 Online | 2.4b, 2.5, and see the online stage in `SKILL.md` | 2, 3 | `offlineProblem`, `scopeHalt`, `needsUserCensus`, `censusProblem`, `summaryProblem`, `capSeverity` |
 | 3 PoC | 4.1, 4.2, 4.3, 5.1, 5.2, 6.1 | 4 PoC Validation | `isAcceptableBuild`, `artifactProblem`, `tallyChallenges`, `confidenceBand`, `alreadyFixedStands`, `reportProblem`, `severityCapViolation` |
 
 `upstreamFixStands` and `alreadyFixedStands` are the same rule at two stages, and
@@ -424,9 +424,15 @@ not a rebuttal.
 | 4 | Already fixed? | A fix already exists — search the issue tracker, `git log --grep`, and published advisories, and report what you searched |
 | 5 | Real deployment? | It is not exploitable in practice — the path is unreachable in a default configuration, real deployments add protections in front of it, or the code path is never used |
 
-**Challenge 4 is not scored like the others.** A fix that exists means
-**DO NOT SUBMIT**, and this outcome overrides the confidence band. An incomplete
-or partial fix is reported as such.
+**Challenge 4 is not scored like the others.** A fix that exists means the finding
+is **RETRACTED** — `ALREADY_FIXED`, not a false positive and not a lowered
+severity — and this outcome overrides the confidence band. It has to be cited,
+and the citation has to be one: a challenge awarded with no commit, PR, issue or
+advisory behind it — or with `n/a`, `see evidence`, a bare `file:line` — retracts
+nothing and **ends the stage as `NEEDS_MORE_INFO`**, because a bug a reviewer
+calls patched is not reported as live either. An incomplete or partial fix does
+not retract at all: it is counted against the finding by the band like any other
+challenge, and the report says the fix is partial.
 
 **Confidence Level — this is the canonical scale for this skill.**
 
@@ -478,11 +484,15 @@ Justify it on both axes:
 
 **The caps are arithmetic and are applied in code, not requested in a prompt** —
 which is the difference the head-to-head measured: 3/3 against 0/3 on the case
-built to test it. The two stages apply them differently, deliberately. Stage 1e
-`capSeverity` **corrects** an over-rated severity and reports the correction,
-because there is no artifact to correct and the caller is owed a verdict. Stage 3
-`severityCapViolation` **blocks**, because by then the number has been written into
-a report file and correcting the return value would leave that file wrong.
+built to test it. All three stages apply them, and the last one differently and
+deliberately. Stage 1e `capSeverity` **corrects** an over-rated severity and
+reports the correction, because there is no artifact to correct and the caller is
+owed a verdict. Stage 2 carries its own copy of `capSeverity` for the same reason
+and applies it to the severity the online summary returns — the census that feeds
+that agent fires precisely on the capped root causes and its `severityEffect:
+raise` invites the number back up. Stage 3 `severityCapViolation` **blocks**,
+because by then the number has been written into a report file and correcting the
+return value would leave that file wrong.
 
 ---
 
@@ -520,16 +530,24 @@ what the code returns for it:
 | Uncertain validation layer | Code trace required before this can be answered | `NEEDS_MORE_INFO` |
 | Recovery exists | The verified impact is the one that survives recovery, and it is what 1e records | continues on the surviving impact |
 | A deep-route proof reports the finding impossible | Carried to the six gates, which answer it with the traced path in hand, and blocks a TRUE POSITIVE at the verdict | `NEEDS_MORE_INFO` at 1g |
-| A Stage 3 challenge wins | Lowers the confidence band; challenge 4 winning overrides the band outright | `DO_NOT_SUBMIT` |
+| A Stage 3 challenge wins | Lowers the confidence band, and the band decides | `DO_NOT_SUBMIT` at LOW or NONE; MEDIUM proceeds with the challenge documented |
+| Stage 3's challenge 4 wins on a **whole** fix, **with a citation** | Overrides the band outright: the bug was real and a fix landed | `ALREADY_FIXED`, a retraction carrying that citation |
+| Stage 3's challenge 4 wins on a **whole** fix, **citing nothing** | A retraction has to point at something, and a bug a reviewer calls entirely patched is not reported as live either. Establish the reference | `NEEDS_MORE_INFO`, unless the artifact gate or a band of LOW/NONE has already answered the finding |
+| Stage 3's challenge 4 wins on a **partial** fix, cited or not | The fix is incomplete, so the finding survives it either way, and only the retraction needed the citation — the same call Stage 1 makes, which downgrades an uncited fix claim and carries on | the band decides, and the report records the partial fix |
 | Placeholder detected | Complete the code; `poc-lint.sh` must exit 0 | `BUILD_FAILED`, or `BLOCKED` at the reviewer's re-run |
 
 **`NOT_EXPLOITABLE` is a Stage 1 status only.** Stage 3 has no verdict of that
-name — a challenge that stands there returns `DO_NOT_SUBMIT`.
+name: a challenge that stands there costs the finding one band step, and only a
+band of LOW or NONE returns `DO_NOT_SUBMIT`. A single standing challenge is not
+terminal by itself — the same reason a single deep-route proof is carried rather
+than allowed to end Stage 1, one row up.
 
-Every row above except "recovery exists" and the blocking deep-route proof ends
-the stage. Neither of those two is a licence to proceed as though the check had
-passed: the first replaces the claimed impact with the surviving one, and the
-second is carried in `blockingProofs` and denies a TRUE POSITIVE in code.
+Three rows above do not end the stage: "recovery exists", the blocking deep-route
+proof, and a standing Stage 3 challenge that leaves the band at MEDIUM. None of
+the three is a licence to proceed as though the check had passed. The first
+replaces the claimed impact with the surviving one; the second is carried in
+`blockingProofs` and denies a TRUE POSITIVE in code; the third rides on
+`unrebutted` in the `REPORTED` return and the report must address it.
 
 **There is no cheap pre-gate row any more.** Stage 1b dispatched four brocard
 agents that could end the analysis on the shape of the claim alone; it was removed

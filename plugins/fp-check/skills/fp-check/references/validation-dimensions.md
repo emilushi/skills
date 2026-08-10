@@ -45,13 +45,20 @@ vulnerability. Privileged access is not a bug when it is intentional.
 
 ### Design intent
 
-- Function carries an explicit privilege check (`isAdmin`, `requiresOwner`)
-- Name implies deliberate power (`emergency*`, `override*`, `force*`)
-- Behavior is documented in comments or the README as a feature
-- The same pattern appears elsewhere, so it is not a one-off slip
-- Tests cover it as normal operation
+Three indicator *classes*, which is what `byDesignIndicators` counts:
 
-→ Mark by-design. Two or more of these means confirm before proceeding.
+- **Privilege identifiers** — an explicit check (`isAdmin`, `requiresOwner`), or a
+  name implying deliberate power (`emergency*`, `override*`, `force*`)
+- **Symmetric sibling paths** — the same pattern appears elsewhere, guarded and
+  unguarded the same way, so it is not a one-off slip
+- **Documentation or tests** — comments or the README describe it as a feature, or
+  tests cover it as normal operation
+
+→ **Two or more, plus a search of usage and test coverage, before marking
+by-design.** One class firing is a flag to check, not a verdict, and `decideGate`
+enforces that arithmetically: `byDesign: true` returns NOT_VULNERABLE only when
+`byDesignIndicators` is 2 or more. Below the bar the analysis continues, so a
+function called `forceUpdate()` cannot end it on its name.
 
 ### Root cause
 

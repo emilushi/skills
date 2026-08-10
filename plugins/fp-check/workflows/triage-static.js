@@ -22,7 +22,13 @@ export const meta = {
 // or an omitted block — makes this destructure throw before `missingArgs` can
 // report anything, so the run dies with a TypeError instead of returning
 // BLOCKED.
-const { baseDir, finding, entryPoint, layers = [], scope, layersSearched } = args || {}
+const { baseDir, finding, entryPoint, scope, layersSearched } = args || {}
+// `|| []`, not a destructure default: the default only fires on `undefined`, and
+// `missingArgs` reads a null `layers` as "none supplied" and passes it whenever
+// `layersSearched` declares the absence. It then reached `layers.map` below and
+// threw a TypeError, killing the run with no status at all — the one outcome this
+// script's whole arg gate exists to prevent.
+const layers = (args && args.layers) || []
 
 const MAX_LAYERS = 4
 
@@ -246,7 +252,11 @@ function missingArgs(a, maxLayers = 4) {
   // rather than risk mis-lexing one (test_a_regex_literal_is_rejected_rather_than_mis_lexed).
   // Adding one here failed 51 of its tests on unmutated code and took 27 mutations
   // with it, because a mutation whose baseline is red proves nothing.
-  const base = typeof (a && a.baseDir) === 'string' ? a.baseDir.trim() : ''
+  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir cleared
+  // `need` — it is neither undefined, null nor a blank string — and then read as
+  // '' here, so the shape check below was skipped entirely and every reference
+  // path became '[object Object]/references/...'.
+  const base = String((a && a.baseDir) ?? '').trim()
   const withoutSlash = base.endsWith('/') ? base.slice(0, -1) : base
   const shaped = withoutSlash.startsWith('/') && withoutSlash.endsWith('/skills/fp-check')
   if (base && !shaped) {
@@ -542,8 +552,11 @@ Answer three things:
     it within stated trust assumptions?
   Design intent. Check all three indicator classes: privilege identifiers,
     symmetric guarded/unguarded sibling paths, and documentation or tests
-    covering it as normal operation. Report how many fired. If two or more fire,
-    search usage and test coverage before concluding.
+    covering it as normal operation. Report how many fired in
+    byDesignIndicators. Set byDesign true only if two or more fired AND a search
+    of usage and test coverage confirmed the intent — the gate reads the count,
+    so byDesign: true below two does not dismiss anything. One class firing is a
+    flag to check, not a verdict.
 
 Centralized control is not by itself a vulnerability.`,
     { label: 'threat-model', phase: 'Layers', schema: THREAT_SCHEMA, effort: 'medium' },
@@ -691,7 +704,14 @@ const layerSummary = layers.length
 
 const recovery = raw[at.recovery] || null
 const threat = raw[at.threat] || null
-const history = raw[at.history] || null
+// Downgraded here rather than at each reader, so no consumer sees the raw value.
+// The history prompt promises "YES without a reference is downgraded to
+// UNCERTAIN" and nothing performed it: `upstreamFixStands` refused the
+// retraction, and then the unreferenced `YES` was interpolated verbatim into the
+// gate prompt and carried in this payload to Stage 3's challenge 4 — so the
+// retraction the code refused arrived as prose instead, in front of the two
+// agents most able to act on it.
+const history = downgradeUnreferencedFix(raw[at.history] || null)
 const proofs = route === 'deep'
   ? [
       { key: 'api-contract', verdict: raw[at['api-contract']] || null },
@@ -705,13 +725,100 @@ const proofs = route === 'deep'
 // this outcome overrides everything else" — applied at Stage 1c so it also holds
 // on the cheap path.
 //
-// `fixed: YES` with no reference is NOT a retraction. Schema `required` checks
-// presence, not content, so `reference: ''` validates; and an unreferenced
-// retraction is the one failure mode that silently discards a real finding
-// rather than merely reporting a false one.
+// Pure. What counts as a citation, for both stages' already-fixed rule.
+// Duplicated verbatim in triage-poc.js, where challenge 4's `reference` is held
+// to the same test: these scripts have no module system, and the alternative to
+// two copies was two different rules, which is what shipped.
+//
+// A citation is a TOKEN of a recognisable shape — a sha, `#412`, `CVE-2024-1234`,
+// `GHSA-jf85-cpcp-j695`, a release tag, a URL. Not "non-blank", which retracted
+// findings on `n/a`, `unknown commit`, `see evidence` and `TBD`; and not
+// "contains a digit", which retracts on `see evidence at auth.py:31` and
+// `fixed sometime in the 2.x line` while REFUSING an all-hex-letter short sha
+// like `deadbeef`. Wrong in either direction loses a finding: a stand-in
+// discards a live bug, and a refused sha reports a dead one.
+function citedReference(value) {
+  // `new RegExp` from strings rather than regex literals: the contract suite
+  // lexes these scripts and rejects a bare `/` in code position, because reading
+  // a regex as a division silently blanks the rest of the file and turns every
+  // check built on that text green.
+  //
+  // Matched ANYWHERE in the string, bounded by non-identifier characters, rather
+  // than split on whitespace with each token anchored. Anchoring rejected every
+  // ordinary wrapper a citation arrives in: `openssl/openssl#12345` — the
+  // canonical cross-repo form, and the integration case this search exists for —
+  // `torvalds/linux@a1b2c3d`, a backticked sha, `<https://...>`, a markdown link,
+  // and `PR 4521`. A rejection here is not harmless in either direction: Stage 1
+  // writes a note saying no reference was given and reports an already-fixed bug
+  // as live, and Stage 3 turns a genuine retraction into NEEDS_MORE_INFO.
+  //
+  // A BARE number is deliberately not a citation. `4521` is indistinguishable
+  // from a line number or a year, and admitting it makes "fixed in 2021" a
+  // reference; the keyword form (`PR 4521`, `issue 1234`) carries the context
+  // that tells them apart. For the same reason a dotted version needs either a
+  // `v` or two dots, so that `v3` and `2.3.1` are citations and `2021.03` is not.
+  const bound = '(^|[^0-9a-z])'
+  const forms = new RegExp(
+    [
+      // a commit sha, alone or qualified by the repo it belongs to
+      bound + '[0-9a-f]{7,40}([^0-9a-z]|$)',
+      // #412, and owner/repo#412
+      '[0-9a-z._-]*#[0-9]+',
+      // Advisory IDs, recognised by REGISTRY NAME rather than by shape. Every
+      // shape rule tried here mis-classified in both directions: "one hyphen and
+      // a digit" made `internal-fix-2` and `fixed in a post-2020 refactor`
+      // advisory IDs and retracted live findings, "the last segment ends in a
+      // digit" threw out about 1 real GHSA ID in 20, and "every segment is four
+      // or more characters" then threw out `PYSEC-2021-19`, `OSV-2021-9`,
+      // `DSA-4879-1` and `USN-5678-1` — writing "no reference given" over a
+      // correct citation and reporting a fixed bug as live. A shape cannot tell
+      // an ID from an English phrase because registries did not agree on one. An
+      // allowlist is honest about what it knows: a name it has never heard of is
+      // not silently promoted, and a name it has is matched against that
+      // registry's actual ID grammar.
+      //
+      // GHSA is its own branch because its shape is documented and unlike the
+      // rest: exactly three four-character segments over the alphabet
+      // `23456789cfghjmpqrvwx`, in which a digit is common but not guaranteed —
+      // `GHSA-vqqm-hhhc-jqhw` carries none at all.
+      bound + 'ghsa(-[0-9a-z]{4}){3}',
+      // CVE-2024-1234, RUSTSEC-2021-0093, PYSEC-2021-19, OSV-2021-9,
+      // GO-2022-0603, DSA-4879-1, USN-5678-1, DLA-2571-1, ZDI-21-1234,
+      // ALSA-2021:9106. Each of these numbers its first segment — a year or a
+      // bulletin number — which is what separates the ID from the prose: `go` is
+      // in the list, and `go-to-market-2` still fails because `to` is not a
+      // number.
+      bound + '(cve|rustsec|pysec|osv|go|dsa|usn|dla|zdi|mal|alsa|elsa|talos)[-:][0-9]+[-:][0-9a-z]+',
+      // v3, v2.3.1, 2.3.1. The trailing lookahead refuses a version that is part
+      // of a FILENAME: `src/handlers/auth-v2.go:118` is the bare file:line
+      // challenge 4's own prompt names as a non-citation, and `v2` inside it
+      // satisfied a consuming boundary group.
+      bound + '(v[0-9]+([.][0-9]+)*|[0-9]+([.][0-9]+){2,})(?![0-9a-z]|[.][a-z])',
+      // PR 4521, issue #1234, release 3, gh-1234.
+      bound + '(pr|pull|issues?|bug|ticket|gh|release)[ #-]+[0-9]+',
+      // pull/882 and issues/1234, which is how GitHub shorthand is written. The
+      // keyword may NOT be reached through a path separator, and that is the
+      // whole difference between this branch and the one above it: with `/` in
+      // the shared separator class, `src/bug/12.go` and `tests/issues/42/repro.py`
+      // both became citations, contradicting this function's own rule that a bare
+      // `file:line` is not one. Inside a full URL the `https?://` branch already
+      // matches, so nothing is lost by refusing the path form here.
+      '(^|[^0-9a-z/])(pr|pull|issues?|bug|ticket|gh|release)/[0-9]+',
+      'https?://[^ ]',
+    ].join('|'),
+    'i',
+  )
+  const ref = String(value || '').trim()
+  return forms.test(ref) ? ref : null
+}
+
+// `fixed: YES` with no CITED reference is NOT a retraction. Schema `required`
+// checks presence, not content, so `reference: ''` validates; and an
+// unreferenced retraction is the one failure mode that silently discards a real
+// finding rather than merely reporting a false one.
 function upstreamFixStands(historyVerdict) {
   if (!historyVerdict || historyVerdict.fixed !== 'YES') return null
-  const ref = String(historyVerdict.reference || '').trim()
+  const ref = citedReference(historyVerdict.reference)
   if (!ref) return null
   // `!== true`, not `=== false`. Only an affirmative "this fix is complete"
   // retracts, because the caller treats a non-partial fix as terminal: with
@@ -725,6 +832,20 @@ function upstreamFixStands(historyVerdict) {
     reference: ref,
     partial,
     evidence: String(historyVerdict.evidence || '').trim() || `fixed by ${ref}`,
+  }
+}
+
+// Pure. The downgrade the history prompt promises, performed. Applied once, at
+// the assignment, so `history.fixed` is the same value everywhere it is read —
+// the impact prompt's inconclusive branch, the gate prompt, and the payload Stage
+// 3 forwards to its already-fixed challenge. The note rides on `searched` because
+// that is the field printed beside `fixed` in both prompts.
+function downgradeUnreferencedFix(historyVerdict) {
+  if (!historyVerdict || historyVerdict.fixed !== 'YES' || upstreamFixStands(historyVerdict)) return historyVerdict
+  return {
+    ...historyVerdict,
+    fixed: 'UNCERTAIN',
+    searched: `${String(historyVerdict.searched || '').trim() || 'nothing recorded'} (the agent reported fixed: YES with no commit, PR, issue or advisory reference, so it is UNCERTAIN: a retraction has to point at something)`,
   }
 }
 
@@ -880,7 +1001,16 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   if (threatVerdict.inScope !== 'YES') {
     return { status: 'NEEDS_MORE_INFO', reason: 'scope ambiguous; the declared scope does not settle whether this component is covered' }
   }
-  if (threatVerdict.byDesign) {
+  // `byDesignIndicators`, the field collected to gate this, was never read: the
+  // boolean alone returned NOT_VULNERABLE, which is the self-reported gate this
+  // plugin exists to replace. validation-dimensions.md and checkpoint 3.3 both
+  // set the bar at "two or more, plus a search", and the captured run in
+  // tests/fixtures shows the split — `byDesign: true, byDesignIndicators: 1`
+  // beside evidence reading "Count = 1/3. Below the 'two or more' bar, so this
+  // is not a by-design dismissal on indicators alone". The prose was right and
+  // the boolean dismissed anyway. Below the bar this is a flag to check, not a
+  // verdict, so the analysis continues rather than halting.
+  if (threatVerdict.byDesign && Number(threatVerdict.byDesignIndicators) >= 2) {
     return { status: 'NOT_VULNERABLE', reason: why('threat-model agent reported by-design but gave no evidence') }
   }
 
@@ -1042,13 +1172,13 @@ finding specifically has to establish.`,
 // `impact` may be null if the agent died; `capSeverity` is total over that.
 const capped = impact
   ? capSeverity(impact.severity, impact.rootCause, impact.classification)
-  : { severity: undefined, note: '' }
+  : { severity: undefined, note: '', ambiguous: '' }
 if (capped.note) log(capped.note)
 
 // Every return below carries the corrected severity, not `impact.severity`. A
 // consumer reading `impact.severity` directly is reading the pre-cap number, so
 // the corrected one is surfaced under the same keys the passing path uses.
-const severityFields = { severity: capped.severity, severityCorrection: capped.note }
+const severityFields = { severity: capped.severity, severityCorrection: capped.note || capped.ambiguous }
 
 // Only VERIFIED is a pass: NOT_VERIFIED means NO impact could be established,
 // which is not a licence to spend the rest of the pipeline on it.
@@ -1112,6 +1242,35 @@ if (missingPrecondition(impact)) {
   }
 }
 
+// An ambiguous rating is an unusable answer, and it is refused HERE rather than
+// carried into the verdict. `capSeverity` hands it back instead of guessing at
+// it, so if nothing caught it the finding would ship the agent's own string —
+// `Critical (affects low-privilege users)` — as its severity with no cap
+// applied, which is precisely the escape this gate exists to close.
+// NEEDS_MORE_INFO, not a dismissal: nothing about the bug was disproven, the
+// impact agent wrote a rating nobody can read, and the reason names the fix.
+//
+// LAST of the three, after the impact guard and after `missingPrecondition`.
+// Both of those are facts about the finding and the stronger thing to report;
+// this one is a clerical failure, and a finding that fails all three should be
+// told about the substance first.
+if (capped.ambiguous) {
+  log(`NEEDS_MORE_INFO: ${capped.ambiguous}`)
+  return {
+    status: 'NEEDS_MORE_INFO',
+    reason: capped.ambiguous,
+    route,
+    layers: layerVerdicts,
+    recovery,
+    threat,
+    history,
+    proofs,
+    blockingProofs: blockingProof,
+    impact,
+    ...severityFields,
+  }
+}
+
 // Checkpoint 2.4b ("integration -> requires an external failure to trigger, cap
 // at Medium", "external -> workaround only") and 2.5 ("hardening gap -> medium
 // priority, defense-in-depth") are arithmetic, not judgement. The prompt states
@@ -1130,22 +1289,70 @@ if (missingPrecondition(impact)) {
 //
 // Self-contained so it can be extracted and graded without the surrounding
 // script.
+// Pure. Every DISTINCT rating level a string names, WORD-BOUNDED, most severe
+// first. The boundaries are the whole point: `low` sits inside "Allowlist",
+// `high` inside "highly" and `critical` inside "critically", and an unbounded
+// substring test read all three as ratings.
+//
+// It reports what the string names and decides nothing. Five consecutive rounds
+// tried to make one string yield one rating — leftmost name, then highest named,
+// then highest-only-where-it-lowers — and each traded a false accept for a false
+// reject, because "Critical (affects low-privilege users)" and "Low (the path is
+// not business-critical)" are the same shape with opposite intent. No positional
+// rule can separate them. Reading the levels out and letting the caller refuse
+// the ambiguous ones can.
+function namedLevels(severity) {
+  const LEVELS = ['critical', 'high', 'medium', 'low', 'informational']
+  return LEVELS.filter((name) => new RegExp(`\\b${name}\\b`, 'i').test(String(severity)))
+}
+
 function capSeverity(severity, rootCause, classification) {
   const CAP = 'Medium'
-  if (severity !== 'Critical' && severity !== 'High') return { severity, note: '' }
+  // Affirmative — "is this rating at or above the cap?" — rather than by
+  // exclusion. `severity !== 'Critical' && severity !== 'High'` returned early
+  // for every spelling the enum does not enforce, and `required` is the only
+  // thing the runtime validator enforces: 'critical', 'CRITICAL' and
+  // 'Critical (RCE)' all escaped the cap uncorrected, which is the one mechanism
+  // the measured head-to-head credited 3/3 against 0/3.
+  //
+  // EXACTLY ONE level named is a rating. More than one is not: 'Medium/High',
+  // 'Critical (affects low-privilege users)' and 'Low (the affected path is not
+  // business-critical)' each name two, and picking one of them is a guess in a
+  // direction that is wrong half the time — guess high and a Low is raised to
+  // Medium under a note reading "severity lowered from Low", guess low and an
+  // inflated Critical ships uncorrected with `low` inside "low-privilege" as its
+  // licence. So it is not guessed. An ambiguous rating is an unusable agent
+  // answer and is handed back to the caller as one, exactly as a missing verdict
+  // is, and the caller counts it against the finding rather than shipping a
+  // number nobody can defend.
+  const named = namedLevels(severity)
+  if (named.length > 1) {
+    return {
+      severity,
+      note: '',
+      ambiguous: `severity "${String(severity).trim()}" names ${named.length} levels (${named.join(', ')}), so there is no single rating to cap: state exactly one of Critical, High, Medium, Low, Informational`,
+    }
+  }
+  // None named — '', undefined, 'Unknown'. Unknown, not above the cap: the caller
+  // has its own handling for a rating it cannot read, and inventing one here
+  // would be the same guess in the other direction.
+  const level = named[0] || ''
+  if (level !== 'critical' && level !== 'high') return { severity, note: '', ambiguous: '' }
   if (rootCause === 'integration' || rootCause === 'external') {
     return {
       severity: CAP,
+      ambiguous: '',
       note: `severity lowered from ${severity} to ${CAP}: a ${rootCause} root cause requires an external failure to trigger (checkpoints.md 2.4b)`,
     }
   }
   if (classification === 'hardening_gap') {
     return {
       severity: CAP,
+      ambiguous: '',
       note: `severity lowered from ${severity} to ${CAP}: a hardening gap is defense-in-depth, not an exploited vulnerability (checkpoints.md 2.5)`,
     }
   }
-  return { severity, note: '' }
+  return { severity, note: '', ambiguous: '' }
 }
 
 
@@ -1163,6 +1370,21 @@ phase('Verdict')
 // is attacker-controlled. `internal` therefore keeps the pre-2.6.0 wording, which
 // is the one every measured false positive was caught by; the relaxation applies
 // only where the premise it relies on is actually established.
+//
+// The by-design objection that did NOT reach the dismissal bar. checkpoint 3.3
+// puts that bar at two indicators plus a search, so one is "a flag to check, not
+// a verdict" — but raising the bar routed the below-bar signal NOWHERE: the
+// impact prompt, this prompt and `decideVerdict` all went on never seeing
+// `threat`, so a documented design-intent objection was dropped and the finding
+// came back TRUE_POSITIVE with no record it had been raised. It is carried here,
+// to the one agent holding every other piece of evidence, and deliberately NOT
+// added to `overruled`: that list forbids TRUE_POSITIVE outright, which is the
+// terminal dismissal on a single indicator that raising the bar removed.
+const softByDesign =
+  threat && threat.byDesign && !(Number(threat.byDesignIndicators) >= 2)
+    ? `${Number(threat.byDesignIndicators) || 0} of 3 design-intent indicators fired: ${String(threat.evidence || '').trim() || 'no evidence given'}`
+    : ''
+
 const verdictAgent = await agent(
   `The adversarial pass, then the six gates. Everything below was established by
 agents that each saw one narrow question; you are the first to see all of it.
@@ -1177,6 +1399,7 @@ Severity after the caps: ${capped.severity}${capped.note ? ` — ${capped.note}`
 Recovery: ${recovery.recoveryExists ? `EXISTS, ${recovery.mechanism || 'mechanism not named'}` : 'none found'} — ${recovery.effectiveImpact}
 ${layerSummary}${layerVerdicts.length ? `\n  ${layerVerdicts.map((l) => `${l.layer} (${l.location}): ${l.evidence}`).join('\n  ')}` : ''}
 Already-fixed search: ${history.fixed} — ${history.searched}
+${softByDesign ? `Design intent, raised by the threat-model agent and carried rather than acted on:\nit reported BY DESIGN below the bar checkpoint 3.3 sets at two indicators plus a\nsearch, so it did not dismiss the finding. Answer it here — ${softByDesign}` : ''}
 ${proofs.length ? `Deep-route proofs:\n  ${proofs.map((p) => `${p.key}: ${p.verdict ? `${p.verdict.applies === true ? p.verdict.verdict : `${p.verdict.verdict} (does not apply to this finding)`} — ${p.verdict.evidence}` : 'agent returned nothing'}`).join('\n  ')}` : ''}
 Route: ${route}
 ${blockingProof.length ? `\nDeep-route proof(s) reporting the finding impossible. They were carried rather\nthan made terminal, because a single auxiliary proof is not above the traced path:\n  ${blockingProof.map((p) => `${p.key}: ${p.what}`).join('\n  ')}\n` : ''}

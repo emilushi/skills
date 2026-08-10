@@ -69,12 +69,35 @@ const POC_SCHEMA = {
 const CHALLENGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['challenge', 'rebuttal', 'winner', 'evidence'],
+  required: ['challenge', 'rebuttal', 'winner', 'evidence', 'reference', 'complete'],
   properties: {
     challenge: { type: 'string', description: 'the strongest argument against the finding' },
     rebuttal: { type: 'string', description: 'the evidence-based answer, or why there is none' },
     winner: { enum: ['CHALLENGE', 'REBUTTAL'] },
     evidence: { type: 'string' },
+    // Challenge 4's win RETRACTS the finding, so it has to point at something —
+    // and `evidence` cannot be that something, because every one of the five
+    // challenges is required to fill it, so a non-blank check on it is satisfied
+    // by any prose at all ("the sink was rewritten during a later refactor").
+    // Same field, same rule and same reason as HISTORY_SCHEMA's `reference` one
+    // workflow over: required so the model is asked, empty when there is nothing
+    // to cite, and `alreadyFixedStands` reads it rather than the prose.
+    reference: {
+      type: 'string',
+      description: 'challenge 4 only: the commit, PR, issue or advisory ID for the fix. Empty for the other four',
+    },
+    // Required for the same reason `reference` is, and against the same failure:
+    // `alreadyFixedStands` retracted on ANY cited award, so a fix that touched
+    // one of two sinks discarded a demonstrated, still-live bug whole. The
+    // prompt asked for complete-or-partial and the schema had nowhere to put it,
+    // so the answer arrived as prose and nothing read it. Required, because an
+    // omitted boolean is `undefined`, which is not `false`, and the gate below
+    // reads anything but an affirmative `true` as partial — with the field
+    // optional that would silently switch the retraction off instead.
+    complete: {
+      type: 'boolean',
+      description: 'challenge 4 only: true only if the fix is WHOLE. false for a partial fix and for the other four',
+    },
     impactCorrection: { type: 'string', description: 'set if the true impact is weaker than claimed' },
   },
 }
@@ -87,11 +110,30 @@ const CHALLENGE_SCHEMA = {
 const ARTIFACT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['fileExists', 'lintExitZero', 'evidence'],
+  required: ['fileExists', 'lintExitZero', 'reimplementation', 'evidence'],
   properties: {
     fileExists: { type: 'boolean' },
     lintExitZero: { type: 'boolean', description: 'poc-lint.sh exited 0 when YOU ran it' },
     lintOutput: { type: 'string' },
+    // Principle 5, and the ONLY place it is decided. poc-lint.sh's
+    // `possible-reimplementation` is a NOTE that exits 0, because a grep cannot
+    // tell a façade re-export, a pytest fixture or a local driver from a copy of
+    // the target — made fatal it returned BUILD_FAILED on all three. Demoting it
+    // without putting the question anywhere left nothing enforcing Principle 5
+    // at all: a PoC that pastes the vulnerable function in and exercises the copy
+    // passes the note AND rule 8, because the copy's own definition supplies the
+    // mention. This agent has Bash and both files, so it is the one reader that
+    // can answer it; `artifactProblem` reads the answer.
+    //
+    // Required, and graded affirmatively below: an omitted or unrecognised value
+    // is not a clearance. Three values rather than a boolean because the note
+    // names three outcomes and "false" would collapse "no definition at all" with
+    // "a definition I checked and cleared".
+    reimplementation: {
+      enum: ['NOT_DEFINED', 'LOCAL_DRIVER', 'COPY_OF_TARGET'],
+      description:
+        'does the PoC contain a copy of the code under test, under ANY name? NOT_DEFINED: it holds no copy and calls the imported symbol. LOCAL_DRIVER: it defines that name but the body is not the target\'s logic. COPY_OF_TARGET: the vulnerable logic was pasted in, whatever it was renamed to',
+    },
     reRunSucceeded: { type: 'boolean', description: 'the PoC command ran and reproduced the impact' },
     reRunNotes: { type: 'string' },
     evidence: { type: 'string' },
@@ -159,12 +201,23 @@ documented guidance — so check those before awarding the challenge.`,
     prompt: `Challenge 4. Argue that this is ALREADY FIXED.
 Search the git log for the relevant paths, the issue tracker, release notes, and
 published advisories. Report what you searched and what you found. If a fix
-exists, say whether it is complete or partial.
+exists, set \`complete\`: true only if it closes the finding outright, false if
+it leaves any part of it live — a second sink, one caller of two, a narrower
+input class.
 
 Stage 1 ran this search too, and its result is quoted above. You are not
 repeating it for its own sake: a fix landing one layer up from the sink is the
 shape that gets missed, and you are looking at a built, executed PoC that Stage 1
-did not have. If the PoC passes against HEAD, that is evidence; say so.`,
+did not have. If the PoC passes against HEAD, that is evidence; say so.
+
+Awarding this challenge on a WHOLE fix retracts the finding outright, so it has
+to point at something: put the commit, PR, issue or advisory ID in \`reference\`,
+on its own and not merely described in \`evidence\`. Both conditions are enforced
+in code and neither is refused quietly. A \`complete\`: true win whose
+\`reference\` is not a citation — blank, \`n/a\`, \`see evidence\`, a bare
+file:line — ENDS THE STAGE as NEEDS_MORE_INFO, so award it that way only if you
+can name the fix. A win on a partial fix does not retract and does not end
+anything: the finding is reported, with the partial fix recorded against it.`,
   },
   {
     key: 'real-deployment',
@@ -214,9 +267,12 @@ path ever actually used?`,
 function settledByStageOne(a) {
   const verification = (a && a.verification) || {}
   const status = typeof verification.status === 'string' ? verification.status.trim() : ''
+  // DISMISSED was here until nothing emitted it: it was the removed brocard
+  // pre-gate's status, and SKILL.md went on documenting it as a Stage 1 return for
+  // two versions after 2.5.0 deleted the only thing that returned it. A status no
+  // workflow can produce reads as coverage this list does not have.
   const settled = [
     'FALSE_POSITIVE',
-    'DISMISSED',
     'NOT_EXPLOITABLE',
     'NOT_VULNERABLE',
     'ALREADY_FIXED',
@@ -267,7 +323,11 @@ function missingArgs(a) {
   // rather than risk mis-lexing one (test_a_regex_literal_is_rejected_rather_than_mis_lexed).
   // Adding one here failed 51 of its tests on unmutated code and took 27 mutations
   // with it, because a mutation whose baseline is red proves nothing.
-  const base = typeof (a && a.baseDir) === 'string' ? a.baseDir.trim() : ''
+  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir cleared
+  // `need` — it is neither undefined, null nor a blank string — and then read as
+  // '' here, so the shape check below was skipped entirely and every reference
+  // path became '[object Object]/references/...'.
+  const base = String((a && a.baseDir) ?? '').trim()
   const withoutSlash = base.endsWith('/') ? base.slice(0, -1) : base
   const shaped = withoutSlash.startsWith('/') && withoutSlash.endsWith('/skills/fp-check')
   if (base && !shaped) {
@@ -296,7 +356,7 @@ function missingArgs(a) {
   // not reading it is not a gate.
   //
   // This is still the only gate on the build path. settledByStageOne runs
-  // earlier and reaches the same outcome for the six statuses that are a
+  // earlier and reaches the same outcome for the five statuses that are a
   // verdict; what is left here is everything else — NEEDS_MORE_INFO, BLOCKED, a
   // status this script does not recognise, and an absent one — for which "go
   // back and correct the dispatch or re-run Stage 1" is the right instruction.
@@ -491,7 +551,14 @@ say so. Do not improvise a broader target.
 
 Before returning, run:
   ${baseDir}/scripts/poc-lint.sh --symbol <the symbol under test> <your poc file>
-It must exit 0. Fix what it reports; do not work around it. Report the outcome as
+It must exit 0. Fix what it reports; do not work around it. A
+\`possible-reimplementation\` NOTE does not fail it — grep cannot tell your own
+driver from a copy of the target — but it is exactly the Principle 5 question,
+so satisfy it by importing the real symbol rather than by renaming anything. A
+reviewer who can open both files settles it after you — on the logic, under
+whatever name — and a copy ends this stage as BLOCKED, so renaming past the note
+buys nothing.
+Report the outcome as
 lintPassed — the build gate reads that field, and an independent reviewer re-runs
 this exact command against your absolutePath afterwards, so reporting true
 without a clean run is caught rather than believed.
@@ -546,7 +613,9 @@ phase('Challenges')
 // Hoisted so the parallel() call below stays short enough for
 // test_no_unbounded_fanout to see that it fans out over CHALLENGES, a
 // script-local array literal, and is therefore bounded by construction.
-const ARTIFACT_PROMPT = `Verify the PoC artifact itself. You are checking facts, not judgement.
+const ARTIFACT_PROMPT = `Verify the PoC artifact itself. Steps 1, 2 and 4 are facts; step 3 is the one
+judgement here, and it is yours because you are the only reader with both files
+open.
 
 PoC file: ${poc.absolutePath}
 Symbol under test: ${poc.invokedSymbol}
@@ -557,7 +626,29 @@ Do these, with Bash:
   2. Run: ${baseDir}/scripts/poc-lint.sh --symbol '${poc.invokedSymbol}' '${poc.absolutePath}'
      Report its exit code as lintExitZero and paste its output as lintOutput.
      The builder reported that this passes; you are the one who checks.
-  3. Run the command above and report whether it reproduces the impact.
+     If it prints a \`possible-reimplementation\` NOTE, that is not a lint
+     failure and must not be reported as one — it is the one Principle 5
+     question grep cannot answer, handed to you because you can open both files.
+  3. Answer that question in \`reimplementation\`, whether or not the note
+     printed. Open the PoC and open ${finding.sink}, and compare the LOGIC, not
+     the name:
+       NOT_DEFINED      the PoC holds no copy of that logic under ANY name;
+                        it imports ${poc.invokedSymbol} and calls the real one
+       LOCAL_DRIVER     it defines that name, but the body is setup, a fixture,
+                        a façade re-export or a harness — not the target's logic
+       COPY_OF_TARGET   the vulnerable logic itself was pasted in, whatever it
+                        was renamed to. A copy under a DIFFERENT name is this
+                        answer and not NOT_DEFINED: rule 6 keys on the leaf, so
+                        it prints no note, and rule 8 is satisfied by a mention
+                        in a comment — you are the only check left
+     COPY_OF_TARGET ends this stage as BLOCKED, because such a PoC proves the
+     copy is broken and nothing about the application. Put the two locations you
+     compared in \`evidence\`, whichever of the three you answer; a blank one
+     ends this stage as BLOCKED too.
+  4. Run the command above and report whether it reproduces the impact.
+     Grade the impact, not the exit code: the preferred test-integrated PoC is
+     written to FAIL while the vulnerability exists, so a red test there IS a
+     reproduction and reRunSucceeded is true.
      If it cannot run here for an environmental reason — a missing service, a
      target that is not this machine — say so in reRunNotes and set
      reRunSucceeded false. That is a boundary to record, not a failure to hide.
@@ -565,8 +656,12 @@ Do these, with Bash:
 Report what you observed. Do not repair the PoC and do not re-run the linter
 until it passes; a failing check is the finding.`
 
+// The artifact check runs at `medium`, not `low`. It was three shell facts until
+// the Principle 5 verdict moved into it, and that step is a logic comparison
+// across two files. The comment sits here rather than beside the call so that
+// test_no_unbounded_fanout still sees CHALLENGES inside its window.
 const checks = await parallel([
-  () => agent(ARTIFACT_PROMPT, { label: 'artifact-check', phase: 'Challenges', schema: ARTIFACT_SCHEMA, effort: 'low' }),
+  () => agent(ARTIFACT_PROMPT, { label: 'artifact-check', phase: 'Challenges', schema: ARTIFACT_SCHEMA, effort: 'medium' }),
   ...CHALLENGES.map((c) => () =>
       agent(
         `You are a skeptical auditor reviewing a PoC you did not build. Your job is to
@@ -592,7 +687,13 @@ ${c.prompt}
 
 State the strongest form of the challenge, then whether the evidence rebuts it.
 If you cannot rebut it with evidence, the CHALLENGE wins. Uncertainty is not a
-rebuttal.`,
+rebuttal.
+
+\`reference\` and \`complete\` are required of all five of you and belong to
+challenge 4 alone. Unless you are challenge 4 and are awarding it, return
+\`reference\` as an empty string and \`complete\` as false. Omitting either fails
+validation, and a challenge whose agent dies is counted as won by the challenge —
+so leaving one out costs the finding a band step.`,
         { label: `challenge:${c.key}`, phase: 'Challenges', schema: CHALLENGE_SCHEMA, effort: 'high' },
         // `{...null}` is `{}`, so spreading unconditionally turns a dead agent
         // into a truthy phantom verdict: it survives .filter(Boolean), makes the
@@ -618,6 +719,24 @@ function artifactProblem(check) {
   if (!check.lintExitZero) {
     return `poc-lint.sh did not exit 0 when an independent reviewer ran it, though the builder reported lintPassed: ${check.lintOutput || 'no output captured'}`
   }
+  // Principle 5, decided here because it is decidable here and nowhere else.
+  // Graded affirmatively — only the two values that CLEAR the PoC clear it — for
+  // the reason every other gate in this plugin is: the enum is advisory, the
+  // runtime validator enforces `required` alone, and by exclusion an omitted or
+  // misspelt answer would read as a clearance. A copy is BLOCKED, not
+  // DO_NOT_SUBMIT: the finding was not disproven, the artifact was.
+  if (check.reimplementation !== 'NOT_DEFINED' && check.reimplementation !== 'LOCAL_DRIVER') {
+    return `the PoC reimplements the code under test rather than importing it (reviewer verdict: ${check.reimplementation || 'none given'}): ${String(check.evidence || '').trim() || 'no evidence given'}. It proves the copy is broken, not that the application is exploitable — see the reimplementation section of references/poc-anti-patterns.md`
+  }
+  // And the CLEARING path is trimmed too, as every sibling gate in this file is.
+  // `required` checks presence, not content, so `evidence: ''` validates: a
+  // reviewer could clear Principle 5 having compared nothing and the one check
+  // that decides it became a self-report. Both clearing answers are judgements
+  // about the two bodies — NOT_DEFINED means no copy under ANY name, not merely
+  // no symbol of that name — so both owe the locations they were reached from.
+  if (!String(check.evidence || '').trim()) {
+    return `the artifact check answered ${check.reimplementation} for Principle 5 without saying what it compared; the two locations opened are what makes that a check rather than an assertion`
+  }
   return null
 }
 
@@ -637,16 +756,117 @@ function tallyChallenges(challengeVerdicts, expectedKeys) {
   return { defeated, unrebutted, missing: expectedKeys.length - byKey.size }
 }
 
-// checkpoints.md 5.1 challenge 4: "a fix exists -> DO NOT SUBMIT (this outcome
-// overrides the confidence band)". Takes the UNREBUTTED list, not the returned
-// verdicts: every other challenge counts a missing verdict as won by the
-// challenge, and the one challenge whose win overrides the band must not be the
-// exception that escapes when its agent dies.
+// checkpoints.md 5.1 challenge 4: "a fix exists -> the band does not get a vote".
+// Takes the UNREBUTTED list, not the returned verdicts: every other challenge
+// counts a missing verdict as won by the challenge, and the one challenge whose
+// win overrides the band must not be the exception that escapes when its agent
+// dies.
+//
+// It then requires the fix to be CITED, and returns that citation or null. This
+// is triage-static's `upstreamFixStands` rule — `fixed: YES` with no reference is
+// not a retraction — arriving one stage later: an unreferenced retraction is the
+// one failure mode that silently discards a real finding, and here it discarded a
+// built, executed, lint-clean one on nothing but a dead agent. The missing verdict
+// still counts against the finding, in the only place it can honestly count:
+// `tallyChallenges` has already lowered the band by it, and the report has to
+// address it as unrebutted.
 //
 // This is one of the two mechanisms the head-to-head attributed the delta to:
 // 3/3 on `already-fixed` against 0/3 for the arm with no already-fixed gate.
-function alreadyFixedStands(unrebutted) {
-  return (unrebutted || []).some((v) => v && v.key === 'already-fixed')
+function alreadyFixedStands(unrebutted, challengeVerdicts) {
+  if (!(unrebutted || []).some((v) => v && v.key === 'already-fixed')) return null
+  const verdict = (challengeVerdicts || []).find((v) => v && v.key === 'already-fixed')
+  // A PARTIAL fix is not a retraction — checkpoints.md 5.1: "an incomplete or
+  // partial fix is reported as such". `!== true`, and for the same reason Stage
+  // 1's `upstreamFixStands` uses it one workflow over: an omitted flag is
+  // `undefined`, which is not `false`, so a fix that closed one of two sinks
+  // discarded a demonstrated, still-live bug whole. It falls through from here
+  // to the band, which has already counted the challenge against the finding.
+  if (!verdict || verdict.complete !== true) return null
+  // `reference`, not `evidence`. Every challenge is required to fill `evidence`,
+  // so reading the citation out of it made the check unfalsifiable — any argued
+  // win retracted. `reference` is the field that exists only to hold the commit,
+  // PR, issue or advisory ID, exactly as HISTORY_SCHEMA's is, and `'   '` is
+  // schema-valid in both. `citedReference` is the shared test of what counts.
+  return citedReference(verdict.reference)
+}
+
+// Pure. Duplicated verbatim from triage-static.js — see the reasoning there.
+// Two copies because these scripts have no module system; the alternative was
+// two different rules for one thing, which is what shipped.
+function citedReference(value) {
+  // `new RegExp` from strings rather than regex literals: the contract suite
+  // lexes these scripts and rejects a bare `/` in code position, because reading
+  // a regex as a division silently blanks the rest of the file and turns every
+  // check built on that text green.
+  //
+  // Matched ANYWHERE in the string, bounded by non-identifier characters, rather
+  // than split on whitespace with each token anchored. Anchoring rejected every
+  // ordinary wrapper a citation arrives in: `openssl/openssl#12345` — the
+  // canonical cross-repo form, and the integration case this search exists for —
+  // `torvalds/linux@a1b2c3d`, a backticked sha, `<https://...>`, a markdown link,
+  // and `PR 4521`. A rejection here is not harmless in either direction: Stage 1
+  // writes a note saying no reference was given and reports an already-fixed bug
+  // as live, and Stage 3 turns a genuine retraction into NEEDS_MORE_INFO.
+  //
+  // A BARE number is deliberately not a citation. `4521` is indistinguishable
+  // from a line number or a year, and admitting it makes "fixed in 2021" a
+  // reference; the keyword form (`PR 4521`, `issue 1234`) carries the context
+  // that tells them apart. For the same reason a dotted version needs either a
+  // `v` or two dots, so that `v3` and `2.3.1` are citations and `2021.03` is not.
+  const bound = '(^|[^0-9a-z])'
+  const forms = new RegExp(
+    [
+      // a commit sha, alone or qualified by the repo it belongs to
+      bound + '[0-9a-f]{7,40}([^0-9a-z]|$)',
+      // #412, and owner/repo#412
+      '[0-9a-z._-]*#[0-9]+',
+      // Advisory IDs, recognised by REGISTRY NAME rather than by shape. Every
+      // shape rule tried here mis-classified in both directions: "one hyphen and
+      // a digit" made `internal-fix-2` and `fixed in a post-2020 refactor`
+      // advisory IDs and retracted live findings, "the last segment ends in a
+      // digit" threw out about 1 real GHSA ID in 20, and "every segment is four
+      // or more characters" then threw out `PYSEC-2021-19`, `OSV-2021-9`,
+      // `DSA-4879-1` and `USN-5678-1` — writing "no reference given" over a
+      // correct citation and reporting a fixed bug as live. A shape cannot tell
+      // an ID from an English phrase because registries did not agree on one. An
+      // allowlist is honest about what it knows: a name it has never heard of is
+      // not silently promoted, and a name it has is matched against that
+      // registry's actual ID grammar.
+      //
+      // GHSA is its own branch because its shape is documented and unlike the
+      // rest: exactly three four-character segments over the alphabet
+      // `23456789cfghjmpqrvwx`, in which a digit is common but not guaranteed —
+      // `GHSA-vqqm-hhhc-jqhw` carries none at all.
+      bound + 'ghsa(-[0-9a-z]{4}){3}',
+      // CVE-2024-1234, RUSTSEC-2021-0093, PYSEC-2021-19, OSV-2021-9,
+      // GO-2022-0603, DSA-4879-1, USN-5678-1, DLA-2571-1, ZDI-21-1234,
+      // ALSA-2021:9106. Each of these numbers its first segment — a year or a
+      // bulletin number — which is what separates the ID from the prose: `go` is
+      // in the list, and `go-to-market-2` still fails because `to` is not a
+      // number.
+      bound + '(cve|rustsec|pysec|osv|go|dsa|usn|dla|zdi|mal|alsa|elsa|talos)[-:][0-9]+[-:][0-9a-z]+',
+      // v3, v2.3.1, 2.3.1. The trailing lookahead refuses a version that is part
+      // of a FILENAME: `src/handlers/auth-v2.go:118` is the bare file:line
+      // challenge 4's own prompt names as a non-citation, and `v2` inside it
+      // satisfied a consuming boundary group.
+      bound + '(v[0-9]+([.][0-9]+)*|[0-9]+([.][0-9]+){2,})(?![0-9a-z]|[.][a-z])',
+      // PR 4521, issue #1234, release 3, gh-1234.
+      bound + '(pr|pull|issues?|bug|ticket|gh|release)[ #-]+[0-9]+',
+      // pull/882 and issues/1234, which is how GitHub shorthand is written. The
+      // keyword may NOT be reached through a path separator, and that is the
+      // whole difference between this branch and the one above it: with `/` in
+      // the shared separator class, `src/bug/12.go` and `tests/issues/42/repro.py`
+      // both became citations, contradicting this function's own rule that a bare
+      // `file:line` is not one. Inside a full URL the `https?://` branch already
+      // matches, so nothing is lost by refusing the path form here.
+      '(^|[^0-9a-z/])(pr|pull|issues?|bug|ticket|gh|release)/[0-9]+',
+      'https?://[^ ]',
+    ].join('|'),
+    'i',
+  )
+  const ref = String(value || '').trim()
+  return forms.test(ref) ? ref : null
 }
 
 // checkpoints.md 5.1, applied as code rather than self-reported.
@@ -681,14 +901,9 @@ log(`${defeated}/${CHALLENGES.length} challenges defeated → ${band.label} (${b
 // BLOCKED, which SKILL.md relays as NEEDS MORE INFO and whose completion gate tells
 // the orchestrator to re-dispatch, buying the same answer twice for a bug that no
 // longer exists.
-if (alreadyFixedStands(lost)) {
-  const verdict = verdicts.find((v) => v.key === 'already-fixed')
-  // Trimmed: `evidence: '   '` is schema-valid and truthy, and this is the reason a
-  // retraction is relayed with.
-  const why = verdict
-    ? String(verdict.evidence || '').trim() || 'see challenge 4'
-    : 'challenge 4 returned no verdict, which counts as won by the challenge'
-  log(`ALREADY_FIXED: the already-fixed challenge stands. ${why}`)
+const fixCitation = alreadyFixedStands(lost, verdicts)
+if (fixCitation) {
+  log(`ALREADY_FIXED: the already-fixed challenge stands. ${fixCitation}`)
   return {
     // ALREADY_FIXED, not DO_NOT_SUBMIT. The bug was real and a fix landed, so this
     // is a RETRACTION with a reference — and Stage 1 already returns exactly this
@@ -698,7 +913,7 @@ if (alreadyFixedStands(lost)) {
     // to FALSE POSITIVE. Two of the three were the rounding error this plugin
     // exists to prevent.
     status: 'ALREADY_FIXED',
-    reason: `already-fixed challenge unrebutted: ${why}. Retract rather than report at a lowered severity.`,
+    reason: `already-fixed challenge unrebutted: ${fixCitation}. Retract rather than report at a lowered severity.`,
     band,
     defeated,
     poc,
@@ -725,6 +940,56 @@ if (band.action === 'DO_NOT_SUBMIT') {
   return {
     status: 'DO_NOT_SUBMIT',
     reason: `confidence ${band.label} (${defeated}/${CHALLENGES.length} defeated); unrebutted: ${unrebuttedKeys}`,
+    band,
+    defeated,
+    poc,
+    artifact,
+    verdicts,
+    unrebutted: lost,
+  }
+}
+
+// Challenge 4 was AWARDED on a WHOLE fix and cited nothing lookupable.
+// `alreadyFixedStands` refuses to retract on that — a retraction has to point at
+// something — and the band must not quietly decide instead: at 4/5 it is MEDIUM,
+// so a bug a reviewer says is entirely patched came back REPORTED, which SKILL.md
+// maps to TRUE POSITIVE. It is neither a retraction nor a clean bill of health;
+// it is a fact still to establish.
+//
+// `complete === true`, so a PARTIAL fix never reaches here whether it cited
+// anything or not. checkpoints.md 5.1 and challenge 4's own prompt both say a
+// partial fix does not retract — the finding survives it and the report records
+// it — and the citation is only load-bearing for the outcome that DISCARDS the
+// finding. An uncited partial claim halted the stage on a bug everyone agreed was
+// still live. Stage 1's `downgradeUnreferencedFix` is the precedent and it does
+// not halt either: it downgrades `fixed` to UNCERTAIN and carries on to a verdict.
+//
+// A DEAD challenge-4 agent is deliberately not here — it returned no claim to
+// establish, and `tallyChallenges` has already counted it against the finding.
+//
+// AFTER the artifact gate and the band, which is where the two findings this
+// answers put it. Ahead of them, a PoC whose file does not exist came back
+// NEEDS_MORE_INFO instead of BLOCKED, and one that lost ALL FIVE challenges came
+// back NEEDS_MORE_INFO instead of the FALSE POSITIVE that SKILL.md maps
+// `confidence NONE (0/5)` to — an uncited claim outranking four independent
+// refutations that did not need it.
+//
+// `winner !== 'REBUTTAL'`, not `=== 'CHALLENGE'`, so that this and
+// `tallyChallenges` grade the same field the same way. The enum is advisory —
+// `required` is the only thing the runtime validator enforces — and an off-enum
+// `winner: 'challenge'` counted AGAINST the finding in the tally while escaping
+// this check entirely: 4/5, MEDIUM, REPORTED, on a finding the reviewer said was
+// entirely patched. A dead agent is still not here, because it leaves no entry in
+// `verdicts` at all.
+const uncitedFix = verdicts.find(
+  (v) => v.key === 'already-fixed' && v.winner !== 'REBUTTAL' && v.complete === true && !citedReference(v.reference),
+)
+if (uncitedFix) {
+  const claim = String(uncitedFix.evidence || '').trim() || 'no evidence given'
+  log(`NEEDS_MORE_INFO: the already-fixed challenge was awarded with nothing cited.`)
+  return {
+    status: 'NEEDS_MORE_INFO',
+    reason: `the already-fixed challenge was awarded on a complete fix with no commit, PR, issue or advisory in \`reference\`: ${claim}. Establish the reference — it retracts if one exists — rather than reporting this as live.`,
     band,
     defeated,
     poc,
@@ -788,12 +1053,46 @@ are all disallowed. Say what the evidence shows.`,
 // defined by blank. JSON Schema `required` checks presence, not content, so
 // `unproven: ''` and `reportPath: ''` both validate.
 //
+// Pure, and duplicated from triage-static.js with the cap it serves — see the
+// reasoning there. Every DISTINCT rating level a string names, WORD-BOUNDED,
+// most severe first: `low` sits inside "Allowlist", `high` inside "highly", and
+// an unbounded substring test read both as ratings.
+function namedLevels(severity) {
+  const LEVELS = ['critical', 'high', 'medium', 'low', 'informational']
+  return LEVELS.filter((name) => new RegExp(`\\b${name}\\b`, 'i').test(String(severity)))
+}
+
 // Pure, so both branches can be graded without a model.
 function reportProblem(result) {
   if (!result) return 'report agent returned nothing'
   if (!String(result.unproven || '').trim()) return 'report omitted what remains unproven'
   if (!String(result.reportPath || '').trim()) {
     return 'report gave no reportPath; the report has to be the path of a file that was written, not one that was planned'
+  }
+  // The NUMBER, on the same reasoning and against a sharper failure than the
+  // rationale below it: `severityCapViolation` names no level in a blank string,
+  // so a blank reads as below the cap and returns null, and SKILL.md tells the
+  // orchestrator the top-level `severity` is the number the finding ships with.
+  // So REPORTED shipped a finding with no rating that no cap had been applied
+  // to. Stage 2 has a fallback for that shape (`unknownSeverity`); this has none.
+  // EXACTLY ONE of the five levels, which is one check rather than the three
+  // separate failures it covers. `required` validates `severity: ''`, the enum is
+  // advisory, and SKILL.md tells the orchestrator the top-level `severity` IS the
+  // number the finding ships with — so a blank shipped a finding with no rating
+  // at all; `Unknown`, `n/a` and `TBD` shipped one that names no level, which
+  // `severityCapViolation` reads as below the cap and passes; and `Medium/High`
+  // and `Critical (affects low-privilege users)` shipped two ratings at once.
+  // Stage 2 falls back to Stage 1's number for the unreadable shapes. This stage
+  // has nothing to fall back to, so it refuses and names the fix.
+  const stated = String(result.severity || '').trim()
+  const levels = namedLevels(stated)
+  if (levels.length !== 1) {
+    if (!stated) {
+      return 'report gave no severity; the top-level severity is the number the finding ships with, and no cap can be applied to a blank one'
+    }
+    return levels.length === 0
+      ? `report gave severity "${stated}", which names none of Critical, High, Medium, Low or Informational; no cap can be applied to a rating that is not one of them`
+      : `report gave severity "${stated}", which names ${levels.length} levels (${levels.join(', ')}); state exactly one`
   }
   // Severity passes on "the rating is supported by evidence". The two fields
   // above were trimmed on exactly this reasoning and this one was not, so a
@@ -826,7 +1125,23 @@ if (reportIssue) {
 // 3/3 on `integration-cap` against 0/3 for the arm whose severity was
 // self-reported.
 function severityCapViolation(severity, rootCause, classification) {
-  if (severity !== 'Critical' && severity !== 'High') return null
+  // Affirmative, and for the reason `capSeverity` is one workflow over: the
+  // REPORT_SCHEMA enum is advisory — `required` is the only thing the runtime
+  // validator enforces — so grading by exclusion let 'critical', 'CRITICAL' and
+  // 'Critical (RCE)' through the gate that exists to catch exactly them.
+  //
+  // EXACTLY ONE level named is a rating; more than one is an unusable answer, not
+  // a number to pick from. `reportProblem` above refuses those first and with a
+  // better message, so this branch is normally unreachable — it is here because
+  // the alternative is that a gate whose whole job is to bound a number returns
+  // "no violation" for a string it could not read, and this function is called
+  // and graded on its own. It cannot be allowed to become a silent pass.
+  const named = namedLevels(severity)
+  if (named.length > 1) {
+    return `severity ${severity} names ${named.length} levels (${named.join(', ')}), so no cap can be checked against it: state exactly one of Critical, High, Medium, Low, Informational`
+  }
+  const level = named[0] || ''
+  if (level !== 'critical' && level !== 'high') return null
   if (rootCause === 'integration' || rootCause === 'external') {
     return `severity ${severity} exceeds the Medium cap for a ${rootCause} root cause (checkpoints.md 2.4b)`
   }
@@ -851,6 +1166,10 @@ if (capViolation) {
     poc,
     artifact,
     verdicts,
+    // As every other Stage 3 return carries it. This was the one omission, and
+    // it is reachable at MEDIUM with a challenge still standing — so without it
+    // nothing here names the challenge the orchestrator has to report.
+    unrebutted: lost,
     report,
   }
 }
@@ -858,4 +1177,25 @@ if (capViolation) {
 log(`REPORTED at ${report.severity}, confidence ${band.label} (${defeated}/${CHALLENGES.length}).`)
 // Every other terminal status carries a `reason`, and SKILL.md's Completion Gate
 // tells the orchestrator to relay it verbatim. This was the one exception.
-return { status: 'REPORTED', reason: report.severityRationale, band, defeated, poc, artifact, verdicts, report }
+//
+// `unrebutted` too, and this is the only status reachable WITH a challenge still
+// standing: at MEDIUM the band proceeds and documents it. A dead agent leaves no
+// verdict object, so without this key nothing in the return names the challenge
+// that stood, and SKILL.md asks the orchestrator only for the band and the tally.
+//
+// `severity` at the TOP LEVEL, as Stage 1 and Stage 2 both surface it. This was
+// the one successful terminal return without it: SKILL.md tells the orchestrator
+// to state the verdict "with the severity", it read `undefined`, and the number
+// existed only at `report.severity`, which nothing tells it to look at.
+return {
+  status: 'REPORTED',
+  reason: report.severityRationale,
+  severity: report.severity,
+  band,
+  defeated,
+  poc,
+  artifact,
+  verdicts,
+  unrebutted: lost,
+  report,
+}

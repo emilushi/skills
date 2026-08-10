@@ -22,7 +22,7 @@
 #
 # Usage:
 #   poc-lint.sh FILE [FILE...]
-#   poc-lint.sh --symbol vulnerable_fn FILE     # also enforce Principle 5
+#   poc-lint.sh --symbol vulnerable_fn FILE     # + Principle 5, rules 6 and 8
 # shellcheck disable=SC2016
 # The single-quoted strings here are grep/awk PATTERNS, not shell text: `$XX`,
 # `${...}` and `$` anchors are meant to reach the matcher literally. Double
@@ -40,8 +40,9 @@ usage() {
   cat >&2 <<'EOF'
 usage: poc-lint.sh [--symbol NAME] FILE [FILE...]
 
-  --symbol NAME  Fail if the PoC defines NAME itself rather than importing it.
-                 Enforces Principle 5: call the real code, never reimplement it.
+  --symbol NAME  Fail if the PoC never NAMES NAME (Principle 5: call the real
+                 code, never reimplement it). A definition of the same name is
+                 reported as a note, not a violation — see rule 6.
 EOF
   exit 2
 }
@@ -51,12 +52,22 @@ while [ $# -gt 0 ]; do
     --symbol)
       [ $# -ge 2 ] || usage
       SYMBOL="$2"
-      # `--symbol ''` used to be accepted, and rule 6 is guarded by
-      # [ -n "$SYMBOL" ], so it silently switched off the only rule that
-      # enforces Principle 5 and printed "clean". The caller that passes an
-      # empty symbol is the caller that most needs the check to run.
-      if [ -z "$SYMBOL" ]; then
-        echo "poc-lint: --symbol requires a non-empty name; refusing to skip the Principle 5 check silently" >&2
+      # Both symbol rules key on the LAST segment of a qualified name, split on
+      # `.` and on `::`. A qualified symbol — `target_app.ledger.transfer_balance`,
+      # `Ledger.debit`, `ledger::transfer_balance` — never appears contiguously in
+      # a Python, Go, JS or Rust call: the import binds the last segment and the
+      # call site uses that. Splitting on `.` alone treated every `::` symbol as
+      # unqualified, so a Rust PoC was checked for the literal string
+      # `ledger::transfer_balance`.
+      #
+      # `--symbol ''`, `--symbol 'Ledger.'` and `--symbol 'ledger::'` all leave
+      # that segment empty, and both rules are guarded by [ -n "$SYMBOL" ], so
+      # they silently switched off and printed "clean". Refuse instead: the
+      # caller passing one of those is the caller that most needs the check.
+      LEAF="${SYMBOL##*.}"
+      LEAF="${LEAF##*::}"
+      if [ -z "$LEAF" ]; then
+        echo "poc-lint: --symbol requires a non-empty final segment (got '$SYMBOL'); refusing to skip the Principle 5 checks silently" >&2
         exit 2
       fi
       shift 2
@@ -110,6 +121,11 @@ report() {
   printf '\n%s\n  %s\n' "$rule" "$explanation" >&2
   printf '%s\n' "$lines" | sed 's/^/    /' >&2
   violations=$((violations + 1))
+}
+
+# escape_re TEXT — TEXT as an ERE matching itself.
+escape_re() {
+  printf '%s' "$1" | sed 's/[][\.*^$(){}?+|/]/\\&/g'
 }
 
 # scan RULE EXPLANATION PATTERN [FILE...]
@@ -255,27 +271,36 @@ scan "placeholder-attack" \
 #        of the comment body keeps ordinary prose that merely trails off —
 #        "# see the docs for more..." — out of the rule.
 #
-# 6. Principle 5: the PoC must invoke the real code, not a local copy of it.
+# 6. A definition, in this PoC, of something with the symbol's name. REPORTED,
+#    NOT ENFORCED — it does not affect the exit code.
 #
-#    The original anchored the keyword to the start of the line, so any leading
-#    modifier defeated it. Every one of these is a complete reimplementation of
-#    the symbol under test and every one reported clean:
+#    The pattern itself is sound: it catches every shape of definition a leading
+#    modifier used to hide, all of which reported clean before it was widened —
 #
 #      async def SYM        export function SYM     pub fn SYM
 #      func (r *Repo) SYM   SYM = function (...)
 #
-#    This is the only rule enforcing the skill's headline principle, so a miss
-#    here means a PoC that proves a copy of the bug is broken and says nothing
-#    about the application.
+#    — but what a match MEANS is not decidable by grep. `def transfer_balance`
+#    under `--symbol target_app.ledger.transfer_balance` is a verbatim copy of the
+#    code under test; `def main()` under `--symbol cli.main`, in a PoC whose next
+#    line is `cli.main(argv)`, is the ordinary driver every standalone PoC has.
+#    `run`, `handler` and `parse` collide the same way. Three consecutive attempts
+#    to separate the two by adding a condition each fixed one direction and broke
+#    the other, because the fact that separates them — is this body a copy of the
+#    target's? — is not in the text a grep can see.
+#
+#    So it reports the fact and leaves the judgement to a reader who can open both
+#    files. A non-zero exit is BUILD_FAILED at the builder and BLOCKED at the
+#    reviewer's re-run, which discards a real, executed, reproducing finding; this
+#    file's standing rule is that failing a correct PoC is the worse of its two
+#    errors, because the agent's only recourse is to stop calling the real code.
 #
 #    Known boundary: a C/C++/Java/C# definition carries no keyword at all
 #    (`public static void SYM(int a) {`), and the patterns that would catch it
-#    also match `if SYM(x) {`. Flagging a correct PoC is the worse failure —
-#    the agent's only recourse is to work around the linter — so that form is
-#    deliberately not matched. For those languages, Principle 5 rests on the
-#    reviewers rather than on this rule.
+#    also match `if SYM(x) {`. That form is deliberately not matched.
+REIMPL_RE=""
 if [ -n "$SYMBOL" ]; then
-  esc=$(printf '%s' "$SYMBOL" | sed 's/[][\.*^$(){}?+|/]/\\&/g')
+  esc=$(escape_re "$LEAF")
   # Any run of leading keywords (async, pub, export, public, static, ...).
   mods='([A-Za-z_][A-Za-z_0-9]*[[:space:]]+)*'
   kw='(def|function|fn|func|class|sub)'
@@ -295,8 +320,6 @@ if [ -n "$SYMBOL" ]; then
   # otherwise stop catching a form the unconstrained rule did catch.
   fnlit='(async[[:space:]]+)?(function|lambda|\([^)]*\)[[:space:]]*=>|[A-Za-z_][A-Za-z_0-9]*[[:space:]]*=>)'
   REIMPL_RE="^[[:space:]]*${mods}${kw}[[:space:]]+${esc}([^[:alnum:]_]|$)|^[[:space:]]*func[[:space:]]*\([^)]*\)[[:space:]]*${esc}([^[:alnum:]_]|$)|^[[:space:]]*(const|let|var)[[:space:]]+${esc}[[:space:]]*=[[:space:]]*${fnlit}|^[[:space:]]*${esc}[[:space:]]*=[[:space:]]*${fnlit}"
-else
-  REIMPL_RE=""
 fi
 # Through the environment rather than -v: awk expands backslash escapes in a -v
 # value, so every `\.` and `\(` above would arrive unescaped. The program checks
@@ -372,12 +395,66 @@ expect && /^[[:space:]]*(pass|\.\.\.|raise[[:space:]]+NotImplementedError|throw[
 report "ellipsis-placeholder" \
   "Elided code. Write the statements out." \
   "$(printf '%s\n' "$hits" | sed -n 's/^ellipsis-placeholder //p')"
-report "reimplementation" \
-  "PoC defines '$SYMBOL' itself. Import it from the code under test instead." \
-  "$(printf '%s\n' "$hits" | sed -n 's/^reimplementation //p')"
+redefined=$(printf '%s\n' "$hits" | sed -n 's/^reimplementation //p')
+if [ -n "$redefined" ]; then
+  printf '\npossible-reimplementation (NOTE — not a violation, does not fail this lint)\n  This PoC defines "%s" itself. That is either a copy of the code under test, which Principle 5 forbids, or an ordinary local driver that happens to share the name. Grep cannot tell those apart; open the file and decide.\n' "$LEAF" >&2
+  printf '%s\n' "$redefined" | sed 's/^/    /' >&2
+fi
 report "stub-body" \
   "A definition whose whole body is a placeholder. Implement it." \
   "$(printf '%s\n' "$hits" | sed -n 's/^stub-body //p')"
+
+# 8. The half of Principle 5 a grep can actually decide: the symbol's last
+#    segment appears somewhere in the PoC's code. A file that never names the
+#    symbol under test cannot be calling it, and rule 6 does not cover that — a
+#    PoC that never mentions the symbol trivially does not redefine it.
+#
+#    That mention is ALL this establishes, and the clean line says so. It does
+#    not distinguish a call from a coincidence: `--symbol app.io.read` is
+#    satisfied by `open(p).read()`, and `read`, `get`, `run` and `parse` are
+#    leaves a PoC hits by accident.
+#
+#    Requiring the PARENT segment as well was the attempt to close that, and it
+#    blocked the canonical shapes of a COMPLIANT PoC instead — a façade
+#    re-export (`from flask import send_file` under `flask.helpers.send_file`), a
+#    pytest fixture (`def test_idor(client): client.get(...)` under
+#    `FlaskClient.get`) and a factory (`a = make_account();
+#    a.transfer_balance(...)` under `Ledger.transfer_balance`) name no parent —
+#    while matching common parents by accident anyway, since the test was
+#    unanchored, case-insensitive and whole-file: `http` inside a
+#    `requests.get("http://...")` URL satisfied `werkzeug.http.*`. A non-zero
+#    exit here is BUILD_FAILED at the builder and BLOCKED at the reviewer's
+#    re-run, so it discards a real, executed, reproducing finding. The rule
+#    claims less rather than guessing.
+#
+#    PY_FILES, not FILES, for the reason rules 3, 6 and 7 use it: a `.pyi` stub
+#    declaring `def parse_request(...): ...` is not a call site, and reading it
+#    let a PoC with no mention of the symbol anywhere in its code report clean.
+#
+#    The status is inspected rather than inverted. `! grep` reads exit 2 — the
+#    failure `scan()` deliberately exits 2 for, and which the header reserves
+#    exit 2 for — as "no match", so a broken grep was reported as a rule
+#    violation with exit 1.
+#
+# names PATTERN — is PATTERN word-bounded anywhere in the code?
+names() {
+  local status
+  set +e
+  grep -qE -- "(^|[^[:alnum:]_])${1}([^[:alnum:]_]|$)" "${PY_FILES[@]}"
+  status=$?
+  set -e
+  [ "$status" -le 1 ] || {
+    echo "poc-lint: grep failed (status $status) on rule 'symbol-not-invoked'" >&2
+    exit 2
+  }
+  return "$status"
+}
+
+if [ -n "$SYMBOL" ] && ! names "$esc"; then
+  report "symbol-not-invoked" \
+    "The PoC never mentions '$LEAF', the last segment of '$SYMBOL'. Import and call the real code under test." \
+    "$SYMBOL"
+fi
 
 if [ "$violations" -gt 0 ]; then
   printf '\npoc-lint: %d rule(s) violated across %d file(s)\n' \
@@ -385,12 +462,15 @@ if [ "$violations" -gt 0 ]; then
   exit 1
 fi
 
-# Say whether Principle 5 was enforced. Without --symbol, rule 6 does not run,
-# and a bare "clean" reads as though it did — the build agent self-reports
-# lintPassed from this output.
+# Say what was enforced, and say it exactly. Without --symbol neither symbol rule
+# runs, and a bare "clean" reads as though they did — the build agent
+# self-reports lintPassed from this output. With one, the claim is deliberately
+# small: the name is present. Whether it is a CALL, and whether a definition of
+# the same name is a copy, are both beyond grep and are stated as open rather
+# than implied as settled.
 if [ -n "$SYMBOL" ]; then
-  printf 'poc-lint: %d file(s) clean (Principle 5 checked against %s)\n' \
-    "${#FILES[@]}" "$SYMBOL"
+  printf 'poc-lint: %d file(s) clean (Principle 5 checked against %s as far as grep can: "%s" is named in the code. That is MENTION, not invocation, and a definition of that name is reported above as a note rather than judged — a copy is the reviewers job)\n' \
+    "${#FILES[@]}" "$SYMBOL" "$LEAF"
 else
   printf 'poc-lint: %d file(s) clean (Principle 5 NOT checked: no --symbol given)\n' \
     "${#FILES[@]}"

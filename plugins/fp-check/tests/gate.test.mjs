@@ -11,7 +11,7 @@ const STATIC = script('triage-static.js')
 // Evaluating decideGate alone made every call a ReferenceError, and the
 // alternative — inlining the fix check at both call sites — is the duplicated
 // gate logic this suite exists to catch.
-const { decideGate } = loadFns(STATIC, 'decideGate', 'upstreamFixStands')
+const { decideGate } = loadFns(STATIC, 'decideGate', 'upstreamFixStands', 'citedReference')
 const missingPrecondition = loadFn(STATIC, 'missingPrecondition')
 
 const layer = (name, verdict) => ({ layer: name, location: `${name}.go:10`, verdict })
@@ -225,13 +225,44 @@ test('a referenced complete fix outranks a blocking layer, and names both', () =
   assert.match(r.reason, /Retract/)
 })
 
+// The other direction of the citation test, and the reason it is a shape test
+// rather than "contains a digit": a short sha is often all letters, and refusing
+// one reports a bug that no longer exists.
+test('every honest citation shape still retracts', () => {
+  for (const reference of ['deadbeef', 'abcfeed', '#412', 'CVE-2024-1234', 'GHSA-jf85-cpcp-j695', 'v2.3.1', 'https://github.com/o/r/pull/412', 'fixed by 99a4704']) {
+    const r = decideGate([layer('digest', 'PAYLOAD_STOPPED_HERE')], checked, inScope, { ...retracted, reference }, 1)
+    assert.equal(r.status, 'ALREADY_FIXED', reference)
+  }
+})
+
 // The retraction is gated on a reference existing, and nothing about promoting it
 // loosens that. A fix the agent could not point at leaves the blocking layer as
 // the answer.
+//
+// "Non-blank" was the whole test here while Stage 3's copy of the rule was
+// hardened, which left the DEFAULT, ALWAYS-RUN stage retracting on `n/a` and
+// SKILL.md printing `RETRACTED — already fixed by n/a`. Stage 3's challenge 4
+// only runs when a PoC was asked for, so the hardened copy was the one almost
+// never reached.
 test('an unreferenced or partial fix does not outrank a blocking layer', () => {
   for (const history of [
     { ...retracted, reference: '' },
     { ...retracted, reference: '   ' },
+    { ...retracted, reference: 'n/a' },
+    { ...retracted, reference: 'unknown commit' },
+    { ...retracted, reference: 'see evidence' },
+    { ...retracted, reference: 'TBD' },
+    { ...retracted, reference: 'not applicable' },
+    // Carries a digit and cites nothing: "contains a digit" is not the test.
+    { ...retracted, reference: 'see evidence at auth.py:31' },
+    { ...retracted, reference: 'fixed sometime in the 2.x line' },
+    // A hyphenated token carrying a digit is not an advisory ID, and a version
+    // inside a FILENAME is not a version citation. One hyphen was the whole test
+    // for the CVE/GHSA shape, so each of these retracted a live finding.
+    { ...retracted, reference: 'fixed in a post-2020 refactor' },
+    { ...retracted, reference: 'a follow-up commit, not-found-1' },
+    { ...retracted, reference: 'internal-fix-2' },
+    { ...retracted, reference: 'src/handlers/auth-v2.go:118' },
     { ...retracted, complete: false },
     { ...retracted, complete: undefined },
     { ...retracted, fixed: 'UNCERTAIN' },
@@ -311,9 +342,25 @@ test('ambiguous scope needs more info rather than assuming in-scope', () => {
 })
 
 test('by-design halts as NOT_VULNERABLE', () => {
-  const threat = { inScope: 'YES', byDesign: true, evidence: 'admin escape hatch' }
+  const threat = { inScope: 'YES', byDesign: true, byDesignIndicators: 2, evidence: 'admin escape hatch' }
   const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, threat, unfixed, 1)
   assert.equal(r.status, 'NOT_VULNERABLE')
+})
+
+// `byDesignIndicators` is collected precisely to gate the boolean, and nothing
+// read it: `byDesign: true` alone returned NOT_VULNERABLE, so a function named
+// `forceUpdate()` ended the analysis on one indicator — the self-reported gate
+// this plugin exists to replace. validation-dimensions.md and checkpoint 3.3 both
+// set the bar at two plus a search, and the captured run in tests/fixtures shows
+// the split: `byDesign: true, byDesignIndicators: 1` beside evidence reading
+// "Count = 1/3. Below the 'two or more' bar". Below the bar the analysis
+// continues; it is a flag to check, not a verdict.
+test('by-design below the two-indicator bar does not dismiss', () => {
+  for (const byDesignIndicators of [undefined, 0, 1]) {
+    const threat = { inScope: 'YES', byDesign: true, byDesignIndicators, evidence: 'the function is called forceUpdate' }
+    const r = decideGate([layer('a', 'PAYLOAD_REACHES_SINK')], checked, threat, unfixed, 1)
+    assert.equal(r.status, 'PROCEED', `byDesignIndicators ${JSON.stringify(byDesignIndicators)} must not dismiss`)
+  }
 })
 
 // Every input shape below has a named test above pinning its EXACT status, so
@@ -350,8 +397,8 @@ test('every non-PROCEED status carries a non-empty reason', () => {
     [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'UNCERTAIN' }, unfixed, 1],
     [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'NO', byDesign: false, evidence: '' }, unfixed, 1],
     [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'NO', byDesign: false, evidence: '   ' }, unfixed, 1],
-    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'YES', byDesign: true, evidence: '' }, unfixed, 1],
-    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'YES', byDesign: true, evidence: '   ' }, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'YES', byDesign: true, byDesignIndicators: 2, evidence: '' }, unfixed, 1],
+    [[layer('a', 'PAYLOAD_REACHES_SINK')], checked, { inScope: 'YES', byDesign: true, byDesignIndicators: 2, evidence: '   ' }, unfixed, 1],
     // A referenced fix retracts, and its reason has to name the reference.
     [
       [layer('a', 'PAYLOAD_REACHES_SINK')],

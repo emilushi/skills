@@ -206,6 +206,25 @@ test('[concept-prover] threat-model alignment decides scope and design intent', 
   assert.equal(ambiguous.result.status, 'NEEDS_MORE_INFO')
 })
 
+// Raising the dismissal bar to two indicators routed the BELOW-bar signal
+// nowhere: the impact prompt, the six-gate prompt and `decideVerdict` all went on
+// never seeing `threat`, so a documented design-intent objection was dropped and
+// the finding came back TRUE_POSITIVE with no record it had been raised. It is
+// carried to the one agent holding all the other evidence — which is where a
+// dismissal that was deferred rather than acted on has to be answered.
+test('a by-design objection below the bar is carried to the six-gate agent', async () => {
+  const r = await runScript('triage-static.js', {
+    args: standardArgs(),
+    agents: staticAgents({
+      'threat-model': { inScope: 'YES', byDesign: true, byDesignIndicators: 1, evidence: 'the function is called forceUpdate' },
+    }),
+  })
+  assert.equal(r.result.status, 'TRUE_POSITIVE', 'one indicator is a flag to check, not a dismissal')
+  const gates = promptFor(r, 'gates')
+  assert.match(gates, /forceUpdate/, 'the objection reaches the agent that can answer it')
+  assert.match(gates, /1 of 3 design-intent indicators/)
+})
+
 test('[concept-prover] the external-precondition rule decides an integration finding', async () => {
   const r = await runScript('triage-static.js', {
     args: standardArgs(),
@@ -395,7 +414,7 @@ test('[concept-prover] the already-fixed challenge overrides the band', async ()
     args: pocArgs(),
     agents: pocAgents({
       challenge: CHALLENGE_WON,
-      'challenge:already-fixed': { ...CHALLENGE_LOST, evidence: 'fixed by 99a4704 (#412)' },
+      'challenge:already-fixed': { ...CHALLENGE_LOST, reference: '99a4704 (#412)', complete: true, evidence: 'the digest call moved into the caller' },
     }),
   })
   assert.equal(r.result.status, 'ALREADY_FIXED', 'four defeated challenges must not carry an already-patched bug through')
@@ -670,7 +689,7 @@ test('[online-triage] the downstream-users census decides, and only where it sho
   // the boundary, so who those clients are and what they do is the severity.
   const clientSide = {
     ...VERIFICATION,
-    impact: { impact: 'a caller-built filter reaches the query', rootCause: 'integration', classification: 'vulnerability' },
+    impact: { result: 'VERIFIED', impact: 'a caller-built filter reaches the query', rootCause: 'integration', classification: 'vulnerability' },
   }
   const ran = await runScript('triage-online.js', {
     args: onlineArgs({ verification: clientSide }),
@@ -772,6 +791,9 @@ test('[merge] every Stage 1 exit after the impact agent reports the capped sever
 const VERIFICATION = {
   status: 'TRUE_POSITIVE',
   impact: {
+    // `result` is required by Stage 2's dispatch contract: `impactLine` branches
+    // on it, and an omitted one tells all five agents Stage 1 established nothing.
+    result: 'VERIFIED',
     impact: 'a negative rate credits the account',
     rootCause: 'internal',
     classification: 'vulnerability',
@@ -793,7 +815,7 @@ const POC_BUILT = {
   lintPassed: true,
 }
 
-const ARTIFACT_OK = { fileExists: true, lintExitZero: true, reRunSucceeded: true, evidence: 'ran it and it reproduces' }
+const ARTIFACT_OK = { fileExists: true, lintExitZero: true, reimplementation: 'NOT_DEFINED', reRunSucceeded: true, evidence: 'ran it and it reproduces' }
 const CHALLENGE_WON = { challenge: 'the path is unreachable', rebuttal: 'the entry point drives it', winner: 'REBUTTAL', evidence: 'see the PoC setup' }
 const CHALLENGE_LOST = { challenge: 'the path is unreachable', rebuttal: 'none found', winner: 'CHALLENGE', evidence: 'the fixture constructs state no caller reaches' }
 const REPORT = { severity: 'Medium', severityRationale: 'ledger corruption behind an internal trust boundary', reportPath: '/w/finding-negative-rate.md', unproven: 'that the rate service can be made to misbehave' }

@@ -582,7 +582,7 @@ Three 2026-08-06 sweeps are checked in and were previously undocumented:
 |---|---|---|---|---:|---:|
 | `eval-result-2026-08-06-fp-check.json` | 2.1.222 | 7 x 3 x 2 | $21.49 | 0.598 | **+0.008** |
 | `eval-result-2026-08-06-fp-check-bap.json` | 2.1.223 | 1 x 3 x 2 | $3.05 | 0.600 | +0.000 |
-| `eval-result-2026-08-06-fp-check-v2-7case.json` | 2.1.223 | 7 x 3 x 2 | $31.71 | 0.781 | **+0.170** |
+| v2 7-case sweep (raw not retained) | 2.1.223 | 7 x 3 x 2 | $31.71 | 0.781 | **+0.170** |
 
 Per-case delta over the three most recent 7-case sweeps (v2 08-06, 08-06, 08-05),
 with the count of runs that produced **no answer** in each arm:
@@ -677,8 +677,7 @@ good the finding looks.
 ### The first valid delta (CLI 2.1.221, 2026-08-04)
 
 5 cases x 3 runs x 2 arms, `partial: false`, $17.90, 81 minutes, run with the
-command at the top of this section. Full result checked in at
-`fixtures/eval-result-2026-08-04.json` (plugin root and temp paths scrubbed).
+command at the top of this section. Raw result not retained — see the retention note in `MEASUREMENTS.md`.
 
 | Case | with | without | delta | pass rate with/without |
 |------|-----:|--------:|------:|-----------------------:|
@@ -963,8 +962,8 @@ fields before reading any aggregate.
 ### The first run that measured the plugin (2026-08-04, sonnet, pipeline live)
 
 CLI 2.1.221, **sonnet for both arms and for the judge**, 5 cases x 3 runs x
-2 arms, `partial: false`, **28 of 30 runs clean**, $28.79, 181 minutes. Full
-result at `fixtures/eval-result-2026-08-04-pipeline.json`. This is the first
+2 arms, `partial: false`, **28 of 30 runs clean**, $28.79, 181 minutes. Raw
+result not retained — see the retention note in `MEASUREMENTS.md`. This is the first
 sweep in which `Workflow` actually dispatched, so it is the first that measures
 the plugin rather than its prose.
 
