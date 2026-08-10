@@ -352,13 +352,13 @@ def test_tier1_merges_identical_file_line_and_class(tmp_path):
         tmp_path,
         {
             "review-unit-01": producing_part("review-unit-01", [raw_finding(confidence="Low")]),
-            "second-01": producing_part("second-01", [raw_finding(confidence="High")]),
+            "sweep-01": producing_part("sweep-01", [raw_finding(confidence="High")]),
         },
     )
     assert assemble(run_dir) == UNVERIFIED
     doc = load_doc(run_dir)
     keyed = by_key(doc)
-    primary = keyed["second-01#0"]
+    primary = keyed["sweep-01#0"]
     duplicate = keyed["review-unit-01#0"]
     assert doc["stats"]["merged"] == 1
     assert doc["stats"]["primaries"] == 1
@@ -1191,10 +1191,10 @@ def test_a_merged_duplicate_is_never_judged_or_left_unjudged(tmp_path, capsys):
         tmp_path,
         {
             "review-unit-01": producing_part("review-unit-01", [raw_finding(confidence="High")]),
-            "second-01": producing_part("second-01", [raw_finding(confidence="Low")]),
+            "sweep-01": producing_part("sweep-01", [raw_finding(confidence="Low")]),
             "verdict-01": {
                 "part_id": "verdict-01",
-                "verdicts": [verdict("review-unit-01#0"), verdict("second-01#0")],
+                "verdicts": [verdict("review-unit-01#0"), verdict("sweep-01#0")],
             },
         },
     )
@@ -1202,7 +1202,7 @@ def test_a_merged_duplicate_is_never_judged_or_left_unjudged(tmp_path, capsys):
     summary = json.loads(capsys.readouterr().out)
     assert summary["unjudged"] == 0
     assert summary["ignored_verdicts"] == 1
-    duplicate = by_key(load_doc(run_dir))["second-01#0"]
+    duplicate = by_key(load_doc(run_dir))["sweep-01#0"]
     # It is not judged and is not counted as unjudged — but it does not get to inherit
     # "nobody assigned this, so it must be fine" either. `primaries()` resurrects a
     # duplicate whose primary a judge rejects, and with no verdict at all the reviewer's
@@ -1787,6 +1787,25 @@ def test_an_unrecognised_part_is_counted_and_warned_about(tmp_path, capsys):
     assert assemble(run_dir) == UNVERIFIED
     captured = capsys.readouterr()
     assert "no rule reads part file(s) reviewunit02" in captured.err
+    assert json.loads(captured.out)["unrecognised_parts"] == 1
+    assert load_doc(run_dir)["stats"]["raw_findings"] == 1
+
+
+def test_a_part_from_the_removed_second_pass_is_unrecognised_not_read(tmp_path, capsys):
+    """`second-` outlived the second review pass in `PRODUCING_PREFIXES`, so a leftover
+    `second-*.json` in a reused run directory was read as this run's output. It is a stale
+    file, and a stale file that nothing dispatched has to be REPORTED — `unrecognised_parts`
+    is what SKILL.md surfaces — rather than quietly folded into the findings."""
+    run_dir = write_run(
+        tmp_path,
+        {
+            "review-unit-01": producing_part("review-unit-01", [raw_finding()]),
+            "second-01": producing_part("second-01", [raw_finding(line=999)]),
+        },
+    )
+    assert assemble(run_dir) == UNVERIFIED
+    captured = capsys.readouterr()
+    assert "no rule reads part file(s) second-01" in captured.err
     assert json.loads(captured.out)["unrecognised_parts"] == 1
     assert load_doc(run_dir)["stats"]["raw_findings"] == 1
 
@@ -2986,6 +3005,52 @@ def test_an_absolute_path_inside_the_scope_root_is_relativised(tmp_path):
     doc = load_doc(run_dir)
     assert {f["file"] for f in doc["findings"]} == {"src/a.c"}
     assert doc["stats"]["merged"] == 1
+
+
+def test_a_relative_scope_root_strips_both_of_its_spellings(tmp_path):
+    """`--scope src` used to be resolved here and nowhere else, so this side stripped
+    `/proj/src/` and the workflow's `normalizePath` — which has no filesystem APIs and got
+    the relative `src` — stripped `src/`. One bug filed as `a.c` (the unit id, since
+    `enumerate_units --root src` names units relative to the root) and `src/a.c` (the path
+    the reviewer read through `contextRoots: '.'`) was one primary in the workflow log and
+    two in findings.json, which is the disagreement the port exists to prevent.
+    """
+    run_dir = write_run(
+        tmp_path,
+        {
+            "review-unit-01": producing_part(
+                "review-unit-01",
+                [
+                    raw_finding(file="a.c"),
+                    raw_finding(file="src/a.c"),
+                    raw_finding(file="/proj/src/a.c"),
+                ],
+            )
+        },
+    )
+    assert assemble(run_dir, "--scope", "src", "--scope-abs", "/proj/src") == UNVERIFIED
+    doc = load_doc(run_dir)
+    assert {f["file"] for f in doc["findings"]} == {"a.c"}
+    assert doc["stats"]["merged"] == 2
+
+
+def test_an_explicitly_empty_scope_abs_is_honoured_rather_than_resolved(tmp_path):
+    """`--scope-abs ''` is the workflow saying "the skill did not resolve it, so I stripped
+    nothing absolute". Falling back to `Path(ns.scope).resolve()` on an empty value puts the
+    divergence straight back: this side would strip a root the workflow never saw."""
+    run_dir = write_run(
+        tmp_path,
+        {
+            "review-unit-01": producing_part(
+                "review-unit-01",
+                [raw_finding(file="a.c"), raw_finding(file=str(tmp_path / "src" / "a.c"))],
+            )
+        },
+    )
+    assert assemble(run_dir, "--scope", "src", "--scope-abs", "") == UNVERIFIED
+    doc = load_doc(run_dir)
+    assert {f["file"] for f in doc["findings"]} == {"a.c", str(tmp_path / "src" / "a.c")}
+    assert doc["stats"]["merged"] == 0
 
 
 def test_a_likely_tp_verdict_from_a_judge_is_honoured_rather_than_discarded(tmp_path):

@@ -39,6 +39,7 @@ import math
 import re
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,10 @@ import render_report  # noqa: E402
 # Part-file naming is the dispatch. A stem that matches none of these is not read, which is
 # why an unrecognised stem is counted and warned about rather than skipped in silence: a
 # misnamed part is one agent's entire output dropped, and it looks exactly like a clean run.
-PRODUCING_PREFIXES = ("review-", "second-", "invariant-", "sweep-")
+# No `second-`: the second review pass is gone from the workflow, so a `second-*.json` in a
+# run directory is a leftover from an earlier run and is counted as an unrecognised part —
+# reported — rather than read as this run's output.
+PRODUCING_PREFIXES = ("review-", "invariant-", "sweep-")
 DEDUP_PREFIX = "dedup-"
 VERDICT_PREFIX = "verdict-"
 
@@ -290,7 +294,7 @@ def _text(value: Any) -> str:
     return str(value)
 
 
-def normalize_path(value: Any, scope_root: str = "") -> str:
+def normalize_path(value: Any, scope_root: str | Sequence[str] = "") -> str:
     """Port of the workflow's `normalizePath`, plus containment against the scope root.
 
     Agents hand back `[src/parse.c](src/parse.c)`, `./src/parse.c` and `src//parse.c` for the
@@ -301,6 +305,15 @@ def normalize_path(value: Any, scope_root: str = "") -> str:
     they merge with neither: the same bug is reported three times, and a code-scanning UI
     cannot resolve an absolute `uri` under a `%SRCROOT%` base id. So an absolute path inside
     the scope root is relativised against it, and `.`/`..` segments are folded away.
+
+    `scope_root` is a SEQUENCE because the scope root has two spellings and findings arrive
+    in both. `enumerate_units.py --root src` names units relative to `src`, so a reviewer
+    cites `parse.c`; the same reviewer reading through `context_roots: .` cites
+    `src/parse.c`; a tool-emitted path is `/repo/src/parse.c`. Stripping only the absolute
+    form — which is what `Path(ns.scope).resolve()` alone gives when `--scope` is the
+    relative `src` — leaves the middle spelling unmerged HERE while the workflow's
+    `normalizePath`, which is handed the same two roots, merges it: the workflow log then
+    reports one primary over a findings.json holding two.
     """
     text = str("" if value is None else value).replace("\\", "/").strip()
     link = MARKDOWN_LINK.fullmatch(text)
@@ -308,9 +321,27 @@ def normalize_path(value: Any, scope_root: str = "") -> str:
         text = link.group(1)
     while "//" in text:
         text = text.replace("//", "/", 1)
-    root = str(scope_root or "").replace("\\", "/").rstrip("/")
-    if root and text.startswith(root + "/"):
-        text = text[len(root) + 1 :]
+    text = _fold_segments(text)
+    roots = [scope_root] if isinstance(scope_root, str) else list(scope_root)
+    for candidate in roots:
+        # The root is folded too, so a caller passing `./src` strips the same as `src`.
+        root = _fold_segments(str(candidate or "").replace("\\", "/").rstrip("/"))
+        if root and text.startswith(root + "/"):
+            text = text[len(root) + 1 :]
+            break
+    return text
+
+
+def _fold_segments(text: str) -> str:
+    """Resolve `.` and `..` segments, keeping any leading `/`.
+
+    Run BEFORE the scope root is stripped, not after. Stripping first leaves `./src/parse.c`
+    unmatched against a root of `src` — the `./` is still on the front — so it folds to
+    `src/parse.c` while its siblings fold to `parse.c`, and the one file is two findings. The
+    docstring above names `./src/parse.c` as a spelling this collapses, so the order is the
+    whole of that promise. `normalizePath` in the workflow does the same two steps in the
+    same order.
+    """
     parts: list[str] = []
     for segment in text.split("/"):
         if segment == "." or (segment == "" and parts):
@@ -484,7 +515,7 @@ def _dropped(value: Any) -> bool:
 
 
 def normalize_finding(
-    raw: dict[str, Any], part_id: str, key: str, scope_root: str = ""
+    raw: dict[str, Any], part_id: str, key: str, scope_root: str | Sequence[str] = ""
 ) -> dict[str, Any]:
     """One part-file finding as it appears in findings.json.
 
@@ -826,7 +857,7 @@ def collect(
     parts: list[tuple[str, dict[str, Any]]],
     benchmark_mode: bool = False,
     returned_external: dict[str, bool] | None = None,
-    scope_root: str = "",
+    scope_root: str | Sequence[str] = "",
 ) -> Collected:
     """Split the parts by role and normalise every producing part's findings.
 
@@ -1557,6 +1588,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--severity-filter", required=True, choices=["all", "medium", "high"])
     parser.add_argument("--scope", default=".")
+    parser.add_argument(
+        "--scope-abs",
+        default=None,
+        dest="scope_abs",
+        help=(
+            "the absolute spelling of --scope, resolved by the CALLER. The workflow's "
+            "`normalizePath` cannot touch the filesystem, so resolving `src` here instead "
+            "would leave the two normalisers stripping different strings and disagreeing "
+            "about which findings merge. Pass it empty to say no absolute root is known. "
+            "Omitted entirely (hand re-assembly), --scope is resolved against the cwd."
+        ),
+    )
     parser.add_argument("--context-roots", default=".")
     parser.add_argument("--worker-model", default="inherit")
     parser.add_argument("--judge-mode", default="batched")
@@ -1610,10 +1653,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     ns = parser.parse_args(argv)
 
-    try:
-        scope_root = str(Path(ns.scope).resolve())
-    except OSError:
-        scope_root = ns.scope
+    # Both spellings, absolute first, and never one derived here when the caller named it:
+    # the workflow strips exactly this pair and the two sides have to stay identical.
+    if ns.scope_abs is None:
+        try:
+            scope_abs = str(Path(ns.scope).resolve())
+        except OSError:
+            scope_abs = ns.scope
+    else:
+        scope_abs = ns.scope_abs
+    scope_root = tuple(dict.fromkeys(r for r in (scope_abs, ns.scope) if r))
     try:
         parts = load_parts(ns.run_dir)
         check_expectations(ns.expect, parts, ns.run_dir, ns.agent_failure)

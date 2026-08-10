@@ -754,7 +754,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     ns = parser.parse_args(argv)
 
-    prefixes = tuple(ns.prefix) if ns.prefix else ("review-", "invariant-", "sweep-", "second-")
+    # No `second-`: no phase writes one any more. This gate has no `--expect` allowlist, so
+    # a `second-*.json` left in a reused run directory would have its ledger rows counted as
+    # this run's coverage.
+    prefixes = tuple(ns.prefix) if ns.prefix else ("review-", "invariant-", "sweep-")
     try:
         units_doc = _load_json(ns.run_dir / "units.json")
         if not isinstance(units_doc, dict):

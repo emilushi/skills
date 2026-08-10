@@ -123,6 +123,13 @@ const PLUGIN_ROOT = text('pluginRoot')
 const THREAT_MODEL = text('threatModel').toUpperCase()
 const SEVERITY_FILTER = text('severityFilter').toLowerCase()
 const SCOPE = text('findingScopeRoot', '.')
+// The same directory, spelled absolutely. A Workflow script has no filesystem APIs, so it
+// cannot resolve `src` itself — SKILL.md does it with Bash and passes both. Without it the
+// assembler resolves `--scope` on its own and the two normalisers strip DIFFERENT strings:
+// `/repo/src/parse.c` and `parse.c` merge there and not here, so the workflow log and
+// findings.json disagree about the merge graph. Empty means "no absolute root known", and
+// the assembler is told that explicitly rather than left to guess.
+const SCOPE_ABS = optional('findingScopeRootAbs', 'string') || ''
 const CONTEXT_ROOTS = text('contextRoots', '.')
 // Through `optional` like every other optional arg: uncoerced, `workerModel: 5` becomes
 // the string "5" and reaches every agent as `opts.model` and the assembler as
@@ -1466,6 +1473,9 @@ function assemblePrompt(expected, complete, external, groupsAttempted, groupsFai
     '--threat-model ' + shq(THREAT_MODEL),
     '--severity-filter ' + shq(SEVERITY_FILTER),
     '--scope ' + shq(SCOPE),
+    // Always passed, empty included: omitting it lets the assembler resolve `--scope`
+    // against its own cwd and strip a root `normalizePath` above never saw.
+    '--scope-abs ' + shq(SCOPE_ABS),
     '--context-roots ' + shq(CONTEXT_ROOTS),
     '--worker-model ' + shq(WORKER_MODEL || 'inherit'),
     // The declaration is only asked for in benchmark mode, so only benchmark mode may
@@ -1589,8 +1599,26 @@ function normalizePath(p) {
   const link = s.match(/^\[([^\]]+)\]\([^)]*\)$/)
   if (link) s = link[1]
   while (s.indexOf('//') !== -1) s = s.replace('//', '/')
-  const root = SCOPE.replace(/\\/g, '/').replace(/\/+$/, '')
-  if (root && s.startsWith(root + '/')) s = s.slice(root.length + 1)
+  // Absolute spelling first, then the relative one, exactly as the assembler orders them.
+  // Both are needed: with `findingScopeRoot: 'src'` a reviewer cites `parse.c` (unit ids are
+  // relative to the scope root), `src/parse.c` (what it reads through `contextRoots: .`) and
+  // `/repo/src/parse.c` (what a tool printed) for one file.
+  // Fold `.`/`..` BEFORE stripping the root, and fold the root the same way. Stripping
+  // first leaves `./src/parse.c` unmatched against a root of `src` — the `./` is still on
+  // the front — so it lands on `src/parse.c` while `src/parse.c` and `/repo/src/parse.c`
+  // land on `parse.c`, and one file is two findings. `normalize_path` orders it the same.
+  s = foldSegments(s)
+  for (const candidate of [SCOPE_ABS, SCOPE]) {
+    const root = foldSegments(String(candidate || '').replace(/\\/g, '/').replace(/\/+$/, ''))
+    if (root && s.startsWith(root + '/')) {
+      s = s.slice(root.length + 1)
+      break
+    }
+  }
+  return s
+}
+
+function foldSegments(s) {
   const parts = []
   for (const segment of s.split('/')) {
     if (segment === '.' || (segment === '' && parts.length)) continue

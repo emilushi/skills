@@ -462,23 +462,94 @@ def _js_eval(prelude: str, expr: str):
     return json.loads(out)
 
 
-def test_the_workflow_path_normaliser_matches_the_assemblers():
-    """The scope-root relativisation and the `.`/`..` folding have to be on both sides. With
-    them only in the Python `normalize_path`, two reviewers filing one bug at
-    `src/parse.c:142` and `/proj/src/parse.c:142` are merged by the assembler — which owns
-    findings.json — and seen as two different files here: `collisionBuckets` groups by file,
-    so the pair never shares a bucket, the dedup agent is never shown it, and
-    `stats.primaries` returns 2 over a document of 1.
+NORMALISER_SPELLINGS = (
+    "src/a.c",
+    "a.c",
+    "/proj/src/a.c",
+    "/proj/src/./a.c",
+    "src/x/../a.c",
+    "[src/a.c](src/a.c)",
+    "src//a.c",
+    "./src/a.c",
+    "./src/./a.c",
+    "./a.c",
+    "../a.c",
+    "/other/a.c",
+    "",
+)
+
+
+@pytest.mark.parametrize(
+    ("scope", "scope_abs"),
+    [
+        # The configuration a real run uses: `findingScopeRoot` is documented as
+        # REPO-RELATIVE, and it is the one the old pin (`SCOPE = '/proj'`) could not see,
+        # because an absolute scope root is the single case in which stripping only one
+        # spelling happens to agree with stripping both.
+        ("src", "/proj/src"),
+        (".", "/proj"),
+        ("src", ""),  # the skill did not resolve it: both sides must degrade the same way
+        ("/proj/src", "/proj/src"),
+    ],
+)
+def test_the_workflow_path_normaliser_matches_the_assemblers(scope, scope_abs):
+    """Same input, same two roots, same output — checked against the REAL `normalize_path`
+    rather than against a hand-written expectation, because the two implementations drifting
+    apart is the whole failure mode.
+
+    `normalizePath` used to strip `SCOPE` exactly as the caller passed it while `main()`
+    handed the assembler `str(Path(ns.scope).resolve())`, so with `findingScopeRoot: 'src'`
+    reviewer A's `src/a.c` and reviewer B's `a.c` were one file here and two in findings.json:
+    `collisionBuckets` groups by file, `tier1` merged the pair and reported
+    `stats.primaries: 1` over a REPORT.md holding 2.
     """
-    prelude = "const SCOPE = '/proj';\n" + _js_function("normalizePath")
-    for raw, expected in (
-        ("/proj/src/a.c", "src/a.c"),
-        ("src/./a.c", "src/a.c"),
-        ("src/x/../a.c", "src/a.c"),
-        ("[src/a.c](src/a.c)", "src/a.c"),
-        ("src//a.c", "src/a.c"),
+    import assemble_findings
+
+    roots = tuple(dict.fromkeys(r for r in (scope_abs, scope) if r))
+    prelude = (
+        "const SCOPE = " + json.dumps(scope) + ";\n"
+        "const SCOPE_ABS = "
+        + json.dumps(scope_abs)
+        + ";\n"
+        + _js_function("normalizePath")
+        + _js_function("foldSegments")
+    )
+    for raw in NORMALISER_SPELLINGS:
+        js = _js_eval(prelude, "normalizePath(" + json.dumps(raw) + ")")
+        py = assemble_findings.normalize_path(raw, roots)
+        assert js == py, (scope, scope_abs, raw, js, py)
+
+
+def test_the_normaliser_folds_every_spelling_of_one_file_under_a_relative_scope_root():
+    """The equivalence test above passes if BOTH sides are broken identically, so pin the
+    values too: under `findingScopeRoot: 'src'` all three spellings a reviewer can reach for
+    — the unit id (`enumerate_units --root src` names units relative to `src`), the path it
+    read through `contextRoots: '.'`, and the absolute one a tool printed — are one file.
+
+    Both sides are pinned here, not just the JS: this is the only test that would notice the
+    two agreeing on a wrong value."""
+    import assemble_findings
+
+    prelude = (
+        "const SCOPE = 'src';\nconst SCOPE_ABS = '/proj/src';\n"
+        + _js_function("normalizePath")
+        + _js_function("foldSegments")
+    )
+    for raw in (
+        "a.c",
+        "src/a.c",
+        "/proj/src/a.c",
+        "[src/a.c](src/a.c)",
+        "src//a.c",
+        # `./src/a.c` needs the `.` folded BEFORE the root is stripped. Stripping first
+        # leaves the `./` on the front, nothing matches a root of `src` or `/proj/src`, and
+        # this one spelling lands on `src/a.c` while every sibling lands on `a.c`.
+        "./src/a.c",
+        "./src/./a.c",
+        "/proj/src/../src/a.c",
     ):
-        assert _js_eval(prelude, "normalizePath(" + json.dumps(raw) + ")") == expected, raw
+        assert _js_eval(prelude, "normalizePath(" + json.dumps(raw) + ")") == "a.c", raw
+        assert assemble_findings.normalize_path(raw, ("/proj/src", "src")) == "a.c", raw
 
 
 def test_a_required_arg_of_the_wrong_type_throws_instead_of_stringifying():

@@ -27,7 +27,7 @@ from check_ledger import (  # noqa: E402
     main,
 )
 
-PREFIXES = ("review-", "invariant-", "sweep-", "second-")
+PREFIXES = ("review-", "invariant-", "sweep-")
 UID = "src/parse.c:1-40"
 WRITES = [10, 20, 30]
 CONVERSIONS = [15]
@@ -200,16 +200,39 @@ def test_fully_accounted_ledger_is_100_percent_with_no_violations(tmp_path):
     assert rep["verdict_counts"] == {"clean": 2}
 
 
-def test_all_four_part_prefixes_are_read(tmp_path):
+def test_all_three_part_prefixes_are_read(tmp_path):
     parts = {
         "review-1": {"ledger": [row()]},
         "invariant-1": {"ledger": [row(question="integer")]},
         "sweep-1": {"ledger": []},
-        "second-1": {"ledger": []},
     }
     rep = report(build(tmp_path / "run", parts=parts))
-    assert rep["parts_read"] == ["invariant-1", "review-1", "second-1", "sweep-1"]
+    assert rep["parts_read"] == ["invariant-1", "review-1", "sweep-1"]
     assert rep["checks_completed"] == 2
+
+
+def test_a_part_from_the_removed_second_pass_grants_no_coverage(tmp_path, capsys):
+    """`second-` stayed in the default prefix list after the second review pass was removed
+    from the workflow, so no phase writes one any more. This gate has no `--expect`
+    allowlist — unlike the assembler — so a `second-*.json` left behind in a reused run
+    directory had its rows counted as THIS run's coverage, clearing (unit, question) cells
+    nothing in this run ever looked at.
+
+    Through `main` on purpose: `report()` above passes this file's own `PREFIXES`, so a test
+    written against it would pin the fixture and leave the CLI default free to say anything.
+    """
+    parts = {
+        "review-1": {"ledger": [row()]},
+        "second-1": {"ledger": [row(question="integer")]},
+    }
+    run = build(tmp_path / "run", parts=parts)
+    assert main(["--run-dir", str(run), "--strict"]) == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["parts_read"] == ["review-1"]
+    assert summary["checks_completed"] == 1
+    # And it is still reachable when a caller asks for it by name.
+    assert main(["--run-dir", str(run), "--prefix", "review-", "--prefix", "second-"]) == 0
+    assert json.loads(capsys.readouterr().out)["checks_completed"] == 2
 
 
 # ------------------------------------------------------------------ violations
@@ -365,18 +388,19 @@ def test_duplicate_rows_keep_the_fuller_account_and_count_once(tmp_path):
         assert rep["violations"] == [], name
 
 
-def test_a_second_pass_that_fills_the_population_clears_the_violation(tmp_path):
+def test_a_later_part_that_fills_the_population_clears_the_violation(tmp_path):
     # `check()` collects every candidate row and scores them before judging any, so the
     # violation a thin row appends is retracted when a fuller row supersedes it. Judging as
     # it goes makes identical ledger content give two verdicts depending on the alphabetical
-    # order of part filenames — and thin-first is the ordering a real second pass produces,
-    # so under --strict the second pass could never clear the gate it exists to clear. Both
-    # orderings below must stay clean; if one goes red, judge-as-you-go is back.
+    # order of part filenames — and thin-first is the ordering a sweep covering a unit a
+    # reviewer only partly answered produces, so under --strict it could never clear the gate
+    # it exists to clear. Both orderings below must stay clean; if one goes red,
+    # judge-as-you-go is back.
     thin = row(verdict="finding", accounted=[20], evidence="overflow at 20")
     full = row(evidence="all three writes bounded")
     orderings = {
-        "thin-first": {"review-1": {"ledger": [thin]}, "second-1": {"ledger": [full]}},
-        "full-first": {"review-1": {"ledger": [full]}, "second-1": {"ledger": [thin]}},
+        "thin-first": {"review-1": {"ledger": [thin]}, "sweep-1": {"ledger": [full]}},
+        "full-first": {"review-1": {"ledger": [full]}, "sweep-1": {"ledger": [thin]}},
     }
     seen_kinds = {}
     for name, parts in orderings.items():

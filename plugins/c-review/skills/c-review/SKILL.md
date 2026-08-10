@@ -40,17 +40,33 @@ Two scopes stay separate for the whole run:
 
 ```bash
 root="${CLAUDE_PLUGIN_ROOT:-}"
-[ -n "$root" ] && [ -f "$root/workflows/c-review.js" ] && echo "$root"
-# Fallback for a local checkout or a cache layout that does not set the variable:
-find ~/.claude . -path '*/c-review/workflows/c-review.js' -print -quit 2>/dev/null
+if [ -z "$root" ] || [ ! -f "$root/workflows/c-review.js" ]; then
+  # Fallback for a cache layout that does not set the variable. ~/.claude ONLY — never `.`:
+  # `.` is the AUDITED repository, and a tree that vendors or mirrors this marketplace would
+  # win the traversal and run its copy of the scripts, with a different question set and
+  # nothing saying which copy ran. Let find's stderr through; a missing ~/.claude is a real
+  # failure to report, not noise to hide.
+  hit="$(find "$HOME/.claude" -path '*/c-review/workflows/c-review.js' -print -quit)"
+  root="${hit%/workflows/c-review.js}"
+fi
+[ -n "$root" ] && [ -f "$root/workflows/c-review.js" ] && echo "PLUGIN ROOT: $root"
 ```
 
-Stop if neither resolves, rather than running with an empty path.
+Stop if neither resolves, rather than running with an empty path — and say which path you
+resolved, so a copy other than the installed plugin is visible before eight agents run
+against it.
 
 ```bash
 # The workflow cannot call Date.now(), so the timestamp is made here.
 output_dir="$(pwd)/.c-review-results/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$output_dir"; echo "$output_dir"
+
+# A Workflow script has no filesystem APIs, and `assemble_findings.py` resolves `--scope`
+# against ITS OWN cwd. Resolve it once here and pass BOTH spellings, or the workflow strips
+# `src/` from a finding's path while the assembler strips `/repo/src/`, and the two disagree
+# about which findings are duplicates of each other.
+scope_abs="$(cd "${scope_subpath:-.}" && pwd)" || echo "scope_subpath does not exist"
+echo "$scope_abs"
 ```
 
 `uv` must be on PATH: Detect runs the unit enumerator and Assemble runs
@@ -76,11 +92,16 @@ Workflow({
     threatModel:      "REMOTE",
     severityFilter:   "all",
     findingScopeRoot: "expat/lib",
+    findingScopeRootAbs: "/abs/path/to/repo/expat/lib",
     contextRoots:     ".",
     workerModel:      "sonnet"
   }
 })
 ```
+
+`findingScopeRootAbs` is the `scope_abs` from Phase 1 and is not optional in practice:
+omitted, the workflow tells the assembler no absolute root is known and a finding filed as
+`/repo/expat/lib/xmlparse.c` stops merging with the same bug filed as `xmlparse.c`.
 
 Five further arguments are optional. Omitted, each takes its default; passed with the
 wrong TYPE, the workflow throws with the field name rather than defaulting. Pass them
@@ -145,8 +166,8 @@ uv run <plugin_root>/scripts/assemble_findings.py --run-dir <output_dir> \
   `parts/`, including one nobody dispatched, and the run exits **1** for that reason
   alone. If you cannot recover the counts from the workflow log, exit 1 is correct and
   the run is assembled-but-unverified.
-- **Never drop `--no-judge`.** It overwrites every reviewer severity with MEDIUM and
-  records `judge_ran: true` for a run no judge ever saw.
+- **Never drop `--no-judge`.** Dropping it overwrites every reviewer severity with MEDIUM
+  and records `judge_ran: true` for a run no judge ever saw.
 - Six flags cannot be reconstructed at all (`--expect-complete`, `--benchmark-mode`,
   `--groups-attempted`, `--groups-failed`, `--agent-failure`, `--external-source`), so
   the document will say `agent_failures: []` on a run that may have lost a slice. Report

@@ -13,6 +13,7 @@ the pipeline measures, which is worse than the refusal it replaced.
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 import shutil
@@ -164,6 +165,10 @@ def test_shq_survives_an_embedded_single_quote_and_a_command_substitution(tmp_pa
         ("benchmarkMode", "true"),
         ("invariantAudit", "true"),
         ("maxUnitLines", True),
+        # Coerced, `findingScopeRootAbs: ['/a']` reaches `normalizePath` as `/a` and the
+        # assembler as a `--scope-abs` operand nothing starts with, silently halving the
+        # spellings both sides fold.
+        ("findingScopeRootAbs", ["/a"]),
     ],
 )
 def test_a_wrong_typed_optional_arg_is_refused_not_silently_defaulted(key, value, tmp_path):
@@ -408,6 +413,45 @@ def test_assignment_ids_is_required_by_the_detect_schema():
     block = src[src.index("const DETECT_SCHEMA = {") : src.index("const LEDGER_ROW = {")]
     required = block[block.index("required: [") : block.index("],", block.index("required: ["))]
     assert "'assignment_ids'" in required
+
+
+# -------------------------------------------------- what SKILL.md has to hand the workflow
+
+SKILL_MD = Path(__file__).resolve().parents[1] / "skills" / "c-review" / "SKILL.md"
+
+
+def test_the_skill_resolves_the_scope_root_the_workflow_cannot():
+    """A Workflow script has no filesystem APIs, so `findingScopeRootAbs` is the only route by
+    which the absolute spelling of the scope root reaches `normalizePath`. Drop it from the
+    example and every run goes back to folding one spelling: with `findingScopeRoot: 'src'`,
+    `/repo/src/a.c` and `a.c` stop being the same file and one bug is reported twice."""
+    doc = SKILL_MD.read_text(encoding="utf-8")
+    # The CALL, not the prose around it: a paragraph explaining the argument keeps a
+    # whole-document substring check green over an example that stopped passing it.
+    start = doc.index("Workflow({")
+    call = doc[start : doc.index("})", start)]
+    assert "findingScopeRootAbs:" in call, call
+    assert "scope_abs=" in doc, "Phase 1 no longer resolves the scope root with Bash"
+    assert "findingScopeRootAbs" in WORKFLOW.read_text(encoding="utf-8")
+
+
+def test_the_plugin_root_fallback_never_searches_the_audited_tree():
+    """`find ~/.claude . -path '*/c-review/workflows/c-review.js' -print -quit` takes the
+    FIRST hit in traversal order, and `.` is the repository under audit: a tree that vendors
+    or mirrors this marketplace runs its own copy of the scripts — a different site-kind
+    table and question set — and nothing reports which copy ran. The `2>/dev/null` on it also
+    hid a missing search root, which is a failure to report and not noise."""
+    lines = [
+        ln
+        for ln in SKILL_MD.read_text(encoding="utf-8").splitlines()
+        if "find " in ln and "c-review.js" in ln
+    ]
+    assert lines, "SKILL.md no longer resolves the plugin root by search"
+    for line in lines:
+        args = line[line.index("find ") + len("find ") :].split()
+        roots = list(itertools.takewhile(lambda a: not a.startswith("-"), args))
+        assert roots in (['"$HOME/.claude"'], ["~/.claude"]), line
+        assert "2>/dev/null" not in line, line
 
 
 if __name__ == "__main__":

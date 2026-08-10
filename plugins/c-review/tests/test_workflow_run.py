@@ -230,6 +230,44 @@ def test_every_producing_prompt_carries_the_evidence_rule(tmp_path):
 # ------------------------------------------------------------ the assemble command
 
 
+def test_both_spellings_of_the_scope_root_reach_the_assembler(tmp_path):
+    """`normalizePath` cannot resolve `src` — a Workflow script has no filesystem APIs — so
+    the assembler must be told the absolute spelling instead of resolving `--scope` itself.
+    Drop `--scope-abs` and the assembler falls back to `Path('src').resolve()`, a root this
+    side never saw: `/proj/src/a.c` and `a.c` merge there and not here.
+    """
+    got = run(tmp_path, args={"findingScopeRoot": "src", "findingScopeRootAbs": "/proj/src"})
+    cmd = assemble_command(got)
+    assert "--scope 'src'" in cmd, cmd
+    assert "--scope-abs '/proj/src'" in cmd, cmd
+    # Empty is PASSED, not omitted: omitting it hands the assembler back the resolution the
+    # workflow could not do, and the two normalisers diverge again.
+    empty = assemble_command(run(tmp_path, args={"findingScopeRoot": "src"}))
+    assert "--scope-abs ''" in empty, empty
+
+
+def test_a_bug_filed_under_three_spellings_of_the_scope_root_is_one_primary(tmp_path):
+    """The whole point of the port. With `findingScopeRoot: 'src'` a reviewer can file the
+    unit id (`a.c`, since `enumerate_units --root src` names units relative to the root), the
+    path it read through `contextRoots: '.'` (`src/a.c`) and the absolute one a tool printed
+    (`/proj/src/a.c`) for one bug. `collisionBuckets` groups by file, so anything short of
+    folding all three leaves `tier1` with three separate findings.
+    """
+    got = run(
+        tmp_path,
+        {
+            "review:unit-01": review(
+                [finding(file="a.c"), finding(file="src/a.c"), finding(file="/proj/src/a.c")]
+            ),
+            "review:unit-02": review([]),
+        },
+        args={"findingScopeRoot": "src", "findingScopeRootAbs": "/proj/src"},
+    )
+    assert got["ok"], got.get("error")
+    assert got["result"]["stats"]["raw_findings"] == 3
+    assert got["result"]["stats"]["primaries"] == 1, got["result"]["stats"]
+
+
 def test_expect_carries_the_count_the_workflow_received_through_the_schema(tmp_path):
     """`--expect ID=COUNT` is the only cross-check between the findings the workflow was
     handed through the schema and the findings that reached disk. Nothing else fails when
