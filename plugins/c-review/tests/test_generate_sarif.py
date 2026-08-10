@@ -371,6 +371,21 @@ def test_a_duplicate_whose_primary_survives_is_still_skipped():
     assert [f["id"] for f in findings_model.primaries(document)] == ["DUP-B"]
 
 
+def test_a_duplicate_whose_primary_is_not_in_the_document_is_still_reported():
+    """The `not carriers` term, which nothing else in the suite pinned.
+
+    `merged_into` naming an id no finding carries is a broken merge graph, and the finding
+    it points at cannot represent it because it is not there. Without this term the finding
+    is skipped as "already represented" and appears in NO artifact — not REPORT.md, not
+    SARIF, not the reported set — which is the precise loss `primaries` was split out of
+    the renderers to prevent.
+    """
+    document = doc([finding(id="DUP-A", severity="CRITICAL", merged_into="GHOST")])
+    assert [f["id"] for f in findings_model.primaries(document)] == ["DUP-A"]
+    assert [f["id"] for f in reported_findings(document)] == ["DUP-A"]
+    assert [r["ruleId"] for r in build_sarif(document)["runs"][0]["results"]] == ["buffer-overflow"]
+
+
 def test_the_coverage_blind_spot_reaches_both_artifacts():
     """A unit whose parse counted no site owes no row, so it is in neither the numerator
     nor the denominator — a quarter of the lines on a real tree, and `coverage_pct: 100.0`

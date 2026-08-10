@@ -485,5 +485,120 @@ def test_nearby_findings_in_one_function_are_merged_without_an_agent(tmp_path):
     assert got["result"]["stats"]["merged"] == 1
 
 
+# ------------------------------------------------------- the coverage stories
+
+
+def _gated_classes():
+    """Every class id sitting in a group behind a platform gate, read from the module."""
+    src = WORKFLOW.read_text(encoding="utf-8")
+    groups = src[src.index("const GROUPS = ") : src.index("\n]", src.index("const GROUPS = ")) + 2]
+    out = subprocess.run(
+        [
+            "node",
+            "-e",
+            "var "
+            + groups.removeprefix("const ")
+            + ";console.log(JSON.stringify("
+            + "GROUPS.filter((g) => g.gate).flatMap((g) => g.classes)))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    ids = json.loads(out.stdout)
+    assert len(ids) >= 10, f"only {len(ids)} platform-gated class(es); the gates moved"
+    return ids
+
+
+def test_a_platform_gate_records_the_classes_it_removed(tmp_path):
+    """`continue` on a gated GROUP skipped it before the per-class filter could record it.
+
+    On a plain C/POSIX target that is 17 of 56 classes in NONE of `platformDroppedClasses`,
+    `silentClasses` or `ruledOutClasses` — while `platformDroppedClasses` reads as the field
+    that would have said so. The count is the whole point: `[]` means "the platform gate
+    dropped nothing", which is what a reader is entitled to conclude from it.
+    """
+    got = run(tmp_path, detect={**DETECT, "is_cpp": False, "is_windows": False})
+    dropped = got["result"]["platformDroppedClasses"]
+    unaccounted = [c for c in _gated_classes() if not any(d.startswith(c + " ") for d in dropped)]
+    assert unaccounted == [], f"{len(unaccounted)} gated class(es) in no coverage story"
+    assert any("not a C++ target" in d for d in dropped), dropped
+    assert any("not a Windows target" in d for d in dropped), dropped
+    # Recorded AND removed. Recording without skipping — the group still reaching `selected`
+    # — sends a C reviewer hunting `dll-planting`, and reports it as dropped at the same time.
+    swept = [c["prompt"] for c in got["calls"] if c["label"] == "sweep:classes"]
+    if swept:
+        assert "smart-pointer" not in swept[0] and "dll-planting" not in swept[0]
+
+
+def test_a_cpp_windows_target_keeps_the_classes_a_plain_c_target_drops(tmp_path):
+    """The negative half: without it, `dropped.push` over every group would pass the test
+    above while removing the classes from `selected` as well."""
+    got = run(tmp_path, detect={**DETECT, "is_cpp": True, "is_windows": True})
+    dropped = got["result"]["platformDroppedClasses"]
+    for reason in ("not a C++ target", "not a Windows target"):
+        assert not any(reason in d for d in dropped), dropped
+    swept = [c["prompt"] for c in got["calls"] if c["label"] == "sweep:classes"]
+    assert swept, "no class sweep was dispatched"
+    assert "smart-pointer" in swept[0] and "dll-planting" in swept[0]
+
+
+@pytest.mark.parametrize(
+    ("required", "satisfied", "accepted"),
+    [(8, 8, True), (0, 0, False), (8, 7, False)],
+)
+def test_a_gate_that_measured_nothing_is_not_a_gate_that_passed(
+    tmp_path, required, satisfied, accepted
+):
+    """`checksRequired !== null` alone let `0 === 0` through.
+
+    A run reporting `checks_required: 0` returned `gateAccepted: true` with
+    `artifactError: null` — the two fields SKILL.md tells the reader to decide
+    verified-vs-unverified from — while the log line four blocks up said nothing had been
+    verified against the unit parse. `ok` and both counts are the assemble agent's
+    transcription of an exit code, which is why they are cross-checked here at all.
+    """
+    got = run(
+        tmp_path,
+        {
+            "assemble": {
+                **ASSEMBLED,
+                "checks_required": required,
+                "checks_completed": required,
+                "checks_satisfied": satisfied,
+            }
+        },
+    )
+    assert got["result"]["gateAccepted"] is accepted
+    assert (got["result"]["artifactError"] is None) is accepted
+    if not accepted:
+        assert got["result"]["artifactError"]
+
+
+def test_a_sweep_that_produced_findings_is_not_a_failed_group(tmp_path):
+    """`groupsFailed` is `silentByGroup`, never `groupsAttempted.slice()`.
+
+    Pinned behaviourally: the source-text assertion in test_workflow_sweep.py passes against
+    a `groupsFailed.push(...groupsAttempted)` appended one line later, and the subset
+    assertion above satisfies that regression too.
+    """
+    got = run(tmp_path, {"sweep:classes": review([finding(bug_class="use-after-free")])})
+    assert got["result"]["groupsAttempted"], "no groups were attempted"
+    assert got["result"]["groupsFailed"] == []
+
+
+def test_a_dedup_agent_that_returned_nothing_is_not_counted(tmp_path):
+    """`dedupAgents` is set after the await, so a dead dedup agent counts 0.
+
+    The grep in test_workflow_sweep.py sees `if (res) dedupAgents = 1` and passes against an
+    unconditional `dedupAgents = 1` on the next line.
+    """
+    live = run(tmp_path, _colliding())
+    assert live["result"]["stats"]["dedup_agents"] == 1, "the dedup agent was never dispatched"
+    dead = run(tmp_path, _colliding(dedup=None))
+    assert dead["result"]["stats"]["dedup_agents"] == 0
+    assert any("dedup-agent" in f for f in dead["result"]["agentFailures"])
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

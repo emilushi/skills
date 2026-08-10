@@ -1553,8 +1553,17 @@ function selectGroups(detect) {
   const selected = []
   const dropped = []
   for (const group of GROUPS) {
-    if (group.gate === 'is_cpp' && !detect.is_cpp) continue
-    if (group.gate === 'is_windows' && !detect.is_windows) continue
+    // Recorded, not just skipped. A `continue` here drops the whole group before the
+    // per-class filter below can push anything, so its classes reach neither `selected`
+    // nor `dropped` — 17 of 56 vanish on a plain C/POSIX target while
+    // `platformDroppedClasses` reads `[]`, which says the platform gate dropped nothing.
+    const gateFailed = (group.gate === 'is_cpp' && !detect.is_cpp) ? 'not a C++ target'
+      : (group.gate === 'is_windows' && !detect.is_windows) ? 'not a Windows target'
+      : null
+    if (gateFailed) {
+      for (const id of group.classes) dropped.push(id + ' (' + gateFailed + ')')
+      continue
+    }
     const classIds = group.classes.filter((id) => {
       const c = CLASSES[id]
       const why = c.posix && !detect.is_posix ? 'not a POSIX target'
@@ -2382,11 +2391,18 @@ if (unrecognisedParts === null) {
 // `artifactsWritten` is in the conjunction for the same reason the two counts are: a gate
 // that accepted a ledger whose report is not on disk has certified nothing a reader can
 // open, so `artifacts_written: false` beside `ok: true` is not an accepted gate.
+// `checksRequired > 0` and not merely `!== null`: 0 === 0 satisfies the equality below, so
+// a gate that measured NOTHING returned `gateAccepted: true` with `artifactError: null` —
+// while the branch at the top of this section logs that nothing was verified. An honest
+// assembler cannot produce it (`check_ledger.check` raises on an empty `owed`), but `ok`
+// and both counts are the assemble agent's transcription and nothing verifies them, which
+// is the same reason the two counts are compared here at all.
 const gateAccepted = !!(
   assembled &&
   assembled.ok &&
   artifactsWritten &&
   checksRequired !== null &&
+  checksRequired > 0 &&
   checksSatisfied === checksRequired
 )
 // `artifactError` carries a reason for every failure the checks above can reach; deriving
@@ -2399,6 +2415,9 @@ const gateError = !assembled
         'REPORT.sarif are not all in ' + OUTPUT_DIR
       : checksRequired === null
         ? 'the assemble agent returned no coverage numbers, so the gate is unmeasured'
+        : checksRequired === 0
+          ? 'the assemble agent reported ok with 0 required checks, so nothing was ' +
+            'verified against the unit parse'
         : checksSatisfied !== checksRequired
           ? 'the assemble agent reported ok with ' + checksSatisfied + ' of ' + checksRequired +
             ' required check(s) satisfied, which is a gate rejection'

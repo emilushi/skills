@@ -420,16 +420,47 @@ def check(units_doc: dict[str, Any], parts: list[tuple[str, dict[str, Any]]]) ->
     # naming the same invented id — read as a single row. `_summary` dedups for the SAMPLE.
     unknown_units: list[str] = []
     unverifiable: list[str] = []
+    # A part field or row the gate could not read. Recorded rather than raised: `x or []`
+    # accepts any non-empty non-iterable, so ONE `"sites_accounted": 7` used to escape as
+    # `TypeError: 'int' object is not iterable` and take every other agent's complete
+    # coverage with it — 427 satisfied checks discarded over one scalar, with the message
+    # naming neither the part nor the row. This is the same trade `assemble_findings._seq`
+    # makes on the same bytes. Dropping in silence would be worse than the crash, so these
+    # fail the gate in `gate_failure` and under `--strict`.
+    malformed: list[str] = []
     findings_by_unit: dict[str, int] = {}
     rows_total = 0
 
     for part_id, doc in parts:
-        for finding in doc.get("findings") or []:
+        findings = doc.get("findings")
+        if findings is not None and not isinstance(findings, list):
+            malformed.append(f"{part_id}.findings is {type(findings).__name__}, not a list")
+            findings = None
+        for index, finding in enumerate(findings or []):
+            if not isinstance(finding, dict):
+                malformed.append(f"{part_id}.findings[{index}] is not an object")
+                continue
             uid = str(finding.get("unit_id") or "")
             if uid:
                 findings_by_unit[uid] = findings_by_unit.get(uid, 0) + 1
-        for row in doc.get("ledger") or []:
+        ledger = doc.get("ledger")
+        if ledger is not None and not isinstance(ledger, list):
+            malformed.append(f"{part_id}.ledger is {type(ledger).__name__}, not a list")
+            ledger = None
+        for index, row in enumerate(ledger or []):
             rows_total += 1
+            if not isinstance(row, dict):
+                malformed.append(f"{part_id}.ledger[{index}] is not an object")
+                continue
+            accounted = row.get("sites_accounted")
+            if accounted is not None and not isinstance(accounted, list):
+                # Left to fall through with an EMPTY population rather than skipped: the
+                # row still owes its sites, so it also earns a real
+                # `population-not-accounted` violation instead of quietly disappearing.
+                malformed.append(
+                    f"{part_id}.ledger[{index}].sites_accounted is "
+                    f"{type(accounted).__name__}, not a list"
+                )
             uid = str(row.get("unit_id") or "")
             question = str(row.get("question") or "")
             key = (uid, question)
@@ -467,9 +498,9 @@ def check(units_doc: dict[str, Any], parts: list[tuple[str, dict[str, Any]]]) ->
                     "question": question,
                     "verdict": str(row.get("verdict") or ""),
                     "part": part_id,
-                    "accounted": sorted(
-                        {int(n) for n in (row.get("sites_accounted") or []) if _is_int(n)}
-                    ),
+                    "accounted": sorted({int(n) for n in (accounted or []) if _is_int(n)})
+                    if isinstance(accounted, list)
+                    else [],
                     "evidence": str(row.get("evidence") or ""),
                 }
             )
@@ -545,6 +576,7 @@ def check(units_doc: dict[str, Any], parts: list[tuple[str, dict[str, Any]]]) ->
         "violations": violations,
         "unknown_units": unknown_units,
         "unverifiable_rows": unverifiable,
+        "malformed_rows": malformed,
         "units_with_findings": [
             {
                 "unit_id": uid,
@@ -750,10 +782,22 @@ def main(argv: list[str] | None = None) -> int:
     out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(_summary(report), indent=2))
 
-    if ns.strict and (report["missing_rows"] or report["violations"]):
+    # `unknown_units` and `malformed_rows` are in this condition for the same reason
+    # `generate_sarif.lost_work` already counts them: a row naming a unit id the parse never
+    # produced is a row nothing can verify. Without them a ledger of 40 rows over invented
+    # ids scored 100% coverage, 0 violations and exit 0 while REPORT.sarif recorded
+    # `executionSuccessful: false` on the same run.
+    if ns.strict and (
+        report["missing_rows"]
+        or report["violations"]
+        or report["unknown_units"]
+        or report["malformed_rows"]
+    ):
         print(
             f"check_ledger: {len(report['missing_rows'])} missing row(s), "
-            f"{len(report['violations'])} violation(s)",
+            f"{len(report['violations'])} violation(s), "
+            f"{len(report['unknown_units'])} row(s) naming an unknown unit, "
+            f"{len(report['malformed_rows'])} unreadable field(s)",
             file=sys.stderr,
         )
         return 1
@@ -785,6 +829,8 @@ def _summary(report: dict[str, Any]) -> dict[str, Any]:
         "unknown_units": sorted(set(report["unknown_units"]))[:10],
         "unknown_unit_count": len(report["unknown_units"]),
         "unverifiable_row_count": len(report["unverifiable_rows"]),
+        "malformed_rows": sorted(set(report["malformed_rows"]))[:10],
+        "malformed_row_count": len(report["malformed_rows"]),
         # Which part files this gate actually read. The standalone CLI globs by PREFIX while
         # the assembler reads only the parts the workflow dispatched, so the same run
         # directory can be exit 1 "zero ledger rows" through one and 100% through the other.

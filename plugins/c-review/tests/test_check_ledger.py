@@ -45,6 +45,8 @@ SUMMARY_KEYS = {
     "violation_kinds",
     "unknown_units",
     "unknown_unit_count",
+    "malformed_rows",
+    "malformed_row_count",
     "parts_read",
     "units_with_findings",
     "gap_units",
@@ -1019,6 +1021,72 @@ def test_the_summary_names_the_parts_it_read_and_the_whole_unknown_unit_count(tm
     assert summary["unknown_unit_count"] == 25
     assert len(summary["unknown_units"]) == 10
     assert summary["parts_read"] == ["review-1"]
+
+
+@pytest.mark.parametrize(
+    ("part", "because"),
+    [
+        (
+            {"ledger": [row(), dict(row(question="integer"), sites_accounted=7)]},
+            "review-2.ledger[1].sites_accounted is int, not a list",
+        ),
+        ({"ledger": {"unit_id": UID}}, "review-2.ledger is dict, not a list"),
+        ({"ledger": [row(), "not a row"]}, "review-2.ledger[1] is not an object"),
+        ({"ledger": [row()], "findings": 3}, "review-2.findings is int, not a list"),
+    ],
+)
+def test_one_unreadable_field_does_not_throw_away_every_other_agents_coverage(
+    tmp_path, part, because
+):
+    """`x or []` accepts any non-empty non-iterable.
+
+    One `"sites_accounted": 7` used to escape `check()` as `TypeError: 'int' object is not
+    iterable`, so `run.ledger` came back `{"error": …}`, coverage was unmeasured and the
+    OTHER agent's complete, correct rows were discarded — over one scalar, with the message
+    naming neither the part file nor the row. `assemble_findings._seq` already makes this
+    trade on the same bytes; this is the gate catching up to it.
+
+    Recorded, not swallowed: a malformed field fails the gate under `--strict` and is named
+    in `malformed_rows`, and a bad `sites_accounted` also leaves its row's population
+    unaccounted, so it earns a real violation rather than passing on evidence text.
+    """
+    parts = {**ledger(row(), row(question="integer")), "review-2": part}
+    run = build(tmp_path / "run", parts=parts)
+    got = report(run)
+    assert got["malformed_rows"] == [because]
+    # The first agent's two rows are still counted. Without the fix this raised instead.
+    assert got["checks_completed"] == 2
+    assert main(["--run-dir", str(run), "--strict"]) == 1
+
+
+def test_rows_naming_a_unit_the_parse_never_produced_fail_the_gate(tmp_path):
+    """40 rows over invented ids scored `coverage_pct: 100.0`, 0 violations and exit 0.
+
+    `generate_sarif.lost_work` already counted `unknown_units`, so the same run wrote
+    `executionSuccessful: false` into REPORT.sarif while both exit codes said it passed.
+    """
+    ghosts = [row(unit_id=f"src/ghost{n}.c:1-40") for n in range(40)]
+    run = build(tmp_path / "run", parts=ledger(row(), row(question="integer"), *ghosts))
+    got = report(run)
+    assert got["checks_satisfied"] == got["checks_required"], "the real rows are still clean"
+    assert got["violations"] == [] and got["missing_rows"] == []
+    assert len(got["unknown_units"]) == 40
+    assert main(["--run-dir", str(run), "--strict"]) == 1
+
+
+def test_a_clean_ledger_with_a_sweep_row_still_exits_0_under_strict(tmp_path):
+    """The negative half of both tests above.
+
+    `unverifiable_rows` — the class sweep and the invariant audit, which file outside the
+    unit list BY DESIGN — must not be swept into the new `--strict` condition, or every real
+    run with a sweep phase fails the gate.
+    """
+    sweep = row(unit_id="(sweep)")
+    run = build(tmp_path / "run", parts=ledger(row(), row(question="integer"), sweep))
+    got = report(run)
+    assert len(got["unverifiable_rows"]) == 1
+    assert got["unknown_units"] == [] and got["malformed_rows"] == []
+    assert main(["--run-dir", str(run), "--strict"]) == 0
 
 
 if __name__ == "__main__":

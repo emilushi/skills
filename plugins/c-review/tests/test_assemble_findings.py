@@ -409,8 +409,17 @@ def test_a_different_class_at_the_same_site_is_not_a_tier1_duplicate(tmp_path):
 
 
 def near_pair(tmp_path, first=None, second=None):
-    """Two findings two lines apart in one function, filed under different bug classes."""
-    later = {"line": 144, "bug_class": "integer-overflow", "title": "width", "confidence": "Low"}
+    """Two findings two lines apart in one function, filed under the SAME bug class.
+
+    Same class on purpose. With `integer-overflow` as the default, `CROSS_CLASS_NEARBY_LINES`
+    (0) refused every pair before any other rule was consulted, so the tests below for the
+    function key, the file key and the file-level skip were all decided by that one cap and
+    proved nothing about the rule each names — deleting the cross-class guard, dropping
+    `function` from the grouping key and letting file-level findings group all left the suite
+    green. Two lines apart and same class merges, so each of those tests now discriminates.
+    The cross-class cases pass `bug_class` explicitly.
+    """
+    later = {"line": 144, "title": "width", "confidence": "Low"}
     later.update(second or {})
     return write_run(
         tmp_path,
@@ -431,7 +440,7 @@ def test_tier1_5_merges_across_bug_classes_on_the_same_line(tmp_path):
     `CROSS_CLASS_NEARBY_LINES` (0), so this pair merges and the one two lines apart below
     does not; see that test for the measurement behind the cap.
     """
-    run_dir = near_pair(tmp_path, second={"line": 142})
+    run_dir = near_pair(tmp_path, second={"line": 142, "bug_class": "integer-overflow"})
     assert assemble(run_dir) == UNVERIFIED
     doc = load_doc(run_dir)
     keyed = by_key(doc)
@@ -455,11 +464,56 @@ def test_tier1_5_does_not_merge_different_classes_two_lines_apart(tmp_path):
     Such a pair is not refused, only left unmerged for the dedup agent, which reads both
     write-ups instead of guessing from a line distance.
     """
-    run_dir = near_pair(tmp_path)  # 142 vs 144, buffer-overflow vs integer-overflow
+    run_dir = near_pair(tmp_path, second={"bug_class": "integer-overflow"})
     assert assemble(run_dir) == UNVERIFIED
     doc = load_doc(run_dir)
     assert doc["stats"]["merged"] == 0
     assert all(f.get("merged_into") is None for f in doc["findings"])
+
+
+def test_tier1_5_keeps_the_pairwise_cross_class_cap_from_swallowing_a_same_class_merge(
+    tmp_path,
+):
+    """Why the PAIRWISE cap exists on top of the component-level `_cross_class_too_far`.
+
+    A(bof,142) B(bof,143) C(integer,144). Pairwise, A-B is same class and merges while B-C
+    is cross-class one line apart and is refused, so the component is {A,B} and one merge
+    lands. Delete the pairwise cap and all three join one component, which
+    `_cross_class_too_far` then refuses whole — so the legitimate A-B merge is lost too and
+    the run reports 0 merges. Both two-finding cases are decided by the component guard
+    alone, which is why deleting the pairwise one left every other tier-1.5 test green.
+    """
+    run_dir = write_run(
+        tmp_path,
+        {
+            "review-unit-01": producing_part(
+                "review-unit-01",
+                [
+                    raw_finding(line=142, confidence="High"),
+                    raw_finding(line=143, confidence="Low", title="second"),
+                    raw_finding(line=144, bug_class="integer-overflow", title="width"),
+                ],
+            )
+        },
+    )
+    assert assemble(run_dir) == UNVERIFIED
+    doc = load_doc(run_dir)
+    assert doc["stats"]["merged_auto"] == 1
+    keyed = by_key(doc)
+    assert keyed["review-unit-01#1"]["merged_into"] == keyed["review-unit-01#0"]["id"]
+    assert keyed["review-unit-01#2"].get("merged_into") is None
+
+
+def test_the_same_pair_in_one_class_two_lines_apart_does_merge(tmp_path):
+    """The control for the test above, and for every "does not merge" test using `near_pair`.
+
+    Without it, `CROSS_CLASS_NEARBY_LINES` could be raised to swallow the cross-class case
+    and nothing would notice, and the function/file/file-level tests below would be
+    indistinguishable from a rule that refuses every pair.
+    """
+    run_dir = near_pair(tmp_path)  # 142 vs 144, both buffer-overflow
+    assert assemble(run_dir) == UNVERIFIED
+    assert load_doc(run_dir)["stats"]["merged_auto"] == 1
 
 
 def test_tier1_5_still_merges_the_same_class_within_the_full_window(tmp_path):
@@ -1387,6 +1441,38 @@ def test_the_ledger_gate_runs_in_process_and_lands_in_the_run_block(tmp_path, ca
     on_disk = json.loads((run_dir / "ledger-gate.json").read_text(encoding="utf-8"))
     assert on_disk["checks_required"] == 1
     assert on_disk["units_with_findings"][0]["unit_id"] == "src/parse.c:parse_header"
+
+
+def test_rows_over_invented_unit_ids_fail_the_run_and_are_named_in_both_artifacts(tmp_path, capsys):
+    """`gate_failure` read only `missing_row_count` and `violation_count`.
+
+    A reviewer whose ledger names unit ids the parse never produced satisfies every check it
+    DOES claim, so the run exited 0 with `ok: true` and `coverage_pct: 100.0` — while
+    `generate_sarif.lost_work`, built from the same gate report, already counted
+    `unknown_units` and wrote `executionSuccessful: false`. Two halves of one run disagreeing
+    about whether it passed.
+    """
+    ghosts = [dict(LEDGER_ROW, unit_id=f"src/ghost{n}.c:1-40", verdict="clean") for n in range(40)]
+    run_dir = write_run(
+        tmp_path,
+        {
+            "review-unit-01": producing_part(
+                "review-unit-01", [raw_finding()], ledger=[LEDGER_ROW, *ghosts]
+            )
+        },
+        units={"units": [LEDGER_UNIT], "totals": {"units": 1, "checks_required": 1}},
+    )
+    assert assemble(run_dir, "--expect", "review-unit-01=1") == UNVERIFIED
+    capsys.readouterr()
+    ledger = load_doc(run_dir)["run"]["ledger"]
+    # The real row is still satisfied: this is not the gate rejecting everything.
+    assert ledger["checks_satisfied"] == ledger["checks_required"] == 1
+    assert ledger["violation_count"] == 0 and ledger["missing_row_count"] == 0
+    assert ledger["unknown_unit_count"] == 40
+    report = (run_dir / "REPORT.md").read_text(encoding="utf-8")
+    assert "40 ledger row(s) name a unit id that is in no unit list" in report
+    sarif = json.loads((run_dir / "REPORT.sarif").read_text(encoding="utf-8"))
+    assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is False
 
 
 def test_the_gate_reports_an_incomplete_ledger_and_ships_the_findings_anyway(tmp_path, capsys):

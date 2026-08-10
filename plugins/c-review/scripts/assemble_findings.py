@@ -1335,10 +1335,18 @@ def gate_failure(ledger: Any) -> str:
         return f"the coverage gate could not check this run — {ledger['error']}"
     missing = int(ledger.get("missing_row_count") or 0)
     violations = int(ledger.get("violation_count") or 0)
-    if missing or violations:
+    # `unknown` and `malformed` belong here for the same reason `generate_sarif.lost_work`
+    # already counts them, and their absence was the asymmetry: a ledger of rows over unit
+    # ids the parse never produced satisfied every check it did claim, so this returned ""
+    # and the run exited 0 — while REPORT.sarif, built from the same report, recorded
+    # `executionSuccessful: false`.
+    unknown = int(ledger.get("unknown_unit_count") or 0)
+    malformed = int(ledger.get("malformed_row_count") or 0)
+    if missing or violations or unknown or malformed:
         return (
             f"the coverage gate rejected this run's ledger: {missing} unanswered row(s), "
-            f"{violations} violation(s), "
+            f"{violations} violation(s), {unknown} row(s) naming a unit the parse never "
+            f"produced, {malformed} unreadable field(s), "
             f"{ledger.get('checks_satisfied')} of {ledger.get('checks_required')} "
             f"required check(s) satisfied"
         )

@@ -325,6 +325,20 @@ def ledger_warnings(ledger: Any) -> list[str]:
             + ", ".join(f"`{u}`" for u in unknown[:10])
             + (" …" if unknown_count > len(unknown[:10]) else "")
         )
+    # A field the gate could not read. It used to be an uncaught `TypeError` that discarded
+    # every other agent's coverage; now the row is kept and audited with an empty population,
+    # so it earns a real violation too — but only this says WHICH field was unreadable, and
+    # without it a reader sees the violation and no reason for it.
+    raw_malformed = ledger.get("malformed_rows")
+    malformed_sample = [str(m) for m in raw_malformed] if isinstance(raw_malformed, list) else []
+    malformed_count = as_int(ledger.get("malformed_row_count")) or len(malformed_sample)
+    if malformed_count:
+        out.append(
+            f"{malformed_count} part field(s) were the wrong type and could not be read, so "
+            f"what they held is in no artifact: "
+            + ", ".join(f"`{m}`" for m in malformed_sample[:10])
+            + (" …" if malformed_count > len(malformed_sample[:10]) else "")
+        )
     if not (violations or missing or satisfied < completed):
         return out
 
