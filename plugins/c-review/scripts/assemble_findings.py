@@ -1,27 +1,31 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
-# dependencies = []
+# dependencies = ["tree-sitter>=0.23", "tree-sitter-c>=0.23", "tree-sitter-cpp>=0.23"]
 # ///
 """Assemble findings.json, REPORT.md and REPORT.sarif from the per-agent part files.
 
-This script exists because of one measured defect. The previous last phase embedded the
-entire findings payload as JSON in a prompt and asked a single agent to copy it verbatim
-into a heredoc. Across four measured cells it was faithful at 15 and 25 findings and
-destroyed the document at 75 and 86 — every evidence field (`description`, `code`,
-`impact`, `recommendation`, `function`, `found_by`) stripped from 22 and 23 of the 23
-findings that survived at all — and one run shipped an **empty** findings array while its
-own stats block read `reported: 14`, two CRITICAL. The failure scales with the pipeline's
-own success: the more the hunters find, the more certain the user gets nothing.
-
-The fix is structural, not a better prompt. Each producing agent writes only its own small
-result to `<run-dir>/parts/`, and this script joins them. No agent ever retypes the corpus,
-so no amount of finding volume can degrade the artifact.
+Each producing agent writes only its own small result to `<run-dir>/parts/`, and this
+script joins them. No agent ever retypes the corpus, so no volume of findings can degrade
+the artifact.
 
 Everything here is deterministic — parts are read in sorted filename order, ids are derived
 from sorted content, and nothing consults the clock or a random source. Re-running over the
 same directory must produce byte-identical output, because the workflow engine replays this
 step on resume and a resumed run that renumbers its findings is worse than one that fails.
+
+Exit codes, and NOTHING else may exit non-zero: 0 when the artifacts were written and the
+coverage gate accepted the ledger, 1 when all three artifacts were written but the gate
+could not run or rejected the ledger (the review is assembled but unverified, and every
+artifact says so), 2 when no artifact was written at all. An unexpected exception is
+caught and reported as 2, because a traceback exits 1 and the caller cannot tell that
+apart from "assembled but unverified" — it is told the report is complete and not to
+re-run, over an empty directory.
+
+All four artifacts — findings.json, REPORT.md, REPORT.sarif and ledger-gate.json — are
+rendered in memory, then staged and renamed into place together, so neither a generator
+that raises nor a write that fails can leave a fresh findings.json beside a previous run's
+REPORT.sarif.
 
 Usage:
     uv run assemble_findings.py --run-dir RUNDIR --threat-model REMOTE --severity-filter all
@@ -30,11 +34,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import math
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +58,9 @@ VERDICT_PREFIX = "verdict-"
 
 CONFIDENCE_RANK = {"High": 3, "Medium": 2, "Low": 1}
 SURVIVOR_VERDICTS = frozenset({"TRUE_POSITIVE", "LIKELY_TP"})
+REJECTION_VERDICTS = frozenset({"FALSE_POSITIVE", "LIKELY_FP"})
+# Anything else is neither, and is ignored rather than silently read as a rejection.
+KNOWN_VERDICTS = SURVIVOR_VERDICTS | REJECTION_VERDICTS
 SEVERITY_LEVELS = frozenset({"CRITICAL", "HIGH", "MEDIUM", "LOW"})
 UNJUDGED_RATIONALE = "JUDGE DID NOT RUN — verdict and severity are unvalidated"
 REVIEWER_RATIONALE = (
@@ -61,11 +68,11 @@ REVIEWER_RATIONALE = (
 )
 MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 
-# Fields a finding is useless without. The workflow's schema already requires them of the
-# value an agent *returns*, but the part file is written by hand afterwards, and a measured
-# run showed one review agent omitting `description` from all nine of its findings while its
-# schema return carried it. The count check (`--expect ID=COUNT`) cannot see that: the count
-# was right. Silence here would ship nine findings with no statement of what is wrong.
+# Fields a finding is useless without. The workflow's schema requires them of the value an
+# agent *returns*, but the part file is written separately and the two can diverge: a field
+# the return carried can still be missing from the file. The count check (`--expect
+# ID=COUNT`) cannot see that, because the count is unaffected. Silence here would ship
+# findings that state a location and no defect.
 REQUIRED_FINDING_FIELDS = ("title", "file", "line", "description", "impact", "recommendation")
 
 # Tier 1.5: two findings in one function, within this many lines of each other, are the same
@@ -76,16 +83,12 @@ REQUIRED_FINDING_FIELDS = ("title", "file", "line", "description", "impact", "re
 NEARBY_LINES = 3
 
 # How far apart two findings of DIFFERENT `bug_class` may sit and still be merged
-# deterministically. Zero means "the same line, or not at all".
-#
-# Measured, not tuned (see tools/c-review-bench/MEASUREMENTS.md): correct cross-class merges
-# — one defect filed twice under two labels — land on the SAME line, because both reviewers
-# point at the same statement. Every cross-class merge at a non-zero distance that could be
-# checked joined two different bugs, and two of them cost a ground-truth bug outright.
-#
-# Same-class pairs keep the full NEARBY_LINES window; no measured same-class merge was wrong.
-# A cross-class pair one to three lines apart is not refused, only left unmerged for the dedup
-# agent, which reads both write-ups instead of guessing from a line distance.
+# deterministically. Zero means "the same line, or not at all": a correct cross-class merge —
+# one defect filed twice under two labels — lands on the SAME line, both reviewers pointing at
+# the same statement, and at any greater distance a cross-class pair has only ever turned out
+# to be two different bugs. Same-class pairs keep the full NEARBY_LINES window. A cross-class
+# pair one to three lines apart is not refused, only left unmerged for the dedup agent, which
+# reads both write-ups instead of guessing from a line distance.
 CROSS_CLASS_NEARBY_LINES = 0
 
 FUNCTION_SEPARATORS = re.compile(r"[-_\s]+")
@@ -94,6 +97,23 @@ FUNCTION_SEPARATORS = re.compile(r"[-_\s]+")
 # nothing about whether they are the same bug.
 NO_FUNCTION = frozenset(
     {"", "-", "none", "n/a", "na", "file-level", "(file-level)", "filelevel", "file level"}
+)
+
+# The workflow's collision rule, ported from `collisionBuckets` / `flowsIntersect`. The dedup
+# agent only ever sees findings that collided, and the workflow discards a merge whose members
+# came from two different buckets — but the agent writes the part file this script reads, and
+# this script owns the artifacts, so a merge rejected only there is rejected only in the log,
+# and a reviewer's finding 900 lines away is dropped from REPORT.md. Held to the JS by
+# test_assemble_findings.py's drift tests; change both together.
+COLLISION_LINES = 8
+FLOW_SPLIT = re.compile(r"[^A-Za-z0-9_]+")
+FLOW_STOPWORDS = frozenset(
+    """the and from into with this that then than when where which value values data input
+    source sink size length len buffer buf pointer ptr user attacker controlled validation
+    validated check checked none null call caller function via passed reaches reach between
+    them for not are its it chain flow unchecked bound bounds bounded field struct line lines
+    code file path unit review here there both each reachable reachability entry point write
+    read copy copied""".split()
 )
 
 # The consolidated 56-class catalogue (66 -> 56, see tools/c-review-bench/MEASUREMENTS.md). It is
@@ -168,12 +188,8 @@ def _precision_rank(finding: dict[str, Any]) -> int:
     Location precision comes FIRST in primary election, ahead of confidence. A merge
     keeps one member's site and discards the others', so electing a vaguely located
     member throws away the only thing the grader — and a human opening the file — can
-    act on. This cost a real run a HARD true positive: two agents pinned an
-    encoding-invariant bug at `src/path.c:55` in `sgl_scope_set`, a third reported the
-    same defect at `src/path.c:9` as `(file-level)`, and because that third had the
-    lexicographically smallest key it became the primary. The merged finding then sat
-    46 lines from the bug, outside the grader's window, and scored SUPPRESSED — one bug
-    lost entirely to plumbing.
+    act on. A file-level member winning election drags the merged finding tens of lines
+    from the defect.
     """
     return 0 if not norm_function(finding.get("function")) else 1
 
@@ -193,9 +209,8 @@ def promote_unclaimed_pointers(
 
     Reviewers are told not to write up bugs outside their own units, because under a
     location partition those lines already have an owner who is reading them with more
-    context. That saves a great deal of duplicated work — measured, it removed a line being
-    written up five times over — but it is only safe if a pointer the owner then missed
-    still reaches the report.
+    context. That avoids duplicated work, but is only safe if a pointer the owner then
+    missed still reaches the report.
 
     So: a pointer within `POINTER_WINDOW` lines of an existing finding in the same file
     is dropped, because the owner did file it and their write-up is the better one. A
@@ -212,7 +227,11 @@ def promote_unclaimed_pointers(
         near = any(
             abs(ptr["line"] - line) <= POINTER_WINDOW for line in claimed.get(ptr["file"], [])
         )
-        if near or not ptr["file"]:
+        # A pointer with no note is a location and no defect — exactly the shape
+        # REQUIRED_FINDING_FIELDS exists to reject — and promotion runs after that check, so
+        # it reaches the report as `Unreviewed pointer: ` with an empty description and
+        # `incomplete_findings: []`.
+        if near or not ptr["file"] or not ptr["note"].strip():
             continue
         promoted.append(ptr)
         # Claim it, so two pointers at the same place promote once.
@@ -237,6 +256,15 @@ def resolve_chains(merged: dict[str, str]) -> None:
                 break
             seen.add(target)
             target = merged[target]
+        if target == key:
+            # A cycle back to this key. Left pointing at ITSELF it writes
+            # `merged_into == own id`, which `findings_model.primaries()` resolves to the
+            # finding itself, sees survive, and skips: the finding vanishes from REPORT.md
+            # and from SARIF while findings.json still holds it, with nothing counting or
+            # warning. Unmerge it instead — it becomes the group's primary and the rest of
+            # the cycle resolves onto it on the next iterations.
+            del merged[key]
+            continue
         merged[key] = target
 
 
@@ -262,22 +290,36 @@ def _text(value: Any) -> str:
     return str(value)
 
 
-def normalize_path(value: Any) -> str:
-    """Port of the workflow's `normalizePath`.
+def normalize_path(value: Any, scope_root: str = "") -> str:
+    """Port of the workflow's `normalizePath`, plus containment against the scope root.
 
     Agents hand back `[src/parse.c](src/parse.c)`, `./src/parse.c` and `src//parse.c` for the
     same file. Collapsing them here is what makes the tier-1 `(file, line, bug_class)` merge
     and the SARIF URIs agree; without it the same bug filed twice reads as two locations.
+
+    `/home/u/proj/src/a.c` and `../src/a.c` are the same third and fourth spelling of it, and
+    they merge with neither: the same bug is reported three times, and a code-scanning UI
+    cannot resolve an absolute `uri` under a `%SRCROOT%` base id. So an absolute path inside
+    the scope root is relativised against it, and `.`/`..` segments are folded away.
     """
     text = str("" if value is None else value).replace("\\", "/").strip()
     link = MARKDOWN_LINK.fullmatch(text)
     if link:
         text = link.group(1)
-    while text.startswith("./"):
-        text = text[2:]
     while "//" in text:
         text = text.replace("//", "/", 1)
-    return text
+    root = str(scope_root or "").replace("\\", "/").rstrip("/")
+    if root and text.startswith(root + "/"):
+        text = text[len(root) + 1 :]
+    parts: list[str] = []
+    for segment in text.split("/"):
+        if segment == "." or (segment == "" and parts):
+            continue
+        if segment == ".." and parts and parts[-1] not in ("", ".."):
+            parts.pop()
+            continue
+        parts.append(segment)
+    return "/".join(parts)
 
 
 def pad3(value: Any) -> str:
@@ -290,11 +332,39 @@ def _line(value: Any) -> int:
 
     Line 1 is wrong but locatable; dropping the finding, or emitting `null`, is not. SARIF
     consumers reject a zero or negative `startLine` outright.
+
+    A decimal STRING is a number, not junk: `"line": "142"` collapsing to 1 fires no marker
+    either, because 1 is a valid int. Two unrelated findings quoted that way in one file then
+    share `(file, line, bug_class)` and tier 1 merges one of them out of the report entirely
+    — a real bug deleted by a quoting mistake.
     """
+    return _line_or_none(value) or 1
+
+
+def _line_or_none(value: Any) -> int | None:
+    """The usable line in `value`, or None when there was none to read.
+
+    Split out so the caller can record that the 1 was INVENTED. `_line` has to return a valid
+    positive int — SARIF rejects anything else and the tier-1 dedup bucket is keyed on it — so
+    after coercion nothing downstream can distinguish an invented line 1 from a real one, and
+    `[LINE NUMBER INVENTED]` could never fire on an assembled finding.
+    """
+    if isinstance(value, str):
+        try:
+            value = int(value.strip())
+        except ValueError:
+            return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 1
-    if not math.isfinite(value) or value <= 0:
-        return 1
+        return None
+    # `isfinite` is asked only about FLOATS. `math.isfinite(10**400)` raises OverflowError —
+    # it converts to float first — so a `line` of `10**400`, which `json.loads` accepts,
+    # escapes as an exit 2 that deletes the previous run's artifacts over a display field. An
+    # int too large for a SARIF region is still a line number here; it fails
+    # `findings_model.line_usable` and carries `[LINE NUMBER INVENTED]` instead.
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value <= 0:
+        return None
     return int(math.floor(value))
 
 
@@ -310,6 +380,75 @@ def norm_function(name: Any) -> str:
     return "" if text in NO_FUNCTION else text
 
 
+def _flow_tokens(text: Any) -> set[str]:
+    """Identifier-ish tokens out of a `data_flow` description. Port of `flowTokens`."""
+    return {
+        token
+        for token in (word.lower() for word in FLOW_SPLIT.split(_text(text)))
+        if len(token) >= 3 and token not in FLOW_STOPWORDS and not token.isdigit()
+    }
+
+
+def _flows_intersect(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Two write-ups of one data-flow chain name the same identifiers. Port of `flowsIntersect`.
+
+    Deliberately hard to trigger: a loose threshold measures prose similarity rather than
+    shared identifiers, and lets two short unrelated descriptions collide by chance.
+    """
+    left, right = _flow_tokens(a.get("data_flow")), _flow_tokens(b.get("data_flow"))
+    if len(left) < 4 or len(right) < 4:
+        return False
+    shared = len(left & right)
+    return shared >= 3 and shared / min(len(left), len(right)) >= 0.5
+
+
+def collides(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Do these two point at one construct? The pairwise half of `collisionBuckets`.
+
+    Same file, and pointing at one construct: the same enclosing function, lines within
+    `COLLISION_LINES`, or two descriptions of one data-flow chain. This is the predicate the
+    workflow unions with; the bucket a merge is judged against is the transitive closure —
+    see `collision_buckets`.
+    """
+    if a["file"] != b["file"]:
+        return False
+    function = norm_function(a["function"])
+    if function and function == norm_function(b["function"]):
+        return True
+    if abs(a["line"] - b["line"]) <= COLLISION_LINES:
+        return True
+    return _flows_intersect(a, b)
+
+
+def collision_buckets(
+    findings: dict[str, dict[str, Any]], merged: dict[str, str]
+) -> dict[str, str]:
+    """Bucket root per live key, for keys in a bucket of two or more. Port of `collisionBuckets`.
+
+    The workflow unions colliding pairs with union-find and then judges a merge on *bucket
+    membership*, so the relation it enforces is transitive: three findings at lines 10, 18 and
+    26 are one bucket, and the agent may merge 26 into 10 even though those two never collided
+    directly. Testing `collides(10, 26)` here instead refuses exactly those merges, so the
+    workflow's reported `stats.primaries` and this script's findings.json disagree about the
+    same run and a duplicate the run log says was merged comes back as a second primary in
+    REPORT.md.
+
+    A key in no bucket maps to nothing, and the workflow requires membership to match this:
+    comparing two absent bucket ids gives `undefined !== undefined` and accepts a merge
+    between two findings that are each alone.
+    """
+    live = [key for key in findings if key not in merged]
+    parent = {key: key for key in live}
+    for index, left in enumerate(live):
+        for right in live[index + 1 :]:
+            if collides(findings[left], findings[right]):
+                root_left, root_right = _find(parent, left), _find(parent, right)
+                if root_left != root_right:
+                    parent[root_left] = root_right
+    roots = Counter(_find(parent, key) for key in live)
+    return {key: _find(parent, key) for key in live if roots[_find(parent, key)] > 1}
+
+
 def reviewer_severity(value: Any) -> str:
     """The reviewer's own severity, upper-cased; "" when absent or not one of the four.
 
@@ -321,36 +460,76 @@ def reviewer_severity(value: Any) -> str:
     return text if text in SEVERITY_LEVELS else ""
 
 
-def normalize_finding(raw: dict[str, Any], part_id: str, key: str) -> dict[str, Any]:
+def _seq(value: Any) -> list[Any]:
+    """A list-valued part field, or empty.
+
+    `x or []` accepts any non-empty non-iterable, so `"ledger": 5` or `"merges": 5` raises
+    `TypeError: 'int' object is not iterable` before a single artifact is written and takes a
+    completed review with it. `findings` is checked explicitly; its six siblings come through
+    here.
+    """
+    return value if isinstance(value, list) else []
+
+
+def _dropped(value: Any) -> bool:
+    """True when `_seq` had to throw a present-but-wrong-typed field away.
+
+    Dropping in silence is a worse failure than the crash it replaces: a `dedup-01.json`
+    whose `merges` is a merge OBJECT rather than an array gives `merged_agent: 0`,
+    `ignored_merges: 0`, no stderr line and exit 0 — indistinguishable from a dedup agent
+    that found nothing. Same for `verdicts`, `pointers` and `ledger`, the last of which is a
+    whole agent's coverage account. Every caller counts the loss.
+    """
+    return value is not None and not isinstance(value, list)
+
+
+def normalize_finding(
+    raw: dict[str, Any], part_id: str, key: str, scope_root: str = ""
+) -> dict[str, Any]:
     """One part-file finding as it appears in findings.json.
 
     An unrecognised `bug_class` becomes `logic-flaw` and the original is preserved in
     `reported_bug_class`: a class the catalogue does not know has no id prefix and no SARIF
     rule, and silently dropping the finding to avoid that would lose a real bug over a typo.
 
-    `severity`, `attack_vector` and `exploitability` are the reviewer's own assessment and are
-    only set when the reviewer supplied one. Absence is meaningful downstream: a finding a
-    judge rejects must carry no severity at all, and a key that is always present could not
-    say that.
+    `severity`, `attack_vector`, `exploitability` and `severity_rationale` are the reviewer's
+    own assessment and are only set when the reviewer supplied one. Absence is meaningful
+    downstream: a finding a judge rejects must carry no severity at all, and a key that is
+    always present could not say that.
     """
+    # `in` on a dict hashes the key, so an unguarded list or dict `bug_class`/`confidence`
+    # raises `TypeError: unhashable type` and destroys every artifact. The JS side coerces to
+    # a string and falls back, so this is a port divergence as well as a crash.
     reported_class = raw.get("bug_class")
-    bug_class = reported_class if reported_class in CLASS_PREFIXES else FALLBACK_CLASS
+    bug_class = (
+        reported_class
+        if isinstance(reported_class, str) and reported_class in CLASS_PREFIXES
+        else FALLBACK_CLASS
+    )
+    confidence = raw.get("confidence")
+    line = _line_or_none(raw.get("line"))
     reviewer_fields = {
         "severity": reviewer_severity(raw.get("severity")),
         "attack_vector": _text(raw.get("attack_vector")).strip(),
         "exploitability": _text(raw.get("exploitability")).strip(),
+        "severity_rationale": _text(raw.get("severity_rationale")).strip(),
     }
     return {
         "key": key,
         "bug_class": bug_class,
         "reported_bug_class": _text(reported_class),
         "title": _text(raw.get("title")) or "untitled",
-        "file": normalize_path(raw.get("file")),
-        "line": _line(raw.get("line")),
+        "file": normalize_path(raw.get("file"), scope_root),
+        "line": line or 1,
+        # Both artifacts print `[LINE NUMBER INVENTED]` off this. It has to be a separate
+        # field: the line itself is coerced to a usable int before anything reads it.
+        "line_invented": line is None,
         "function": _text(raw.get("function") or "(file-level)").strip(),
         "unit_id": _text(raw.get("unit_id")),
         "confidence": (
-            raw.get("confidence") if raw.get("confidence") in CONFIDENCE_RANK else "Medium"
+            confidence
+            if isinstance(confidence, str) and confidence in CONFIDENCE_RANK
+            else "Medium"
         ),
         "description": _text(raw.get("description")),
         "code": _text(raw.get("code")),
@@ -371,8 +550,10 @@ def normalize_finding(raw: dict[str, Any], part_id: str, key: str) -> dict[str, 
 def _load_json(path: Path, label: str) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise AssembleError(f"{label} {path} is not valid JSON ({exc})") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # `UnicodeDecodeError` is a ValueError, not an OSError, so one 0xFF byte in a part
+        # file escapes an OSError-only handler and exits 2 with no artifacts.
+        raise AssembleError(f"{label} {path} is not valid UTF-8 JSON ({exc})") from exc
     except OSError as exc:
         raise AssembleError(f"{label} {path} cannot be read ({exc})") from exc
 
@@ -407,18 +588,6 @@ def load_parts(run_dir: Path) -> list[tuple[str, dict[str, Any]]]:
             f"{parts_dir} holds no part files. Nothing was assembled, which is not the same "
             f"as a review that found nothing — refusing to write a clean report."
         )
-    # Same rule one level down. Counting *files* passes when every review and sweep agent
-    # died and only `detect` wrote one: the run then assembles to `producing_parts: 0`,
-    # zero findings, zero coverage rows, exit 0 and a clean REPORT.md that says the review
-    # found nothing. A reader cannot tell that apart from a clean codebase, and a benchmark
-    # collector records it as a zero-recall result for the tool rather than a failed run.
-    if not any(path.stem.startswith(PRODUCING_PREFIXES) for path in paths):
-        raise AssembleError(
-            f"{parts_dir} holds {len(paths)} part file(s) but none of them is a producing "
-            f"part ({', '.join(PRODUCING_PREFIXES)}) — no agent reviewed any code. Found: "
-            f"{', '.join(sorted(p.stem for p in paths))}. Refusing to write a report that "
-            f"would read as 'no findings'."
-        )
     out: list[tuple[str, dict[str, Any]]] = []
     for path in paths:
         doc = _load_json(path, "part file")
@@ -430,8 +599,96 @@ def load_parts(run_dir: Path) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+def dispatched_stems(expected: list[str]) -> set[str] | None:
+    """The producing part stems the workflow actually dispatched, or None if it said nothing.
+
+    `check_expectations` asserts every dispatched part ARRIVED and arrived whole; this is the
+    converse. Without it any file under `parts/` whose stem starts with a producing prefix is
+    read, its findings assembled and its ledger rows counted — so with
+    `--expect review-unit-01=0` as the only expectation, a `parts/sweep-ghost.json` nobody
+    dispatched contributes a CRITICAL that renders in REPORT.md as `BOF-001`, with
+    `unrecognised_parts: 0`, `ok: true` and exit 0. `ID=COUNT` alone does not close it:
+    an agent wanting to exceed its count writes the surplus to a second file. The workflow
+    knows the exact set of stems it dispatched.
+
+    None when no `--expect` was given at all — the hand-assembly path, which is not a silent
+    pass: `main` turns an empty expectation set into `ok: false` and exit 1, because an
+    allowlist handed zero items admits everything and certifies it with exit 0.
+    """
+    stems = {item.partition("=")[0].removesuffix(".json") for item in expected}
+    return stems or None
+
+
+def require_producing_part(
+    parts: list[tuple[str, dict[str, Any]]], ghosts: list[str], parts_dir: Path
+) -> None:
+    """At least one DISPATCHED producing part, or there is nothing to assemble.
+
+    Counting *files* passes when every review and sweep agent died and only `detect` wrote
+    one: the run assembles to `producing_parts: 0`, zero findings, zero coverage rows, exit 0
+    and a clean REPORT.md that says the review found nothing. A reader cannot tell that apart
+    from a clean codebase, and a benchmark collector records it as a zero-recall result for
+    the tool rather than a failed run.
+
+    Run AFTER the allowlist, not before it: before it, a `parts/sweep-classes.json` nobody
+    dispatched satisfies the guard and is then filtered out, so a real CRITICAL is dropped
+    and REPORT.md says "No findings passed" over a run with no producing part at all, at exit
+    1 with `artifacts_written: true`.
+    """
+    if any(stem.startswith(PRODUCING_PREFIXES) for stem, _ in parts):
+        return
+    found = sorted([stem for stem, _ in parts] + ghosts)
+    raise AssembleError(
+        f"{parts_dir} holds {len(found)} part file(s) but none of them is a dispatched "
+        f"producing part ({', '.join(PRODUCING_PREFIXES)}) — no agent reviewed any code. "
+        f"Found: {', '.join(found) or 'nothing'}"
+        + (f" (undispatched: {', '.join(sorted(ghosts))})" if ghosts else "")
+        + ". Refusing to write a report that would read as 'no findings'."
+    )
+
+
+# The one part the workflow dispatches and deliberately never names in `--expect`:
+# DEDUP_SCHEMA has no `part_written` field, so an expectation for it fails the whole assembly
+# whenever the dedup agent returns merges without writing, and that phase must not be able to
+# cost the run. Allowlisted by EXACT STEM, never by prefix: as a prefix carve-out any
+# `parts/dedup-ghost.json` is read whatever `--expect` says, and a ghost dedup part merges a
+# CRITICAL out of REPORT.md with `unrecognised_parts: 0`, no Run warning, and its own name
+# printed nowhere.
+ALWAYS_ALLOWED_STEMS = frozenset({"dedup-agent"})
+
+
+def split_undispatched(
+    parts: list[tuple[str, dict[str, Any]]], allowed: set[str] | None
+) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+    """(the parts a rule may read, the stems nobody dispatched)."""
+    if allowed is None:
+        return parts, []
+    kept = []
+    ghosts = []
+    for stem, doc in parts:
+        if stem in allowed or stem in ALWAYS_ALLOWED_STEMS:
+            kept.append((stem, doc))
+        else:
+            ghosts.append(stem)
+    return kept, ghosts
+
+
+def _external_declarations(items: list[str]) -> dict[str, bool]:
+    """`--external-source ID=0|1` into `{stem: answered_yes}`. A malformed item is fatal."""
+    out: dict[str, bool] = {}
+    for item in items:
+        name, sep, value = item.partition("=")
+        if not sep or value not in {"0", "1"}:
+            raise AssembleError(f"--external-source {item!r}: expected ID=0 or ID=1")
+        out[name.removesuffix(".json")] = value == "1"
+    return out
+
+
 def check_expectations(
-    expected: list[str], parts: list[tuple[str, dict[str, Any]]], run_dir: Path
+    expected: list[str],
+    parts: list[tuple[str, dict[str, Any]]],
+    run_dir: Path,
+    declared_failures: list[str] | None = None,
 ) -> None:
     """Assert every part the workflow dispatched arrived, and arrived whole.
 
@@ -442,15 +699,14 @@ def check_expectations(
     detectable lie rather than a quietly shorter report.
     """
     if not expected:
-        # A checker handed zero items must not report success. The workflow always passes
-        # one `--expect` per dispatched part, so an empty list means this is a hand
-        # assembly — the documented recovery path when the assemble agent dies. That path
-        # silently drops the workflow's bookkeeping: on the 2026-08-07 slice cell one
-        # review agent never wrote its part file, the workflow logged the gap, and the
-        # hand-assembled document then reported `agent_failures: []` and a full
-        # `parts_read`, which reads as a clean 13-slice run rather than a 12-slice one.
-        # Nothing here can recover the expectation, so the document must say it was never
-        # checked rather than let an empty failure list be read as no failures.
+        # A checker handed zero items must not report success. The workflow always passes one
+        # `--expect` per dispatched part, so an empty list means this is a hand assembly —
+        # the documented recovery path when the assemble agent dies — and that path silently
+        # drops the workflow's bookkeeping: a review agent that never wrote its part file
+        # leaves `agent_failures: []` and a full `parts_read`, which reads as a clean
+        # 13-slice run rather than a 12-slice one. Nothing here can recover the expectation,
+        # so the document must say it was never checked rather than let an empty failure list
+        # be read as no failures.
         print(
             "assemble_findings: WARNING: no --expect given, so NOTHING verified that every "
             "dispatched agent wrote its part file. `run.agent_failures` and `run.parts_read` "
@@ -460,6 +716,13 @@ def check_expectations(
             file=sys.stderr,
         )
 
+    # An agent that reported it could not write its part file is already recorded as a
+    # failure in both artifacts, so a MISSING file for it is expected rather than fatal. Only
+    # the missing-file case is excused: dropping the whole expectation would drop the COUNT
+    # check on a file that IS present, turning `part_written: false` into an agent-controlled
+    # switch that disables the only cross-check on that part's contents while it is still
+    # read in full.
+    declared = {str(item).split(":", 1)[0].strip() for item in (declared_failures or ())}
     by_stem = {stem: doc for stem, doc in parts}
     missing: list[str] = []
     short: list[str] = []
@@ -468,7 +731,8 @@ def check_expectations(
         name, _, count_text = item.partition("=")
         stem = name.removesuffix(".json")
         if stem not in by_stem:
-            missing.append(stem)
+            if stem not in declared:
+                missing.append(stem)
             continue
         if not count_text:
             continue
@@ -476,14 +740,24 @@ def check_expectations(
             wanted = int(count_text)
         except ValueError as exc:
             raise AssembleError(f"--expect {item!r}: {count_text!r} is not an integer") from exc
-        got = len(by_stem[stem].get("findings") or [])
+        # `or []`, not the bare get. `collect` rejects a TRUTHY non-list; it reads
+        # `doc.get("findings") or []`, so `null`, `0`, `""`, `{}` and an ABSENT `findings`
+        # key all become "this agent found nothing" — which is exactly the shape this check
+        # exists to catch. Skipped here, an agent that returned 9 findings and wrote a part
+        # file with no `findings` key at all produces rc 0, zero findings and no warning.
+        raw = by_stem[stem].get("findings") or []
+        if not isinstance(raw, list):
+            # `len()` on a non-list raises an uncaught TypeError here, one step before
+            # `collect` rejects the same part with a precise message.
+            continue
+        got = len(raw)
         # Directional on purpose. The part FILE is the artifact; the returned count is a
-        # cross-check against summarisation on the way to disk, so only `part < returned`
-        # is evidence of loss. The symmetric version killed a real run: an invariant-sweep
-        # agent wrote nine findings to disk and returned zero (reading `findings` as "what
-        # I am returning inline", a defensible reading of an ambiguous contract), and the
-        # assembler threw away nine good findings over a disagreement in the safe
-        # direction. Over-delivery is logged, never fatal.
+        # cross-check against summarisation on the way to disk, so only `part < returned` is
+        # evidence of loss. The symmetric version kills real runs: an invariant-sweep agent
+        # that writes nine findings to disk and returns zero — reading `findings` as "what I
+        # am returning inline", a defensible reading of an ambiguous contract — loses all
+        # nine over a disagreement in the safe direction. Over-delivery is logged, never
+        # fatal.
         if got < wanted:
             short.append(f"{stem} holds {got} finding(s), the agent returned {wanted}")
         elif got > wanted:
@@ -519,7 +793,7 @@ def _coverage_row(part_id: str, row: dict[str, Any]) -> dict[str, Any]:
     the question takes the bug-class column. `check_ledger.py` is what actually audits these
     rows against the code-generated unit list; this projection is for the human reader.
     """
-    sites = [n for n in (row.get("sites_accounted") or []) if isinstance(n, int)]
+    sites = [n for n in _seq(row.get("sites_accounted")) if isinstance(n, int)]
     return {
         "group": part_id,
         "bug_class": _text(row.get("question")),
@@ -543,15 +817,29 @@ class Collected:
         self.unrecognised: list[str] = []
         self.incomplete: list[str] = []
         self.pointers: list[dict[str, Any]] = []
+        # `<part>.<field>` for every list-valued field that was present with the wrong
+        # type and therefore silently dropped. See `_dropped`.
+        self.ignored_fields: list[str] = []
 
 
-def collect(parts: list[tuple[str, dict[str, Any]]]) -> Collected:
+def collect(
+    parts: list[tuple[str, dict[str, Any]]],
+    benchmark_mode: bool = False,
+    returned_external: dict[str, bool] | None = None,
+    scope_root: str = "",
+) -> Collected:
     """Split the parts by role and normalise every producing part's findings.
 
     A finding's stable identity is `<part file stem>#<index>` — derived from the filename,
     never from the `part_id` field inside the file, so a field an agent mistyped cannot break
     the mapping that dedup and judge verdicts reference.
+
+    `returned_external` is the external-source declaration each part gave through the SCHEMA
+    (`--external-source`). The part file and the structured return can disagree — a file
+    written before a rejected structured answer was retried is the same staleness `--expect`
+    exists for — so any `true` from either source wins, exactly as it would if the two agreed.
     """
+    returned_external = returned_external or {}
     got = Collected()
     for stem, doc in parts:
         if stem.startswith(PRODUCING_PREFIXES):
@@ -568,26 +856,47 @@ def collect(parts: list[tuple[str, dict[str, Any]]]) -> Collected:
                 if missing:
                     got.incomplete.append(f"{stem}#{index} ({', '.join(missing)})")
                 key = f"{stem}#{index}"
-                got.findings[key] = normalize_finding(raw, stem, key)
-            for index, row in enumerate(doc.get("ledger") or []):
+                got.findings[key] = normalize_finding(raw, stem, key, scope_root)
+            if _dropped(doc.get("ledger")):
+                got.ignored_fields.append(f"{stem}.ledger")
+            for index, row in enumerate(_seq(doc.get("ledger"))):
                 if not isinstance(row, dict):
-                    raise AssembleError(
-                        f"part {stem}: ledger[{index}] is {type(row).__name__}, expected an object"
-                    )
+                    # Dropped, not fatal. A wholly wrong-typed `ledger` is already tolerated
+                    # one line above (`_dropped` records it and the run continues), so
+                    # raising here would make ONE bad row the strictest failure in the file:
+                    # exit 2, no artifacts, and the previous run's four deleted, over a field
+                    # that feeds only REPORT.md's display table — `check_ledger` re-reads the
+                    # parts itself and degrades to `{"error": …}` on the same input.
+                    got.ignored_fields.append(f"{stem}.ledger[{index}]")
+                    continue
                 got.coverage.append(_coverage_row(stem, row))
             got.externals.append(
                 {
                     "group": stem,
-                    "consulted": doc.get("external_sources_consulted") is True,
+                    "consulted": doc.get("external_sources_consulted") is True
+                    or returned_external.get(stem) is True,
                     "detail": _text(doc.get("external_sources_detail")) or "none",
+                    # Whether this part ANSWERED, in either channel. The declaration is
+                    # benchmark-only instrumentation (`benchmarkMode`), so with it off every
+                    # part reports `consulted: false` whether or not the reviewer looked
+                    # anything up — indistinguishable from an honest no. A scored run must be
+                    # able to tell "declared nothing" from "was never asked". The
+                    # `benchmark_mode and` conjunct keeps a model that volunteers the property
+                    # unprompted from making an unasked cell look cleared; the rest is the
+                    # answer itself, because `declarations_seen` counts records the check
+                    # actually read, and a constant would count silent parts as declarations.
+                    "declared": benchmark_mode
+                    and ("external_sources_consulted" in doc or stem in returned_external),
                 }
             )
-            for raw_ptr in doc.get("pointers") or []:
+            if _dropped(doc.get("pointers")):
+                got.ignored_fields.append(f"{stem}.pointers")
+            for raw_ptr in _seq(doc.get("pointers")):
                 if not isinstance(raw_ptr, dict):
                     continue
                 got.pointers.append(
                     {
-                        "file": normalize_path(raw_ptr.get("file")),
+                        "file": normalize_path(raw_ptr.get("file"), scope_root),
                         "line": _line(raw_ptr.get("line")),
                         "note": _text(raw_ptr.get("note")),
                         "from": stem,
@@ -626,6 +935,18 @@ def tier1(findings: dict[str, dict[str, Any]]) -> dict[str, str]:
             if member != primary:
                 merged[member] = primary
     return merged
+
+
+def _cross_class_too_far(findings: dict[str, dict[str, Any]], component: list[str]) -> bool:
+    """Does this component contain a cross-class pair further apart than the cap allows?"""
+    for index, left in enumerate(component):
+        for right in component[index + 1 :]:
+            a, b = findings[left], findings[right]
+            if a["bug_class"] == b["bug_class"]:
+                continue
+            if abs(a["line"] - b["line"]) > CROSS_CLASS_NEARBY_LINES:
+                return True
+    return False
 
 
 def _find(parent: dict[str, str], key: str) -> str:
@@ -685,6 +1006,14 @@ def tier1_5(findings: dict[str, dict[str, Any]], merged: dict[str, str]) -> int:
         for component in components.values():
             if len(component) < 2:
                 continue
+            # The cap is pairwise but the merge is by connected component, so
+            # A(buffer-overflow,100) + B(integer-overflow,100) + C(buffer-overflow,102)
+            # put B and C — cross-class, two lines apart — in one group through A, which
+            # is precisely the merge CROSS_CLASS_NEARBY_LINES was measured to prevent.
+            # A component holding such a pair is left whole for the dedup agent, which
+            # reads both write-ups instead of guessing from a line distance.
+            if _cross_class_too_far(findings, component):
+                continue
             primary = min(component, key=lambda k: _election_key(findings, k))
             demoted = [key for key in component if key != primary]
             for key in demoted:
@@ -707,34 +1036,52 @@ def apply_agent_merges(
 ) -> int:
     """Fold the dedup agents' merges in on top of tier 1. Returns the ignored count.
 
-    A merge is ignored when either side is a key that does not exist or has already been
-    merged. Chaining is what that second rule prevents: if `merged_into` could point at a
-    finding that is itself merged, the report would show a primary that is not in the
-    reported set, and `also_known_as` would not round-trip.
+    A merge is ignored when either side is a key that does not exist, has already been
+    merged, or is not in the stated primary's collision bucket. Chaining is what the second
+    rule prevents: if `merged_into` could point at a finding that is itself merged, the
+    report would show a primary that is not in the reported set, and `also_known_as` would
+    not round-trip. The third is the bucket constraint the agent was given and the workflow
+    enforces on the agent's *return* — it has to hold here too, because this script reads
+    the agent's part file and owns the artifacts.
+
+    Buckets are computed once, before any agent merge is applied, exactly as the workflow
+    computes `bucketOf` once before dispatching the agent.
     """
+    buckets = collision_buckets(findings, merged)
     ignored = 0
     for _stem, doc in dedup_parts:
-        for merge in doc.get("merges") or []:
+        # A whole dedup return dropped for being an object instead of an array otherwise
+        # counts as zero merges and zero ignored merges — a silent no-op with the same
+        # signature as an honest one.
+        ignored += 1 if _dropped(doc.get("merges")) else 0
+        for merge in _seq(doc.get("merges")):
             if not isinstance(merge, dict):
                 ignored += 1
                 continue
             stated = str(merge.get("primary") or "")
-            duplicates = [str(d) for d in (merge.get("duplicates") or [])]
+            duplicates = [str(d) for d in _seq(merge.get("duplicates"))]
             if stated not in findings or stated in merged:
                 ignored += max(1, len(duplicates))
                 continue
-            live = [stated] + [
-                d for d in duplicates if d != stated and d in findings and d not in merged
+            live = [
+                d
+                for d in duplicates
+                if d != stated
+                and d in findings
+                and d not in merged
+                and stated in buckets
+                and buckets.get(d) == buckets[stated]
             ]
-            ignored += len(duplicates) - (len(live) - 1)
-            if len(live) < 2:
+            ignored += len(duplicates) - len(live)
+            if not live:
                 continue
             # Re-elect rather than trusting the agent's choice. The agent is asked to
             # prefer the higher-confidence member and knows nothing about how the site
             # will be graded, so it can and does nominate a `(file-level)` report over
             # two that named the function and the exact line.
-            primary = min(live, key=lambda k: _election_key(findings, k))
-            for member in live:
+            group = [stated, *live]
+            primary = min(group, key=lambda k: _election_key(findings, k))
+            for member in group:
                 if member != primary:
                     merged[member] = primary
     resolve_chains(merged)
@@ -765,12 +1112,20 @@ def apply_verdicts(
     ignored = 0
     judged: set[str] = set()
     for _stem, doc in verdict_parts:
-        for verdict in doc.get("verdicts") or []:
+        ignored += 1 if _dropped(doc.get("verdicts")) else 0
+        for verdict in _seq(doc.get("verdicts")):
             if not isinstance(verdict, dict):
                 ignored += 1
                 continue
             key = str(verdict.get("key") or "")
             name = _text(verdict.get("fp_verdict"))
+            # An unrecognised label is NOT a rejection. Treating anything outside
+            # SURVIVOR_VERDICTS as one means a judge that types `TP` instead of
+            # `TRUE_POSITIVE` deletes the finding's severity, drops it from the reported set
+            # and from SARIF, and counts nothing anywhere.
+            if name and name.upper() not in KNOWN_VERDICTS:
+                ignored += 1
+                continue
             if key not in findings or key in merged or key in judged or not name:
                 ignored += 1
                 continue
@@ -780,7 +1135,15 @@ def apply_verdicts(
             finding["fp_rationale"] = _text(verdict.get("fp_rationale"))
             finding["severity_validated"] = True
             if name.upper() in SURVIVOR_VERDICTS:
-                finding["severity"] = _text(verdict.get("severity")) or "MEDIUM"
+                # Validated exactly like the reviewer path. An unrecognised level scores 0
+                # in SEVERITY_ORDER, which is below every filter including `all`, so a
+                # judged TRUE_POSITIVE would silently vanish from every report tier.
+                judged_severity = _text(verdict.get("severity")).upper()
+                if judged_severity in SEVERITY_LEVELS:
+                    finding["severity"] = judged_severity
+                else:
+                    finding["severity"] = "MEDIUM"
+                    finding["severity_validated"] = False
                 finding["attack_vector"] = _text(verdict.get("attack_vector"))
                 finding["exploitability"] = _text(verdict.get("exploitability"))
                 finding["severity_rationale"] = _text(verdict.get("severity_rationale"))
@@ -790,14 +1153,31 @@ def apply_verdicts(
                 # A rejected finding carries no severity. Dropping what the reviewer
                 # claimed is the point: the "Not reported" table would otherwise print a
                 # CRITICAL beside a finding the judge just called a false positive.
-                for field in ("severity", "attack_vector", "exploitability"):
+                for field in (
+                    "severity",
+                    "attack_vector",
+                    "exploitability",
+                    "severity_rationale",
+                ):
                     finding.pop(field, None)
 
     unjudged: list[str] = []
     for key, finding in findings.items():
-        if key in merged or key in judged:
+        if key in judged:
+            continue
+        if key in merged:
+            # A duplicate is represented by its primary and is normally never printed — but
+            # `findings_model.primaries()` resurrects one whose primary a judge rejected, and
+            # a finding with no `fp_verdict` and no `severity_validated` defaults to
+            # "survives, severity deliberately assigned". The reviewer's own guess is then
+            # reported as judge-validated, with `unjudged: 0` and the only trace an empty
+            # string in `verdict_counts`.
+            finding.setdefault("fp_verdict", "LIKELY_TP")
+            finding.setdefault("fp_rationale", REVIEWER_RATIONALE)
+            finding["severity_validated"] = False
             continue
         if no_judge:
+            reviewer_assigned = bool(finding.get("severity"))
             finding["fp_verdict"] = "LIKELY_TP"
             finding["fp_rationale"] = REVIEWER_RATIONALE
             finding["severity"] = finding.get("severity") or "MEDIUM"
@@ -805,8 +1185,13 @@ def apply_verdicts(
             # True on purpose, and load-bearing: findings_model.reported_findings() exempts
             # every *unvalidated* finding from the severity filter, so leaving this False
             # here would make `--severity-filter high` quietly report LOW findings too.
-            # "Validated" means "someone assigned this deliberately", not "a judge did".
-            finding["severity_validated"] = True
+            # "Validated" means "someone assigned this deliberately", not "a judge did" — so
+            # it is False when NOBODY did: a reviewer that omitted `severity` got the MEDIUM
+            # on the line above from this function, and stamping that validated drops the
+            # finding out of `--severity-filter high` with no counter, no warning and no
+            # marker. A promoted pointer is the same case: its LOW is a placeholder nobody
+            # assessed.
+            finding["severity_validated"] = reviewer_assigned and not finding.get("from_pointer")
             continue
         unjudged.append(key)
         finding["fp_verdict"] = "LIKELY_TP"
@@ -819,14 +1204,19 @@ def apply_verdicts(
 def assign_ids(findings: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Public ids, assigned here and nowhere else, after merging.
 
-    Sorted by `(file, padded line, bug_class, title)` and numbered per class prefix, so the
-    same inputs always give the same `BOF-001`. Ids are assigned to duplicates too: the
-    report cites them in `also_known_as`, and a merged finding with no id could not be
-    referenced at all.
+    Sorted by `(file, line, bug_class, title)` and numbered per class prefix, so the same
+    inputs always give the same `BOF-001`. Ids are assigned to duplicates too: the report
+    cites them in `also_known_as`, and a merged finding with no id could not be referenced
+    at all.
+
+    The line is sorted as an INTEGER. `pad3` is an id-suffix formatter and is wrong as a sort
+    key: findings at 90, 142 and 1000 in one file number BOF-001@90, BOF-002@1000,
+    BOF-003@142, so every C file over 999 lines gets ids and a report ordering that
+    contradict the file.
     """
     ordered = sorted(
         findings.values(),
-        key=lambda f: (f["file"], pad3(f["line"]), f["bug_class"], f["title"]),
+        key=lambda f: (f["file"], f["line"], f["bug_class"], f["title"]),
     )
     counters: dict[str, int] = {}
     for finding in ordered:
@@ -853,33 +1243,118 @@ def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def run_ledger_gate(run_dir: Path, units_doc: Any) -> Any:
-    """Run `check_ledger` in-process and return the compact summary for `run.ledger`.
+def run_ledger_gate(
+    run_dir: Path, units_doc: dict[str, Any], allowed: set[str] | None = None
+) -> tuple[dict[str, Any], Any]:
+    """Run `check_ledger` in-process. Returns (summary for `run.ledger`, full gate report).
 
     In-process rather than as its own agent for the same reason `render_report` and
     `generate_sarif` are called here: it is deterministic code with no third-party
     dependencies, and an agent whose whole job is to shell out to a script is an agent that
     can forget to, summarise the output, or crash and take the report with it.
 
-    A gate that cannot run is *reported*, never fatal. `LedgerError` means there was nothing
-    to check — no units, no rows — which says nothing about whether the findings are worth
-    shipping. The failure has to be visible in `run.ledger.error` and on stderr, because a
-    silently absent gate reads exactly like a gate that passed.
+    NOTHING raises out of here. It still fails the run — `main` exits non-zero and every
+    artifact carries "coverage is **unmeasured**" — but the artifacts are WRITTEN first, so
+    one malformed unit in the gate's input cannot throw away a completed review. `except
+    LedgerError` is not enough on its own: an `AttributeError` from one part file's
+    `"ledger": {…}` object, a `ValueError` from a `max_unit_lines` of `"forty"` and a
+    tree-sitter ABI mismatch (a `ValueError`, not an `ImportError`) all take the same route
+    out, to exit 2 with zero artifacts.
+
+    The full report goes back to the caller rather than to disk here. Written eagerly, a
+    fresh `ledger-gate.json` lands beside the PREVIOUS run's findings.json whenever a later
+    step fails, and on a gate that could not run at all the previous run's file stays in
+    place still claiming 100%.
     """
     try:
-        parts = check_ledger.load_parts(run_dir / "parts", PRODUCING_PREFIXES)
-        report = check_ledger.check(units_doc, parts)
+        parts, _ = split_undispatched(
+            check_ledger.load_parts(run_dir / "parts", PRODUCING_PREFIXES), allowed
+        )
+        report = check_ledger.check(check_ledger.attach_sites(units_doc), parts)
     except check_ledger.LedgerError as exc:
-        print(f"assemble_findings: WARNING: ledger gate did not run — {exc}", file=sys.stderr)
-        return {"error": str(exc)}
-    (run_dir / "ledger-gate.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return {"error": f"{exc}"}, None
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"unexpected {type(exc).__name__} in the coverage gate: {exc}"}, None
     # The module's own projection, not a second one written here: two definitions of the
     # gate summary would drift, and `run.ledger` is what the workflow reads back.
-    return check_ledger._summary(report)  # noqa: SLF001
+    return check_ledger._summary(report), report  # noqa: SLF001
 
 
-def build_document(ns: argparse.Namespace, got: Collected) -> tuple[dict[str, Any], dict[str, int]]:
-    """Assemble the whole result document. Returns (document, ignored counts)."""
+def _clear_stale_artifacts(run_dir: Path) -> str:
+    """Remove a PREVIOUS run's artifacts when this run is about to exit 2 having written none.
+
+    `enumerate_units.write_outputs` clears these at the start of a full workflow run, which
+    closes it for the workflow — but not for the path SKILL.md and the assemble prompt both
+    send the reader down: re-running this script by hand. A good run, then a corrupt part
+    file, then a hand re-assemble gives `rc=2`, "NO artifact was written", and `findings.json`,
+    `REPORT.md` and `REPORT.sarif` all still holding run 1 — and the assemble agent, told to
+    answer `artifacts_written` from what is actually in the directory, honestly reports `true`
+    for a run that wrote nothing.
+
+    Returns a sentence to append to the failure message, or "" — silently deleting a
+    reader's files is worse than the state it fixes.
+    """
+    gone = []
+    for name in ("findings.json", "REPORT.md", "REPORT.sarif", "ledger-gate.json"):
+        path = run_dir / name
+        try:
+            if path.is_file():
+                path.unlink()
+                gone.append(name)
+        except OSError:  # noqa: PERF203 - an artifact that cannot be removed is reported below
+            gone.append(f"{name} (COULD NOT REMOVE)")
+    if not gone:
+        return ""
+    return (
+        f" A PREVIOUS run's artifacts were in {run_dir} and have been removed ("
+        + ", ".join(gone)
+        + "), because leaving them there reports one run's coverage as another's."
+    )
+
+
+def gate_failure(ledger: Any) -> str:
+    """Why this run's coverage gate did not pass, or "" when it did.
+
+    A gate that could not run at all and a gate that ran and rejected every single row are
+    the same thing to a reader — nothing verified this review against the parse — so both
+    are failures here.
+
+    No `units.json` at all is a gate failure too. This script is also the documented
+    hand-assembly path over part files alone, where there is no parse to measure against, but
+    exit 0 is defined as "the artifacts were written AND the coverage gate accepted the
+    ledger": returning "" there shows a human reading this script's own JSON summary
+    unqualified success over a run nothing checked. The workflow is protected separately —
+    `checks_required` comes back null and it refuses to report `gateAccepted` on a null.
+    """
+    if not isinstance(ledger, dict):
+        return (
+            "no units.json, so no coverage gate ran over this run — the artifacts are "
+            "assembled but nothing measured them against a parse of the source"
+        )
+    if ledger.get("error"):
+        return f"the coverage gate could not check this run — {ledger['error']}"
+    missing = int(ledger.get("missing_row_count") or 0)
+    violations = int(ledger.get("violation_count") or 0)
+    if missing or violations:
+        return (
+            f"the coverage gate rejected this run's ledger: {missing} unanswered row(s), "
+            f"{violations} violation(s), "
+            f"{ledger.get('checks_satisfied')} of {ledger.get('checks_required')} "
+            f"required check(s) satisfied"
+        )
+    return ""
+
+
+def build_document(
+    ns: argparse.Namespace, got: Collected
+) -> tuple[dict[str, Any], dict[str, int], Any]:
+    """Assemble the whole result document. Returns (document, ignored counts, gate report).
+
+    The gate report is returned rather than written: `main` writes it with the other three
+    artifacts so a failure after this point cannot leave a fresh `ledger-gate.json` beside
+    the previous run's `findings.json`, and cannot leave the previous run's clean sheet in
+    place when this run's gate could not run at all.
+    """
     run_dir: Path = ns.run_dir
     # A part the workflow certified complete (every returned finding carried every required
     # field) whose FILE nonetheless has incomplete findings is stale: the agent wrote the
@@ -896,14 +1371,39 @@ def build_document(ns: argparse.Namespace, got: Collected) -> tuple[dict[str, An
         detect = {}
     if not isinstance(detect, dict):
         raise AssembleError(f"{run_dir / 'detect.json'}: expected a JSON object")
-    units = _optional_json(run_dir / "units.json", "unit list")
-    if isinstance(units, dict):
-        ledger = run_ledger_gate(run_dir, units)
+    raw_units = _optional_json(run_dir / "units.json", "unit list")
+    units = raw_units if isinstance(raw_units, dict) else None
+    # Every slice `enumerate_units.py` generated should have a `review-<id>` part file. The
+    # workflow dispatches from the detect agent's TRANSCRIPTION of the assignment ids, so a
+    # slice it failed to copy is never dispatched, gets no `--expect`, and its absence shows
+    # up only as a drop in `checks_satisfied`. units.json is the code-generated list, so it
+    # is the one place the drop can be named.
+    dispatched = [
+        str(a.get("id") or "")
+        for a in ((units or {}).get("assignments") or [])
+        if isinstance(a, dict)
+    ]
+    present = {entry["group"] for entry in got.externals}
+    missing_slices = sorted(
+        f"review-{aid}" for aid in dispatched if aid and f"review-{aid}" not in present
+    )
+    gate_report: Any = None
+    if units is not None:
+        ledger, gate_report = run_ledger_gate(
+            run_dir, units, dispatched_stems(getattr(ns, "expect", None) or [])
+        )
+    elif raw_units is not None:
+        # Unreported, a units.json whose root is a JSON array skips the gate silently and
+        # exits 0 while `{}` and `{"units": []}` are fatal — the same corruption with
+        # opposite outcomes depending on the root type.
+        ledger = {"error": f"units.json is a {type(raw_units).__name__}, not an object"}
     else:
-        # No unit list is a legitimate configuration, not a failure: the gate measures the
-        # ledger against a parse that this run may never have produced. An answer someone
-        # else already left on disk is still honoured.
-        ledger = _optional_json(run_dir / "ledger-gate.json", "ledger gate")
+        # No unit list at all: the gate measures the ledger against a parse this run never
+        # produced, so coverage is UNMEASURED. A `ledger-gate.json` an earlier run left in
+        # this directory is NOT read back — nothing compares its unit ids, part list or
+        # timestamp against this run, so honouring it reports a previous run's 100% as this
+        # one's.
+        ledger = None
 
     # Promote BEFORE any merging, so a promoted pointer is deduplicated on the same terms
     # as everything else and can never end up as a near-duplicate of the finding it was
@@ -984,9 +1484,12 @@ def build_document(ns: argparse.Namespace, got: Collected) -> tuple[dict[str, An
             # from `incomplete_findings`, which cannot tell a stale file from a thin one.
             "stale_part_files": stale_parts,
             "parts_read": [e["group"] for e in got.externals],
+            # Slices units.json generated that no part file answers: code the partition
+            # assigned to somebody and nobody reviewed.
+            "missing_review_parts": missing_slices,
             "unrecognised_parts": sorted(got.unrecognised),
             "ledger": ledger,
-            "units": units.get("totals") if isinstance(units, dict) else None,
+            "units": units.get("totals") if units else None,
         },
         "stats": {},
         "findings": ordered,
@@ -1027,8 +1530,9 @@ def build_document(ns: argparse.Namespace, got: Collected) -> tuple[dict[str, An
         "ignored_merges": ignored_merges,
         "ignored_verdicts": ignored_verdicts,
         "unrecognised_parts": len(got.unrecognised),
+        "ignored_fields": len(got.ignored_fields),
     }
-    return doc, counts
+    return doc, counts, gate_report
 
 
 # ------------------------------------------------------------------ cli
@@ -1037,8 +1541,13 @@ def build_document(ns: argparse.Namespace, got: Collected) -> tuple[dict[str, An
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True, type=Path)
-    parser.add_argument("--threat-model", required=True)
-    parser.add_argument("--severity-filter", required=True)
+    # Both are recorded verbatim in findings.json and both are silently normalised
+    # downstream, so an unvalidated value put a filter in `run.severity_filter` that never
+    # ran and a threat model in the report header that means nothing.
+    parser.add_argument(
+        "--threat-model", required=True, choices=["REMOTE", "LOCAL_UNPRIVILEGED", "BOTH"]
+    )
+    parser.add_argument("--severity-filter", required=True, choices=["all", "medium", "high"])
     parser.add_argument("--scope", default=".")
     parser.add_argument("--context-roots", default=".")
     parser.add_argument("--worker-model", default="inherit")
@@ -1062,6 +1571,13 @@ def main(argv: list[str] | None = None) -> int:
             "number of findings in it (repeatable); a mismatch is a hard failure"
         ),
     )
+    parser.add_argument(
+        "--benchmark-mode",
+        action="store_true",
+        help="the run asked every reviewer to declare external sources (the workflow's "
+        "`benchmarkMode`). Recorded per part as `declared`, so scoring can tell a clean "
+        "declaration from a question that was never posed.",
+    )
     parser.add_argument("--groups-attempted", default="")
     parser.add_argument("--groups-failed", default="")
     parser.add_argument("--agent-failure", action="append", default=[])
@@ -1074,15 +1590,69 @@ def main(argv: list[str] | None = None) -> int:
         "having incomplete findings therefore means the file is stale — written before a "
         "rejected structured answer was retried — not that the agent had nothing to say.",
     )
+    parser.add_argument(
+        "--external-source",
+        action="append",
+        default=[],
+        dest="external_source",
+        metavar="ID=0|1",
+        help="the external-source declaration a part gave through the SCHEMA (repeatable). "
+        "The part file can disagree with the accepted return — same staleness `--expect` "
+        "exists for — so a `1` from either source counts as consulted.",
+    )
     ns = parser.parse_args(argv)
 
     try:
+        scope_root = str(Path(ns.scope).resolve())
+    except OSError:
+        scope_root = ns.scope
+    try:
         parts = load_parts(ns.run_dir)
-        check_expectations(ns.expect, parts, ns.run_dir)
-        got = collect(parts)
-        doc, counts = build_document(ns, got)
+        check_expectations(ns.expect, parts, ns.run_dir, ns.agent_failure)
+        parts, ghost_parts = split_undispatched(parts, dispatched_stems(ns.expect))
+        require_producing_part(parts, ghost_parts, ns.run_dir / "parts")
+        # `verdict-` is not in ALWAYS_ALLOWED_STEMS and `--expect` is mandatory for exit 0,
+        # so the judged configuration — the one the `--no-judge` help advertises — has
+        # exactly one way to allowlist a verdict part: `--expect verdict-NN`. Say so here,
+        # because a judge part nobody named is otherwise dropped in silence, its rejections
+        # discarded and its findings shipped as survivors.
+        dropped_verdicts = sorted(s for s in ghost_parts if s.startswith(VERDICT_PREFIX))
+        if dropped_verdicts and not ns.no_judge:
+            raise AssembleError(
+                f"judge part file(s) {', '.join(dropped_verdicts)} are in "
+                f"{ns.run_dir / 'parts'} but were not named in --expect, so every verdict in "
+                f"them would be discarded and their findings would ship as survivors. Pass "
+                f"--expect for each of them, or --no-judge if no judge ran."
+            )
+        got = collect(
+            parts, ns.benchmark_mode, _external_declarations(ns.external_source), scope_root
+        )
+        # Reported through the same field a misnamed stem uses: their contents are in no
+        # artifact, and a part nobody dispatched is exactly as much of a bookkeeping fault
+        # as a part nobody reads.
+        got.unrecognised.extend(ghost_parts)
+        doc, counts, gate_report = build_document(ns, got)
+        # Both artifacts are rendered BEFORE either is written. Written findings.json first,
+        # a generator that raises leaves this run's findings on disk beside the PREVIOUS
+        # run's REPORT.sarif — two files describing different runs, and an exit code that
+        # says nothing about which.
+        report_md = render_report.render(doc)
+        report_sarif = json.dumps(generate_sarif.build_sarif(doc), indent=2) + "\n"
     except AssembleError as exc:
-        print(f"assemble_findings: {exc}", file=sys.stderr)
+        print(f"assemble_findings: {exc}{_clear_stale_artifacts(ns.run_dir)}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        # Exit 1 means "assembled but unverified — the artifacts are complete, do not
+        # re-run". An uncaught traceback also exits 1, and the caller then tells the user
+        # exactly that over an empty directory. Nothing has been written here, so this is a
+        # 2, and the part files it names are still recoverable.
+        print(
+            f"assemble_findings: unexpected {type(exc).__name__}: {exc}. NO artifact was "
+            f"written; the part files under {ns.run_dir / 'parts'} are intact and this run "
+            f"can be re-assembled once the malformed part is fixed."
+            + _clear_stale_artifacts(ns.run_dir),
+            file=sys.stderr,
+        )
         return 2
 
     if doc["run"].get("stale_part_files"):
@@ -1118,24 +1688,150 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
+    if got.ignored_fields:
+        print(
+            "assemble_findings: WARNING: list field(s) "
+            + ", ".join(got.ignored_fields)
+            + " are present with the wrong type and were dropped — that agent's rows are "
+            "in no artifact and the run reads exactly like one where it had nothing to say",
+            file=sys.stderr,
+        )
+
     findings_json = ns.run_dir / "findings.json"
-    findings_json.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    outputs: list[tuple[Path, str]] = [
+        (findings_json, json.dumps(doc, indent=2, ensure_ascii=False) + "\n"),
+        (ns.run_dir / "REPORT.md", report_md),
+        (ns.run_dir / "REPORT.sarif", report_sarif),
+        # Written HERE, with the rest, rather than eagerly inside the gate. See
+        # `run_ledger_gate`.
+        (
+            ns.run_dir / "ledger-gate.json",
+            json.dumps(
+                gate_report
+                if gate_report is not None
+                else {"error": gate_failure(doc["run"].get("ledger")) or "the gate did not run"},
+                indent=2,
+            )
+            + "\n",
+        ),
+    ]
+    # Staged, then renamed, and inside a `try`: an ENOSPC, a read-only output directory or a
+    # run dir removed mid-run otherwise escapes as a traceback and exits 1 — which the
+    # workflow prompt and SKILL.md both define as "everything WAS written, do not re-run" —
+    # over a findings.json holding this run beside a REPORT.sarif holding the last one.
+    # `Path.replace` is atomic within a filesystem, so the window between the four is as
+    # small as this can be made without a transaction.
+    staged: list[tuple[Path, Path]] = []
+    # (backup or None, destination) for every rename already done, so a failure part-way
+    # through can be undone. Without the rollback the message below still promises "NO
+    # artifact was replaced" while a PermissionError on the third of four renames — a macOS
+    # `uchg` flag, an ACL denying delete, an EACCES from an NFS mount — leaves run 2's
+    # findings.json and REPORT.md beside run 1's REPORT.sarif and ledger-gate.json at exit 2.
+    # Two artifacts describing different runs is precisely the state the staging exists to
+    # make impossible.
+    replaced: list[tuple[Path | None, Path]] = []
+    try:
+        # A destination that is a DIRECTORY is refused up front rather than rolled back:
+        # the rollback moves the old artifact aside and back, and a directory moved aside
+        # is not something this should be doing on a path it does not own.
+        #
+        # The STAGING paths are checked too. `<artifact>.partial` is a fixed, predictable
+        # path inside a directory every producing worker can write to, so a stale
+        # `REPORT.sarif.partial` DIRECTORY is agent-plantable: `tmp.write_text` raises
+        # IsADirectoryError, the rollback raises PermissionError unlinking it, and that
+        # escapes `main()` as exit 1 — "everything WAS written, do not re-run" — over a
+        # directory missing artifacts.
+        for path, _ in outputs:
+            for candidate in (path, path.with_name(path.name + ".partial")):
+                if candidate.is_dir():
+                    raise IsADirectoryError(
+                        f"{candidate} is a directory, so it cannot be written or replaced"
+                    )
+        for path, text in outputs:
+            tmp = path.with_name(path.name + ".partial")
+            # Appended BEFORE the write, so a `write_text` that creates and truncates the
+            # file and then fails — ENOSPC — still has its staging file cleaned up.
+            staged.append((tmp, path))
+            tmp.write_text(text, encoding="utf-8")
+        for tmp, path in staged:
+            backup = path.with_name(path.name + ".prev")
+            if path.exists():
+                path.replace(backup)
+                replaced.append((backup, path))
+            else:
+                replaced.append((None, path))
+            tmp.replace(path)
+    except (OSError, ValueError) as exc:
+        # `ValueError` as well as `OSError`, for `UnicodeEncodeError`: `json.loads` decodes
+        # `\ud800` in a part file into a LONE SURROGATE and `write_text(encoding="utf-8")`
+        # then raises a ValueError, which misses an OSError-only handler, escapes `main()`
+        # and exits 1 — the code the workflow and SKILL.md define as "everything WAS written,
+        # do not re-run" — over a directory still holding the PREVIOUS run's four artifacts.
+        #
+        # Every step of the rollback below is guarded for the same reason: unguarded file I/O
+        # here propagates out of `main()` to that same exit 1, over a directory MISSING
+        # artifacts and with no `assemble_findings:` line printed at all. And it restores with
+        # `backup.replace(path)` alone — `Path.replace` overwrites atomically, so a preceding
+        # `path.unlink()` buys nothing and destroys the artifact it is restoring if it fails
+        # between the two.
+        undo_failed: list[str] = []
+        for backup, path in replaced:
+            try:
+                if backup is not None:
+                    backup.replace(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError as undo:
+                undo_failed.append(f"{path.name} ({undo})")
+        for tmp, _ in staged:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:  # noqa: PERF203 - a leftover .partial is litter, not a failure
+                pass
+        print(
+            f"assemble_findings: {type(exc).__name__} writing the artifacts ({exc}). "
+            + (
+                f"THE OUTPUT DIRECTORY IS INCONSISTENT: {len(undo_failed)} artifact(s) could "
+                f"not be rolled back — {'; '.join(undo_failed)}. Any `.prev` file left in "
+                f"{ns.run_dir} is the previous run's copy of the artifact beside it. "
+                if undo_failed
+                # Exit 2 means "no artifact was written", and the rollback has just put the
+                # PREVIOUS run's four artifacts back — which `c-review.js` then has the
+                # assemble agent answer `artifacts_written` from, honestly reporting `true`
+                # for a run that wrote nothing. Only when the rollback succeeded: a
+                # half-rolled-back directory is inconsistent and its `.prev` files are the
+                # only copy left.
+                else "NO artifact was replaced." + _clear_stale_artifacts(ns.run_dir) + " "
+            )
+            + f"The part files under {ns.run_dir / 'parts'} are intact and this run can be "
+            f"re-assembled once the output directory is writable.",
+            file=sys.stderr,
+        )
+        return 2
+    for backup, _ in replaced:
+        if backup is not None:
+            backup.unlink(missing_ok=True)
 
-    # The generators log to stdout; stdout here is a machine-readable summary, so their
-    # chatter goes to stderr and the caller can parse what it reads.
-    args = ["--findings", str(findings_json), "--output-dir", str(ns.run_dir)]
-    with contextlib.redirect_stdout(sys.stderr):
-        rc = render_report.main(args)
-        if rc == 0:
-            rc = generate_sarif.main(args)
-    if rc != 0:
-        print(f"assemble_findings: artifact generation failed (exit {rc})", file=sys.stderr)
-        return rc
-
+    # Every gate failure (see `gate_failure`) is reported AFTER the artifacts are on disk.
+    # Exit 1 is "assembled, but unverified"; exit 2 is still "nothing was assembled".
+    failure = gate_failure(doc["run"].get("ledger"))
+    if not ns.expect:
+        # A checker handed zero items must not report success. With no `--expect` the
+        # allowlist admits every file under `parts/`, so a `parts/sweep-ghost.json` nobody
+        # dispatched contributes half of a run's certified coverage and a CRITICAL to
+        # REPORT.md at `ok: true`, exit 0 — which is what the workflow and any CI wrapper key
+        # off. The warning, the `expectations_checked: false` field and the SARIF
+        # notification all fire on that run, and not one of them changes an exit code.
+        failure = failure or (
+            "no --expect was given, so nothing verified which parts this run dispatched: "
+            "every file under parts/ was read and no missing part could be detected"
+        )
     print(
         json.dumps(
             {
-                "ok": True,
+                "ok": not failure,
+                "artifacts_written": True,
+                "gate_error": failure or None,
                 "findings_json": str(findings_json),
                 "report_md": str(ns.run_dir / "REPORT.md"),
                 "report_sarif": str(ns.run_dir / "REPORT.sarif"),
@@ -1150,6 +1846,13 @@ def main(argv: list[str] | None = None) -> int:
             indent=2,
         )
     )
+    if failure:
+        print(
+            f"assemble_findings: {failure}. findings.json, REPORT.md and REPORT.sarif WERE "
+            f"written and all three say coverage is unverified; do not re-run.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

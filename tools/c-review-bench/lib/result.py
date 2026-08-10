@@ -209,15 +209,25 @@ def normalise_c_review(doc: dict[str, Any]) -> dict[str, Any]:
     return {
         "findings": findings,
         "external_sources_consulted": consulted,
-        # How many hunters declared anything at all. Carried through so `score` can say
-        # whether the declaration check inspected zero records: an empty list and a list of
-        # sixteen clean declarations both produce `consulted: false`, and only one of them
-        # is evidence.
-        "declarations_seen": sum(1 for e in externals if isinstance(e, dict)),
+        # How many hunters were actually ASKED. Carried through so `score` can say whether
+        # the declaration check inspected zero records: an empty list and a list of sixteen
+        # clean declarations both produce `consulted: false`, and only one of them is
+        # evidence. A part with `declared: false` ran without `benchmarkMode`, so its
+        # `consulted: false` is silence, not an answer, and counting it here would restore
+        # the blindness the field was added to remove. `declared` absent (pre-c-review
+        # 4.4.0) means the declaration was always on: count it.
+        "declarations_seen": sum(
+            1 for e in externals if isinstance(e, dict) and e.get("declared") is not False
+        ),
         "external_sources_detail": detail or "none",
         "native_stats": doc.get("stats", {}),
         "groups_attempted": doc.get("run", {}).get("groups_attempted", []),
         "groups_failed": doc.get("run", {}).get("groups_failed", []),
+        # Per-agent deaths, which `groups_failed` does not cover: a slice reviewer that
+        # returns nothing loses lines, not bug classes. The v2.0 measurement lost 13 of 16
+        # reviewers and, once `groups_failed` stopped being (mis)filled from them, nothing
+        # reached the report at all. Carried so `format_report` can still raise PARTIAL RUN.
+        "agent_failures": doc.get("run", {}).get("agent_failures", []),
         # `judge_ran` is false on every current run: the false-positive/severity judge was
         # removed from the plugin and severity is now the reviewer's own, unvalidated
         # assessment (`severity_source: "reviewer"` on the findings above). Carried through

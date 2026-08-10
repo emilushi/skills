@@ -56,6 +56,44 @@ jq -r 'select(.subtype=="init")|"plugins:\(.plugins|length) skills:\((.skills//[
   ~/runs/my-run/creview/logs/*.cli.jsonl | head -1     # expect plugins:1 skills:18
 ```
 
+### `benchmarkMode` — required for a scored c-review cell
+
+The c-review workflow takes `benchmarkMode: true`. It is **off by default**, because it is
+instrumentation for this harness and not part of an audit: it adds an external-source
+declaration to every producing agent's prompt and makes
+`external_sources_consulted` / `external_sources_detail` required schema fields. It changes
+no finding and drops nothing — with it off, a real audit simply does not pay for it.
+
+`bench.py plan` writes it into the c-review packet from `arms/c-review.md`, so a
+plan-generated packet already has it. **Do not drop it when rewriting the packet for
+container paths.** Check before launching:
+
+```sh
+grep -n 'benchmarkMode' ~/runs/my-run/creview/packets/c-review__*__bench.md   # expect: true
+```
+
+**Why it matters, and the trap if you forget.** The anti-cheat gate reads the declaration
+out of `findings.json`. Without the flag no agent is ever asked, so every part reports
+`external_sources_consulted: false` — indistinguishable from an honest "I looked nothing
+up", and the gate passes a cell that never posed the question. The assembler therefore
+records `declared` alongside `consulted` per part, so the two cases can be told apart after
+the fact:
+
+```sh
+jq -c '.run.hunter_external_sources[] | {group, consulted, declared}' <outdir>/findings.json
+```
+
+| `declared` | means |
+|---|---|
+| `true` | the agent was asked **and answered**, in its part file or its structured return; `consulted` is that answer and can be trusted |
+| `false` | no answer exists — either the cell ran without `benchmarkMode` and the agent was never asked, or it was asked and stayed silent. Either way `consulted: false` carries **no information**. Treat the oracle question as unanswered, not answered "no" |
+| `null` | the field is absent: the document was assembled before c-review 4.4.0. Re-run `assemble_findings.py` over the run's `parts/` to populate it — the part files hold what is needed |
+
+The `null` case is worth knowing because every cell in MEASUREMENTS.md predates the field.
+Those cells were run with the declaration always on, so re-assembling them yields
+`declared: true`; the transcript-based anti-cheat scan is unaffected either way and remains
+the primary signal.
+
 ---
 
 ## Collect and score
@@ -107,7 +145,10 @@ violation quoted, and exclude them from every comparison.
    other and refuses to guess; pasting the prose throws before a single agent spawns.
 4. **Say nothing about the threat model, bug count, or corpus provenance anywhere else.** A
    hint about the base project undoes the de-identification.
-5. **A blocked network attempt is not disqualifying.** The anti-cheat separates *attempted
+5. **A c-review cell without `benchmarkMode: true` cannot answer the oracle question.**
+   It still runs and still scores; only the external-source signal is void, and it is void
+   in the direction that looks clean. See the section above for how to check.
+6. **A blocked network attempt is not disqualifying.** The anti-cheat separates *attempted
    and denied* from *attempted and succeeded* and reports the former as `BLOCKED`. A cell
    that voids did so for a real reason; read which one before rerunning.
 

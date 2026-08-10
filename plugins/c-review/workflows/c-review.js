@@ -34,9 +34,8 @@ const REQUIRED_ARGS = ['outputDir', 'pluginRoot', 'threatModel', 'severityFilter
 // `args` arrives as a JSON-encoded STRING often enough to matter: the caller is a model
 // emitting a tool call, and serialising the object one extra time is a coin-flip it loses
 // some fraction of the time. The Workflow tool's own documentation warns about it. Refusing
-// that call wastes the entire run — a bench cell is ~2.5M tokens and ~45 minutes, and the
-// failure surfaces as "no args" long after the operator has stopped watching, which is
-// exactly how the first containerised cell was lost. Parse it instead; a string that does
+// that call wastes the entire run, and the failure surfaces as "no args" long
+// after anyone is watching for it. Parse it instead; a string that does
 // not parse, or parses to something that is not an object, still throws below.
 let args_ = args
 if (typeof args_ === 'string') {
@@ -61,14 +60,75 @@ for (const key of REQUIRED_ARGS) {
   if (!ARGS[key]) throw new Error('c-review: args.' + key + ' is required')
 }
 
-const OUTPUT_DIR = String(ARGS.outputDir)
-const PLUGIN_ROOT = String(ARGS.pluginRoot)
-const THREAT_MODEL = String(ARGS.threatModel).toUpperCase()
-const SEVERITY_FILTER = String(ARGS.severityFilter).toLowerCase()
-const SCOPE = String(ARGS.findingScopeRoot || '.')
-const CONTEXT_ROOTS = String(ARGS.contextRoots || '.')
+// Optional args get a named throw on a wrong TYPE rather than the default SKILL.md
+// promises. `benchmarkMode: "true"` is the expensive one: `=== true` is false for the
+// string, so a silent fallback turns benchmark mode OFF on a scored eval run — dropping
+// the two required schema fields and `--benchmark-mode`, and reporting
+// `declarations_seen: 0` — while the caller believes it is measuring the instrumented
+// protocol.
+function optional(key, type) {
+  const value = ARGS[key]
+  if (value === undefined || value === null) return undefined
+  const ok = type === 'number' ? Number.isFinite(value) : typeof value === type
+  if (!ok) {
+    throw new Error(
+      'c-review: args.' + key + ' must be a ' + type + ', got ' + JSON.stringify(value) +
+        '. It is not defaulted: a wrong type here changes what the run measures.'
+    )
+  }
+  return value
+}
+
+// Same reasoning as `optional`'s type check, one level down: a value of the right type but
+// outside the usable range would silently become the default, so a caller pinning
+// `reviewAgents: 0` or `maxUnitLines: 10` for a measured comparison gets the derived value
+// and believes it pinned one. Absent still defaults; present and unusable throws.
+function bounded(key, min, max) {
+  const value = optional(key, 'number')
+  if (value === undefined) return null
+  if (value < min || (max !== undefined && value > max)) {
+    throw new Error(
+      'c-review: args.' + key + ' must be ' +
+        (max === undefined ? 'at least ' + min : 'between ' + min + ' and ' + max) +
+        ', got ' + value +
+        '. It is not defaulted: a wrong value here changes what the run measures.'
+    )
+  }
+  return Math.floor(value)
+}
+
+// `String()` accepts anything and `REQUIRED_ARGS` above checks truthiness only, so a
+// coercing version sends `outputDir: {a: 1}` to the commands as the literal
+// `[object Object]`, `contextRoots: ['a','b']` as `a,b`, and `findingScopeRoot: {}` as a
+// `--scope` nothing starts with — which turns off `normalize_path`'s containment silently
+// and leaves every absolute-path finding absolute. A wrong type here changes what the run
+// measures, so it throws for the same reason `optional` does.
+function text(key, fallback) {
+  const value = ARGS[key]
+  if ((value === undefined || value === null || value === '') && fallback !== undefined) {
+    return fallback
+  }
+  if (typeof value !== 'string') {
+    throw new Error(
+      'c-review: args.' + key + ' must be a string, got ' + JSON.stringify(value) +
+        '. It is not coerced: every one of these becomes a path or a command operand.'
+    )
+  }
+  return value
+}
+
+const OUTPUT_DIR = text('outputDir')
+const PLUGIN_ROOT = text('pluginRoot')
+const THREAT_MODEL = text('threatModel').toUpperCase()
+const SEVERITY_FILTER = text('severityFilter').toLowerCase()
+const SCOPE = text('findingScopeRoot', '.')
+const CONTEXT_ROOTS = text('contextRoots', '.')
+// Through `optional` like every other optional arg: uncoerced, `workerModel: 5` becomes
+// the string "5" and reaches every agent as `opts.model` and the assembler as
+// `--worker-model '5'`, and `workerModel: false` resolves silently to `inherit`.
+const WORKER_MODEL_ARG = optional('workerModel', 'string')
 const WORKER_MODEL =
-  ARGS.workerModel && String(ARGS.workerModel) !== 'inherit' ? String(ARGS.workerModel) : null
+  WORKER_MODEL_ARG && WORKER_MODEL_ARG !== 'inherit' ? WORKER_MODEL_ARG : null
 
 if (!['REMOTE', 'LOCAL_UNPRIVILEGED', 'BOTH'].includes(THREAT_MODEL)) {
   throw new Error('c-review: threatModel must be REMOTE, LOCAL_UNPRIVILEGED or BOTH')
@@ -77,32 +137,30 @@ if (!['all', 'medium', 'high'].includes(SEVERITY_FILTER)) {
   throw new Error('c-review: severityFilter must be all, medium or high')
 }
 
-// 628 lines with four bugs, and no configuration ever found all four in eight
-// attempts. A unit larger than this reproduces exactly the saturation the
-// location partition exists to remove, so the cap is not a tuning knob.
-const MAX_UNIT_LINES =
-  Number.isFinite(ARGS.maxUnitLines) && ARGS.maxUnitLines >= 40 ? Math.floor(ARGS.maxUnitLines) : 150
+// A unit larger than this reproduces the reviewer saturation the location partition
+// exists to remove, so the cap is not a tuning knob. The upper bound is not decoration
+// either: the value is string-concatenated into the detect command, so an unbounded
+// `maxUnitLines: 1e21` reaches argparse as `--max-unit-lines 1e+21`, which `type=int`
+// rejects — killing the run in the detect phase, after the fan-out has been decided.
+const MAX_UNIT_LINES = bounded('maxUnitLines', 40, 100000) || 150
 
 // Left unset, enumerate_units.py derives the count from the line total. Set it to
 // pin the fan-out for a measured comparison.
-const REVIEW_AGENTS =
-  Number.isFinite(ARGS.reviewAgents) && ARGS.reviewAgents >= 1 ? Math.floor(ARGS.reviewAgents) : null
+// Ceilinged as well as floored: `AGENT_MAX` is `Math.max(14, REVIEW_AGENTS)`, so this
+// number is also the enumerator's cap and the `parallel()` fan-out, and uncapped a
+// `reviewAgents: 5000` dispatches 5000 agents.
+const REVIEW_AGENTS = bounded('reviewAgents', 1, 64)
 
 // Lines of source per review agent. Neighbouring units share callers and buffers, so a
 // larger slice reads as code rather than as a sample and costs less in re-established
 // context. Note `--agent-min` floors the derived count, so on a small tree lowering this
 // changes nothing; use `reviewAgents` to pin the fan-out.
-const LINES_PER_AGENT =
-  Number.isFinite(ARGS.linesPerAgent) && ARGS.linesPerAgent >= 200
-    ? Math.floor(ARGS.linesPerAgent)
-    : 1500
+const LINES_PER_AGENT = bounded('linesPerAgent', 200, 1000000) || 1500
 
-// The class axis is exactly two agents: one completeness sweep over classes with no
-// entry anywhere, and one shared-state invariant audit. Both earn their place from
-// measurement — the class sweep uniquely found four bugs no location reader did, and
-// the invariant audit is the only thing aimed at the five bugs that wore five
-// different labels and were one mechanism. Neither is capped, so neither can silently
-// drop work.
+// The class axis is one agent by default — a completeness sweep over classes with no entry
+// anywhere — plus the shared-state invariant audit when `invariantAudit: true`. The sweep
+// earns its place from measurement: a location partition can still miss a whole bug class.
+// Neither is capped, so neither can silently drop work.
 
 // One dedup agent, and only for what the assembler could not merge on its own.
 // Under a location partition cross-reviewer duplication is near zero by
@@ -125,6 +183,32 @@ const REQUIRED_PART_FIELDS = ['title', 'file', 'line', 'description', 'impact', 
 // one to three lines apart they go to the dedup agent instead.
 const CROSS_CLASS_NEARBY_LINES = 0
 
+// Must equal COLLISION_LINES in assemble_findings.py. How far apart two findings in one
+// file may sit and still be one collision bucket, i.e. still be a pair the dedup agent may
+// merge. Both sides apply it: this one to the agent's return, the assembler to the part
+// file the agent wrote, which is what the artifacts are actually built from.
+const COLLISION_LINES = 8
+
+// Benchmark instrumentation, off in a real audit. It adds an external-source declaration to
+// every producing agent's prompt and two required schema fields, and exists only so a scored
+// run can tell review from diffing against a public upstream. It changes no finding and
+// drops nothing, so in an audit it is pure prompt overhead.
+const BENCHMARK_MODE = optional('benchmarkMode', 'boolean') === true
+
+// The shared-state invariant audit, off by default: it is a whole extra agent and the
+// shared-state-struct bugs it targets have not been shown to need one. Kept rather than
+// deleted because they have not been shown NOT to either — unknown, not disproven. Turn it
+// on for state-machine-heavy targets. Resolved here rather than in the Sweep phase so a
+// wrong type is a startup error and not a surprise 40 minutes in.
+const INVARIANT_AUDIT = optional('invariantAudit', 'boolean') === true
+
+// The review fan-out is model-controlled: `assignments.length` is `detect.assignment_ids`
+// straight from the detect agent's return, so uncapped a detect agent that lists 400 ids
+// spawns 400 agents. `enumerate_units.py` clamps its own count to `--agent-max`, so this is
+// the same number and it is passed to it explicitly — otherwise a pinned `reviewAgents`
+// above 14 would be clamped away by the default.
+const AGENT_MAX = Math.max(14, REVIEW_AGENTS || 0)
+
 const PARTS_DIR = OUTPUT_DIR + '/parts'
 const SCRIPTS = PLUGIN_ROOT + '/scripts'
 
@@ -133,6 +217,74 @@ function workerOpts(extra) {
   if (WORKER_MODEL) opts.model = WORKER_MODEL
   return opts
 }
+
+// The tool scope for every PRODUCING agent, and the only control that closes the two
+// documented bypasses. `agent()` has no `allowedTools`; `agentType` resolves to an agent
+// definition, whose `tools:` frontmatter is what scopes the subagent — so the scope lives
+// in `agents/c-review-worker.md` and this is the name that selects it.
+//
+// A producing worker needs Read, Grep, Glob and Write. It must NOT have Bash:
+//
+//   - `enumerate_units.sites_by_id(units_doc)` is public, pure, and takes `units.json` —
+//     which sits in the run directory — as its only argument. One command over the shipped
+//     script reproduces the gate's entire answer key with no source file opened, and a
+//     ledger built from it scores 100% coverage and zero violations.
+//   - rewriting the source and re-running `enumerate_units.py` over the rewritten tree
+//     regenerates a self-consistent, SMALLER `units.json`: `checks_required` 10 to 6,
+//     100%, no warning in any artifact.
+//
+// Both need code execution.
+//
+// The detect and assemble agents are NOT scoped this way, and calling that an exemption
+// would overstate it: each exists to run a command, a shell is a general-purpose write
+// primitive, and the assemble agent runs LAST — after every part file exists — so it can
+// rewrite any of them and then run whatever command it likes instead of the one it was
+// given. `--expect ID=COUNT` constrains a WORKER's part file against the findings the
+// workflow already received through the schema; nothing constrains the agent that runs the
+// assembler. Those two agents are TRUSTED, not controlled. The gate measures an honest
+// reviewer that skipped work; it is not an adversarial control, and SKILL.md says so where
+// the reader is.
+const WORKER_AGENT = 'c-review:c-review-worker'
+
+// The control goes LAST. Assigned the other way round the caller's options win, including
+// an explicit `agentType: undefined` — and the CLI's dispatch is guarded by
+// `if (opts?.agentType != null)`, so `undefined` skips the whole scoping block and the
+// subagent inherits every tool, Bash included. This control fails OPEN when it fails.
+function producingOpts(extra) {
+  return workerOpts(Object.assign({}, extra, { agentType: WORKER_AGENT }))
+}
+
+// Every dispatch is caught so one agent's rejection cannot take down `parallel` and discard
+// every completed slice — and the reason is logged rather than swallowed, because one of
+// those rejections means the tool scope is BROKEN. `agent({agentType})` throws
+// `agent type '…' not found` when `agents/c-review-worker.md` is renamed, mistyped or
+// dropped by a packaging step; a bare `.catch(() => null)` shows that as N "returned
+// nothing" warnings with the agent type named nowhere.
+function died(label) {
+  return (err) => {
+    log('WARNING: ' + label + ' failed: ' + ((err && err.message) || String(err)))
+    return null
+  }
+}
+
+// POSIX single-quoting, for every value interpolated into a command an agent is told to
+// run EXACTLY. `JSON.stringify` is a JSON encoder, not a shell quoter: inside bash double
+// quotes `\"` and `\\` survive but `$` and backticks stay live, so an `outputDir` of
+// `/tmp/run-$USER` becomes `/tmp/run-`, and a part id built from model output —
+// `detect.assignment_ids` is model output, influenced by the reviewed tree — can carry
+// `$(…)` into command substitution at `--expect`. Every command builder goes through this,
+// including `partBlock`: a hand-rolled `'…'` wrap handles `$` and backticks but not `'`,
+// so an id of `unit-01'; echo PWNED; #` closes the quote and runs.
+function shq(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'"
+}
+
+// An assignment id is model output that becomes a shell word, an `--expect ID=COUNT`
+// operand and a part-file stem. `shq` makes the shell word safe; this makes the other two
+// safe, because an `=` mis-splits `check_expectations` and a `/` or `..` escapes the parts
+// directory. One charset closes all of it, and a violating id is a broken run, not a
+// silently renamed slice.
+const ASSIGNMENT_ID = /^[a-z0-9][a-z0-9-]*$/
 
 // ------------------------------------------------------------------- catalog
 //
@@ -219,7 +371,7 @@ const CLASSES = {
     prefix: 'BANNEDAPI',
     title: 'Banned or discouraged API reached by attacker data',
     brief:
-      'gets, strcpy, strcat, sprintf, vsprintf, tmpnam, tempnam, mktemp, strtok, alloca, putenv, rand for security purposes, width-less %s conversions, stpcpy, atoi and friends with no error channel. THE EVIDENCE BAR IS A FLOW, NOT A NAME: report one of these as a vulnerability only when you can trace attacker-influenced data or an attacker-influenced size to it, and state the source, the sink and what validates between them. A call whose inputs are provably bounded internal constants is a hardening observation, not a vulnerability — you may still report it, but say so plainly in the impact so the judge can rate it accordingly. Check for a project-local macro or wrapper shadowing the libc name before concluding anything. (The previous catalogue said of a bare banned call that "the presence is the bug, no data-flow trace needed" and wired it to a judge forbidden from rejecting it. That is an unrejectable-finding pump; it never fired on the measured corpora because neither uses strcpy, and it would have fired on the first legacy target.)',
+      'gets, strcpy, strcat, sprintf, vsprintf, tmpnam, tempnam, mktemp, strtok, alloca, putenv, rand for security purposes, width-less %s conversions, stpcpy, atoi and friends with no error channel. THE EVIDENCE BAR IS A FLOW, NOT A NAME: report one of these as a vulnerability only when you can trace attacker-influenced data or an attacker-influenced size to it, and state the source, the sink and what validates between them. A call whose inputs are provably bounded internal constants is a hardening observation, not a vulnerability — you may still report it, but say so plainly in the impact so the judge can rate it accordingly. Check for a project-local macro or wrapper shadowing the libc name before concluding anything.',
     evidence: 'a call to one of the banned functions named in this brief',
   },
 
@@ -252,7 +404,7 @@ const CLASSES = {
     prefix: 'STATEINV',
     title: 'Invariant on a field of a shared state struct',
     brief:
-      'A field or flag of a long-lived struct carries a rule that must hold across every reset, allocation, refill and free path, and one path breaks it. C-specific by construction: malloc does not zero, lifetime is manual, and the struct is threaded through a state machine where no single function owns the field. This is the mechanism behind five bugs in the measured corpus that wore five different labels — buffer-overflow, unsigned overflow, uninitialised use, encoding invariant, double free — and that every configuration missed, including the ones whose class DID cover the symptom. THIS IS NOT A LABEL TO GREP FOR. It is the output of the invariant audit: enumerate the fields, find every writer and every reader, and prove the field\'s rule at each. Used as a search term it will reproduce the failure it was created to describe.',
+      'A field or flag of a long-lived struct carries a rule that must hold across every reset, allocation, refill and free path, and one path breaks it. C-specific by construction: malloc does not zero, lifetime is manual, and the struct is threaded through a state machine where no single function owns the field. A broken invariant here can present under any symptom label, so a class label you grep for will not surface it. THIS IS NOT A LABEL TO GREP FOR. It is the output of the invariant audit: enumerate the fields, find every writer and every reader, and prove the field\'s rule at each. Used as a search term it will reproduce the failure it was created to describe.',
   },
 
   'integer-overflow': {
@@ -336,7 +488,7 @@ const CLASSES = {
   'signal-handler': {
     prefix: 'SIGNAL',
     title: 'Async-signal-unsafe handler',
-    posix: true,
+    // `signal()` and `sig_atomic_t` are ISO C; only `sigaction` is POSIX.
     brief:
       'A handler may call only async-signal-safe functions. malloc/free reentered from a handler corrupts the allocator; stdio reentered from a handler corrupts its lock and buffers; longjmp out of a handler leaves everything indeterminate. A handler must also save and restore errno. The safe shapes are: set a volatile sig_atomic_t flag, or write() one byte to a self-pipe.',
     evidence: 'a call to signal() or sigaction()',
@@ -360,7 +512,8 @@ const CLASSES = {
   envvar: {
     prefix: 'ENVVAR',
     title: 'Environment variable trust',
-    posix: true,
+    // `getenv` is ISO C. `skipRemote` still applies: it is the threat model that puts
+    // this out of scope, not the platform.
     skipRemote: true,
     brief:
       'Under LOCAL_UNPRIVILEGED the environment is attacker data. Relevant shapes: a privileged process trusting a variable for a path or a library location; a secret placed in the environment where any process that can read /proc/<pid>/environ sees it; setenv leaving the previous value reachable; a child inheriting an environment that was never sanitized.',
@@ -377,7 +530,7 @@ const CLASSES = {
     prefix: 'DOS',
     title: 'Attacker-controlled resource consumption',
     brief:
-      'Unbounded allocation, unbounded recursion, and superlinear algorithms driven by input size. Recursion depth is the highest-yield one in parsers: look for a depth counter that exists but is never compared against a limit, a limit that only counts one of several recursive paths, or an amplification guard that a linear chain slips under. Hash-table collision floods and regex backtracking belong here too. A countable population — enumerate EVERY recursive construct before writing this class off; one run filed a single stack-exhaustion bug, declared the class covered, and never looked at the second recursion in the same file.',
+      'Unbounded allocation, unbounded recursion, and superlinear algorithms driven by input size. Recursion depth is the highest-yield one in parsers: look for a depth counter that exists but is never compared against a limit, a limit that only counts one of several recursive paths, or an amplification guard that a linear chain slips under. Hash-table collision floods and regex backtracking belong here too. A countable population — enumerate EVERY recursive construct before writing this class off; filing one stack-exhaustion bug does not cover the class: the same file can hold other recursive constructs.',
   },
 
   'exploit-mitigations': {
@@ -391,7 +544,9 @@ const CLASSES = {
   qsort: {
     prefix: 'QSORT',
     title: 'Non-transitive comparator drives qsort out of bounds',
-    posix: true,
+    // No `posix: true`: qsort and bsearch are ISO C <stdlib.h>. Gating this on is_posix
+    // makes the CVE-2023-6246 comparator shape structurally absent from every pure-libc
+    // review, in no artifact and in no coverage list.
     brief:
       'glibc qsort trusted its comparator to be a valid ordering; an inconsistent one walks the merge past the array (CVE-2023-6246 family, Qualys 2024). Inconsistency sources: subtracting ints, which overflows; comparing only a prefix or one field of a record; floating point where NaN makes every comparison false; and a multi-key comparator that returns 0 for distinct records. The safe form is (a > b) - (a < b).',
     evidence: 'a call to qsort, bsearch or another comparator-taking function',
@@ -415,7 +570,7 @@ const CLASSES = {
     prefix: 'LOGIC',
     title: 'Security logic, protocol and state-machine flaws',
     brief:
-      'Everything memory-safety taxonomies do not name, and the single most productive class in the measured runs — 30 filed, 28 credited, more than any specific label. Namespace or delimiter injection, where a separator character the format reserves is accepted inside a value and re-emitted so the two parse differently on the way back. Protocol state machines that accept a message in a state that skips authentication or size negotiation, or that return success on a path meant to signal "need more input". Deserialization that lets input choose a type or a size. Off-by-one in an index-to-identity mapping. Two named patterns worth hunting explicitly, because both were found here without a class of their own: VALIDATED-VALUE SUBSTITUTION, where one value is checked and a different, unchecked one reaches the sink — validation applied to a normalized copy while the raw value is used downstream is the same shape; and CALL-SITE INVARIANT, where a shared macro or helper enforces a well-formedness rule at some expansion sites and not all, so one path admits input the others reject. Also: a value read out of a header or a length field and stored into state without being checked against the bound the rest of the code assumes. These are found by reading what a value is ALLOWED to be and then asking what the code does with a value one step outside that.',
+      'Everything memory-safety taxonomies do not name, and often the highest-yield class, because it catches logic bugs that fit no specific label below. Namespace or delimiter injection, where a separator character the format reserves is accepted inside a value and re-emitted so the two parse differently on the way back. Protocol state machines that accept a message in a state that skips authentication or size negotiation, or that return success on a path meant to signal "need more input". Deserialization that lets input choose a type or a size. Off-by-one in an index-to-identity mapping. Two named patterns worth hunting explicitly, because both were found here without a class of their own: VALIDATED-VALUE SUBSTITUTION, where one value is checked and a different, unchecked one reaches the sink — validation applied to a normalized copy while the raw value is used downstream is the same shape; and CALL-SITE INVARIANT, where a shared macro or helper enforces a well-formedness rule at some expansion sites and not all, so one path admits input the others reject. Also: a value read out of a header or a length field and stored into state without being checked against the bound the rest of the code assumes. These are found by reading what a value is ALLOWED to be and then asking what the code does with a value one step outside that.',
   },
   'crypto-misuse': {
     prefix: 'CRYPTO',
@@ -533,11 +688,10 @@ const CLASSES = {
   },
 }
 
-// Groups are no longer agent units — location is the partition. They keep three
-// jobs: the coarse platform gate, batching the completeness sweep (one agent for
-// "nothing in concurrency has an entry" is coherent; four agents for four silent
-// classes is not), and the reporting taxonomy. Because they are not agent units
-// their sizes no longer matter, which is why two of them are now single-class.
+// Groups do three jobs: the coarse platform gate, batching the completeness sweep
+// (one agent for "nothing in concurrency has an entry" is coherent; four agents for
+// four silent classes is not), and the reporting taxonomy. They are not agent units,
+// so their sizes do not matter and a single-class group is fine.
 const GROUPS = [
   { id: 'memory-bounds', title: 'Memory bounds', classes: ['buffer-overflow', 'oob-read', 'memcpy-size', 'overlapping-buffers', 'flexible-array'] },
   { id: 'string-handling', title: 'String handling', classes: ['string-bounds-and-termination', 'string-issues'] },
@@ -567,7 +721,7 @@ const DETECT_SCHEMA = {
   required: [
     'is_cpp', 'is_posix', 'is_windows', 'platform_evidence', 'purpose', 'entry_points',
     'trust_boundaries', 'existing_hardening', 'state_structs', 'class_evidence',
-    'units_ok', 'units_summary',
+    'units_ok', 'units_summary', 'assignment_ids',
   ],
   properties: {
     is_cpp: { type: 'boolean', description: 'C++ translation units are compiled, not merely C headers guarded by extern "C"' },
@@ -621,7 +775,7 @@ const LEDGER_ROW = {
       type: 'array',
       items: { type: 'integer' },
       description:
-        'the line numbers from this question\'s site list in your assignment file that you actually looked at. A clean or finding verdict must list ALL of them — a gate compares this against the parse, not against your description of what you did.',
+        'the line numbers of this question\'s sites in this unit, as you found them by reading the source. They are deliberately NOT in your assignment file, which gives only the count. Every verdict except not-applicable must list ALL of them, needs-human included — a gate compares this against the parse, not against your description of what you did.',
     },
     evidence: { type: 'string', description: 'what you found at those sites, including at the ones you did not file' },
   },
@@ -643,7 +797,7 @@ const FINDING_PROPERTIES = {
   mitigations_checked: { type: 'string', description: 'each mitigation you looked for, with the path:line where you found it or the statement that it is absent' },
   recommendation: { type: 'string' },
   outside_assigned_classes: { type: 'boolean', description: 'true when this bug is outside the units or classes you were assigned' },
-  // Severity is the reporter's job now. There is no judge downstream to assign it,
+  // Severity is the reporter's job. There is no judge downstream to assign it,
   // so an omitted severity becomes MEDIUM by default rather than being reviewed.
   severity: { type: 'string', enum: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'], description: 'against the table in your prompt, relative to this threat model' },
   attack_vector: { type: 'string', enum: ['Remote', 'Local', 'Both'] },
@@ -661,7 +815,9 @@ const FINDING_SCHEMA = {
 const REVIEW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['part_written', 'findings', 'ledger', 'external_sources_consulted', 'external_sources_detail'],
+  required: ['part_written', 'findings', 'ledger'].concat(
+    BENCHMARK_MODE ? ['external_sources_consulted', 'external_sources_detail'] : []
+  ),
   properties: {
     part_written: { type: 'boolean', description: 'true once you have written your part file to the path given in the prompt' },
     findings: { type: 'array', items: FINDING_SCHEMA },
@@ -715,16 +871,30 @@ const DEDUP_SCHEMA = {
 const ASSEMBLE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['ok'],
+  // `artifacts_written` is REQUIRED, not optional: left optional, an agent returning
+  // `{ok: false, error: '…'}` for a gate rejection produces `artifactsWritten: false` and a
+  // log line saying "artifacts were not written" over a complete findings.json, REPORT.md
+  // and REPORT.sarif — the exact confusion the field exists to remove, made conditional on
+  // the agent volunteering it. It is also answered from the DIRECTORY rather than from the
+  // exit code, so a crashed generator or a mis-stated exit code cannot assert it.
+  required: ['ok', 'artifacts_written'],
   properties: {
-    ok: { type: 'boolean' },
+    ok: { type: 'boolean', description: 'the script exited 0' },
+    artifacts_written: {
+      type: 'boolean',
+      description:
+        'true only if findings.json, REPORT.md and REPORT.sarif are all present in the output directory after the command ran. List the directory; do not infer it from the exit code.',
+    },
     reported: { type: 'integer' },
     raw_findings: { type: 'integer' },
-    // The assembler runs the ledger gate in-process now, so these come back from it
-    // rather than from a gate agent of their own.
+    // The assembler runs the ledger gate in-process, so these come back from it directly.
     checks_required: { type: 'integer' },
     checks_completed: { type: 'integer' },
     checks_satisfied: { type: 'integer', description: 'answered AND accepted by the gate' },
+    // Part files no rule reads. Each one is an agent's entire output dropped on the floor,
+    // usually a misnamed stem, and without a field to carry it the workflow result of such
+    // a run is identical to a clean one.
+    unrecognised_parts: { type: 'integer' },
     error: { type: 'string' },
   },
 }
@@ -738,14 +908,24 @@ const EVIDENCE_RULE = [
   'candidate, and you may not conclude that a bug class is absent, on the basis of what you recall',
   'about this project: its identity, its version, its release history, or its published',
   'vulnerabilities. Recalled knowledge that "the fix for this is already upstream" is not evidence,',
-  'and asserting it has previously caused this pipeline to suppress real, present bugs that a plain',
-  'reading of the file would have found.',
+  'and asserting it suppresses real, present bugs that a plain reading of the file would find.',
   '',
   'If you claim a guard, a bounds check, a cast, or any other mitigation exists, cite the path:line',
   'where it is written, so a reader can open that line and see it. If you cannot cite it, it is not',
   'there. Nothing outside this repository substitutes for that citation: an upstream diff, a',
   'changelog or an advisory may tell you where to look, but only the code in front of you can clear',
   'a candidate.',
+  '',
+  'The same rule covers this run\'s OWN generated files. The output directory holds the unit list,',
+  'the assignment files and, once the run finishes, the gate report — none of them are the source,',
+  'and none of them are evidence about the code. Read the file the unit names, not the tooling',
+  'around it.',
+  // Nothing here names the mechanism, the trigger or the location of the derivation it is
+  // denying — a sentence like "the site line numbers are recomputed from the source when
+  // the gate runs, so there is nothing to find" is a map, not a deterrent, and it is false
+  // besides: the deriving function ships beside the unit list. The control is the tool
+  // scope (see WORKER_AGENT). Anti-cheat text that describes the cheat is worse than none,
+  // so the rule is to omit it rather than to reword it.
 ].join('\n')
 
 const EXTERNAL_SOURCE_DECLARATION = [
@@ -764,11 +944,11 @@ const EXTERNAL_SOURCE_DECLARATION = [
   'thing that does damage is an undeclared consultation.',
 ].join('\n')
 
-// The escape hatch, rewritten for a LOCATION partition. The original text told every
-// agent "report anything you find, no one else is guaranteed to be looking for it" — true
-// when work was split by bug class, because classes had gaps. Under a location partition
-// every line has exactly one owner, so the claim is false and the sentence buys duplicate
-// work — measured, it drove one line being written up by five of six agents.
+// The escape hatch for a LOCATION partition, and the reason it is not `ESCAPE_HATCH`
+// below. "Report anything you find, no one else is guaranteed to be looking for it" is
+// true when work is split by bug class, because classes have gaps. Under a location
+// partition every line has exactly one owner, so the claim is false and the sentence buys
+// duplicate work — measured, one line written up by five of six agents.
 //
 // The safety net is kept and made cheap: out-of-class but IN your slice is still a full
 // finding; out of your slice is a one-line pointer, promoted only if the owner never filed
@@ -806,8 +986,7 @@ const ESCAPE_HATCH = [
 // The class sweep's escape hatch. Its "assigned" is a list of bug CLASSES computed AFTER
 // every location reviewer returned — exactly the classes with zero findings anywhere in this
 // run. So for any class NOT on the list, "someone already filed in this class" is true by
-// construction rather than a guess. Out-of-class sightings become pointers, not silence: a
-// measured run's only sweep-found ground-truth bug sat in an already-covered class.
+// construction rather than a guess. Out-of-class sightings become pointers, not silence.
 const CLASS_SWEEP_ESCAPE_HATCH = [
   'REPORT WHAT YOU FIND — BUT ONLY WRITE UP YOUR ASSIGNED CLASSES.',
   '',
@@ -828,18 +1007,17 @@ const CLASS_SWEEP_ESCAPE_HATCH = [
 ].join('\n')
 
 // The part file is what the deterministic assembler reads. No agent is ever asked to
-// transcribe another's findings — a previous design did, and destroyed the evidence fields
-// of nearly every finding once the run got large.
+// transcribe another's findings; each writes only its own part file.
 function partBlock(partPath) {
   return [
     'WRITE YOUR RESULT TO ' + partPath,
     '',
     'Write a single JSON object there with exactly the keys of the structured value you return.',
-    'Use the Write tool; if it is blocked, use a Bash heredoc with a quoted delimiter:',
-    '',
-    "  cat > '" + partPath + "' <<'C_REVIEW_PART_EOF'",
-    '  { ...your JSON... }',
-    '  C_REVIEW_PART_EOF',
+    // Write, and only Write. A Bash-heredoc fallback here would be a shell command in a
+    // prompt telling an agent scoped away from the shell to reach for one — and the
+    // absence of a shell is the whole of what closes the two documented bypasses. See
+    // WORKER_AGENT.
+    'Use the Write tool. You have no shell in this configuration; there is no fallback.',
     '',
     'The file is the artifact — a deterministic assembler builds the report from files, not from',
     'what you return. So the two must agree. Write every field of every finding, `description`',
@@ -851,6 +1029,10 @@ function partBlock(partPath) {
   ].join('\n')
 }
 
+// Every list off `detect` goes through `asArray` (see there), here and at
+// `assignment_ids` / `class_evidence` / `state_structs`: an `entry_points: {a: 1}` is
+// truthy and not iterable, and throwing out of the module here discards the detect agent
+// that has already been paid for.
 function contextBlock(detect) {
   return [
     '<codebase>',
@@ -858,13 +1040,13 @@ function contextBlock(detect) {
     'Language/platform: is_cpp=' + detect.is_cpp + ', is_posix=' + detect.is_posix + ', is_windows=' + detect.is_windows,
     'Platform evidence: ' + detect.platform_evidence,
     'Entry points for untrusted data:',
-    (detect.entry_points || []).map((e) => '  - ' + e).join('\n'),
+    asArray(detect.entry_points).map((e) => '  - ' + e).join('\n'),
     'Trust boundaries:',
-    (detect.trust_boundaries || []).map((e) => '  - ' + e).join('\n'),
+    asArray(detect.trust_boundaries).map((e) => '  - ' + e).join('\n'),
     'Existing hardening:',
-    (detect.existing_hardening || []).map((e) => '  - ' + e).join('\n'),
+    asArray(detect.existing_hardening).map((e) => '  - ' + e).join('\n'),
     'Long-lived mutable state structs:',
-    (detect.state_structs || []).map((e) => '  - ' + e).join('\n'),
+    asArray(detect.state_structs).map((e) => '  - ' + e).join('\n'),
     '</codebase>',
   ].join('\n')
 }
@@ -879,6 +1061,39 @@ function scopeBlock() {
   ].join('\n')
 }
 
+// `hasOwnProperty`, because `CLASSES[id]` is a prototype-chain lookup: `constructor`,
+// `toString` and `__proto__` all resolve to a Function and pass as real bug classes, while
+// assemble_findings.py — a real `in` test against a dict — maps them to `logic-flaw`. The
+// two sides then bucket one finding differently and `stats.primaries` disagrees with
+// findings.json.
+function knownClass(id) {
+  return Object.prototype.hasOwnProperty.call(CLASSES, id)
+}
+
+// The canonical reason every agent-returned list goes through this rather than `x || []`:
+// `x || []` accepts any truthy non-iterable, so a `findings: {a: 1}` or `"nine"` throws
+// `findings.forEach is not a function` out of top-level module code — after every review
+// agent has been paid for and before assemble runs, discarding the whole run. Mirrors
+// `_seq` on the Python side.
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+// A bug-class id as a model actually writes it. `format_string`, `Format String` and
+// `buffer overflow` all name a class in the catalogue, and the value reaches two
+// comparisons where a spelling miss silently removes a class from a whole pass: the
+// detect phase's citation map, and the set of classes that already have a finding.
+// Returns '' when nothing in the catalogue matches. NOT used for a finding's own
+// `bug_class` — that one must stay byte-identical to `assemble_findings.py`, which owns
+// the artifact and matches exactly.
+function normClassId(value) {
+  const raw = String(value == null ? '' : value).trim()
+  if (!raw) return ''
+  if (knownClass(raw)) return raw
+  const slug = raw.toLowerCase().replace(/[\s_]+/g, '-').replace(/-+/g, '-')
+  return knownClass(slug) ? slug : ''
+}
+
 function classList(ids) {
   return ids
     .map((id) => {
@@ -890,11 +1105,12 @@ function classList(ids) {
 
 function detectPrompt(gateableClasses) {
   const cmd =
-    'uv run ' + JSON.stringify(SCRIPTS + '/enumerate_units.py') +
-    ' --root ' + JSON.stringify(SCOPE) +
-    ' --out-dir ' + JSON.stringify(OUTPUT_DIR) +
+    'uv run ' + shq(SCRIPTS + '/enumerate_units.py') +
+    ' --root ' + shq(SCOPE) +
+    ' --out-dir ' + shq(OUTPUT_DIR) +
     ' --max-unit-lines ' + MAX_UNIT_LINES +
     ' --lines-per-agent ' + LINES_PER_AGENT +
+    ' --agent-max ' + AGENT_MAX +
     (REVIEW_AGENTS ? ' --agents ' + REVIEW_AGENTS : '')
 
   return [
@@ -913,8 +1129,8 @@ function detectPrompt(gateableClasses) {
     '2. PLATFORM AND LANGUAGE, from real API usage rather than from a single include.',
     '',
     '   A portable library commonly carries a compatibility header that includes <windows.h> so that',
-    '   one typedef resolves; that is not a Windows codebase, and gating Windows work on it once',
-    '   burned 27% of a review on a portable XML parser. Set is_windows only if the code calls Win32',
+    '   one typedef resolves; that is not a Windows codebase, and gating Windows work on it spends',
+    '   the fan-out on a platform axis that does not apply. Set is_windows only if the code calls Win32',
     '   APIs — processes, handles, registry, services, named pipes, CryptoAPI, Win32 file or path',
     '   functions. Set is_posix only if the code calls POSIX APIs — sockets, fork/exec, signals,',
     '   pthreads, file descriptors, uid/gid. A library that only uses ISO C is neither, and that is a',
@@ -953,14 +1169,14 @@ function reviewPrompt(assignment, detect) {
     'Read your assignment file first — it is the authoritative statement of what you own:',
     '  ' + assignment.path,
     '',
-    'It lists every unit you own — file, line range, name, parameters, the line numbers of every',
-    'countable site, and the question ids that unit owes an answer to. Those line numbers came from',
-    'a parse, not a model, and a gate diffs your ledger against them.',
+    'It lists every unit you own — file, line range, name, parameters, the question ids that unit',
+    'owes an answer to, and under `site_counts` HOW MANY sites of each question a parse counted in',
+    'it. The lines themselves are in no file. You find them by reading the unit; the count is how',
+    'you know when you have them all.',
     '',
     EVIDENCE_RULE,
     '',
-    EXTERNAL_SOURCE_DECLARATION,
-    '',
+    ...(BENCHMARK_MODE ? [EXTERNAL_SOURCE_DECLARATION, ''] : []),
     REVIEW_ESCAPE_HATCH,
     '',
     '## How to work',
@@ -971,16 +1187,28 @@ function reviewPrompt(assignment, detect) {
     '',
     'For every (unit, question) pair in your assignment, return one ledger row.',
     '',
-    '- `sites_accounted` must list every line number from that question\'s site list — all of them, not',
-    '  just the ones you filed at. A gate diffs this against the parse. `evidence` says what you found',
-    '  at them, including the ones you did not file: "12 write sites, all indexed by `i` bounded at',
-    '  411, except 418 which uses `n` from the header — filed" is a real row.',
+    '- `sites_accounted` is the line numbers you FOUND by reading the unit — all of them, not just',
+    '  the ones you filed at. `site_counts` tells you how many the parse counted for that question,',
+    '  so you know when you have them all; the lines themselves are not in your assignment file and',
+    '  a gate diffs yours against the parse. `evidence` says what you found at them, including the',
+    '  ones you did not file: "12 write sites, all indexed by `i` bounded at 411, except 418 which',
+    '  uses `n` from the header — filed" is a real row.',
+    '- `site_counts` is what the parse counted, so it tells you when to keep looking, not what to',
+    '  write down. List what you actually found. Do not pad with lines that are related but are not',
+    '  that question\'s own construct — a `bounds` site is the write itself, not the bound check',
+    '  above it or the call that reached it — and do NOT delete a site you found to make the',
+    '  numbers agree. A count you cannot reconcile is information: say so in `evidence` and leave',
+    '  the extra line in. Trimming to the number is how a real thirteenth write site stops being',
+    '  examined, and it is the one thing the gate exists to measure independently.',
+    '- The two PARAMETER questions are the exception, and they are counted differently on purpose:',
+    '  for `caller-contract` and `initialisation` the population is EVERY line that mentions the',
+    '  parameter — the NULL check, the length comparison and the write alike — because what those',
+    '  questions ask about is the whole use of the value, not one construct.',
     '- Verdict `finding` does NOT close the unit or the question. A bug found is a reason to look',
-    '  harder here, not to move on: the densest function measured was also the one with the most',
-    '  missed bugs.',
+    '  harder here, not to move on: a function with one bug found is likely to hold more.',
     '- `not-applicable` is only honest when the counted population is empty.',
-    '- `needs-human` is a legitimate answer and is better than a false clean. Say what you could not',
-    '  resolve.',
+    '- `needs-human` is a legitimate answer and is better than a false clean, but it is not a cheaper',
+    '  one: still list every counted site in `sites_accounted` and say what you could not resolve.',
     '',
     'The questions, and what each is asking:',
     '',
@@ -1059,8 +1287,7 @@ function invariantSweepPrompt(structs, detect) {
     '',
     EVIDENCE_RULE,
     '',
-    EXTERNAL_SOURCE_DECLARATION,
-    '',
+    ...(BENCHMARK_MODE ? [EXTERNAL_SOURCE_DECLARATION, ''] : []),
     ESCAPE_HATCH,
     '',
     severityBlock(),
@@ -1078,8 +1305,8 @@ function classSweepPrompt(groups, detect, evidenceById) {
   return [
     'You are running a completeness sweep across the WHOLE codebase. This is not the main review —',
     'that partitioned the tree by location and has already read every line. You are here for the',
-    'classes below, each of which has NO entry anywhere in the review output and each of which the',
-    'detect phase could cite a real candidate site for.',
+    'classes below, each of which has NO entry anywhere in the review output and none of which the',
+    'detect phase ruled out.',
     '',
     'Grouped for reading, not for scoping — all of them are yours:',
     '',
@@ -1088,12 +1315,13 @@ function classSweepPrompt(groups, detect, evidenceById) {
     'This pass earns its keep on scattered single-site slips — a missing free on one error path, a',
     '(void) cast hiding an unchecked return, one clamp done at the wrong width, one state that',
     'returns success where it should return "need more input". Those are exactly the bugs a reader',
-    'working through a region in order tends to walk past, and in the measurement they were found by',
-    'a class sweep and by nothing else. Three of the four lived in cold error-handling paths.',
+    'working through a region in order tends to walk past. Check cold error-handling paths',
+    'deliberately.',
     '',
-    'Cited candidate sites from the detect phase:',
+    'Cited candidate sites from the detect phase (a class with no citation was never put to that',
+    'phase — no grep decides it, so enumerate its population yourself):',
     '',
-    classIds.map((id) => '  - ' + id + ': ' + (evidenceById.get(id) || 'no citation recorded')).join('\n'),
+    classIds.map((id) => '  - ' + id + ': ' + (evidenceById.get(id) || 'not gated, no citation')).join('\n'),
     '',
     '## Your classes',
     '',
@@ -1105,7 +1333,7 @@ function classSweepPrompt(groups, detect, evidenceById) {
     'construct, every error path — and then account for all of it. Filing one finding closes that',
     'finding, not the class. Writing "reported" over an uncountable population ("all constructs',
     'reachable from untrusted input") on the strength of one instance is how a second bug in the same',
-    'class goes unlooked-at; that happened, and the missed one was a real CVE.',
+    'class goes unlooked-at.',
     '',
     'Work the classes in the order given and stop cleanly if you run short — a class you did not',
     'reach with an honest not-searched row is worth more than nine skimmed ones.',
@@ -1116,8 +1344,7 @@ function classSweepPrompt(groups, detect, evidenceById) {
     '',
     EVIDENCE_RULE,
     '',
-    EXTERNAL_SOURCE_DECLARATION,
-    '',
+    ...(BENCHMARK_MODE ? [EXTERNAL_SOURCE_DECLARATION, ''] : []),
     CLASS_SWEEP_ESCAPE_HATCH,
     '',
     severityBlock(),
@@ -1147,9 +1374,10 @@ const DEDUP_RULES = [
 
 function dedupPrompt(buckets) {
   const partPath = PARTS_DIR + '/dedup-agent.json'
-  // Every finding carries its group index in the payload. The workflow discards a merge
-  // whose members are not all from one group, and so does nothing downstream — the group
-  // is in front of the agent so the constraint is checkable rather than merely stated.
+  // Every finding carries its group index in the payload. Several collisions in one file
+  // go to one agent, and batching only saves the re-read: the buckets stay separate in the
+  // prompt and the workflow discards a merge whose members are not all from one group. The
+  // group is in front of the agent so that constraint is checkable rather than only stated.
   const groups = buckets.map((bucket, i) => bucket.map((f) => Object.assign({ group: i }, f)))
   return [
     'Independent reviewers collided in ' + buckets.length + ' place(s). Decide, WITHIN each group',
@@ -1170,16 +1398,12 @@ function dedupPrompt(buckets) {
     'WRITE YOUR RESULT TO ' + partPath,
     '',
     'Before you return, write a single JSON object to that path shaped exactly like the value you',
-    'return: {"part_id": "dedup-agent", "merges": [ ... ]}. Use the Write tool; if the harness blocks',
-    'it, use a Bash heredoc with a quoted delimiter. The final report is assembled from the part',
+    'return: {"part_id": "dedup-agent", "merges": [ ... ]}. Use the Write tool. You have no shell',
+    'in this configuration; there is no fallback. The final report is assembled from the part',
     'files, so a merge that is only in your reply and not in the file does not happen.',
   ].join('\n')
 }
 
-// Several collisions in one file go to one agent. The buckets stay separate in the
-// prompt and a merge that crosses two of them is discarded in code, so batching
-// cannot merge unrelated findings — it only saves the agent that would otherwise
-// re-read the same file for each bucket.
 const SEVERITY_TABLES = [
   '### REMOTE',
   '',
@@ -1210,8 +1434,7 @@ const SEVERITY_TABLES = [
 // Severity is assigned by whoever found the bug. There is no judge downstream to
 // re-derive it, so the tables have to travel with the reviewer rather than sitting in
 // a separate agent's prompt. The scoping rules come with them: a finding the threat
-// model puts out of scope should not be filed at all, which is where roughly half of
-// the deleted judge's rejections went.
+// model puts out of scope should not be filed at all.
 function severityBlock() {
   return [
     '## Severity — you assign it, nobody re-checks it',
@@ -1221,35 +1444,44 @@ function severityBlock() {
     '',
     SEVERITY_TABLES,
     '',
-    '### Scope — do not file what this threat model excludes',
+    '### Scope — file everything, and say what the threat model does to it',
     '',
     'Under REMOTE, a bug only triggerable through local configuration, CLI arguments, environment or',
-    'an existing shell is out of scope: do not file it. Under LOCAL_UNPRIVILEGED, a bug that crosses',
-    'no privilege boundary is out of scope, and so is one that requires root. If it is close to the',
-    'line, file it and say so in the impact — a borderline finding a reader can dismiss is cheaper',
-    'than a real bug nobody looked at.',
+    'an existing shell scores LOW. Under LOCAL_UNPRIVILEGED, so does a bug that crosses no privilege',
+    'boundary, or one that requires root. File it either way, and say in the impact that the threat',
+    'model puts it out of scope. Do NOT decide not to file it: nothing downstream re-reads your',
+    'units, so a bug you judge out of scope is a bug nobody ever looks at again, and the pipeline',
+    'already filters deterministically by severity after the fact.',
     '',
     'A finding whose impact is hardening rather than exploitation — a banned API with no',
     'attacker-controlled data reaching it, a missing compiler flag — is worth reporting at LOW. Say',
     'plainly in the impact that it is a hardening gap, so it is not read as an exploitable bug.',
   ].join('\n')
 }
-function assemblePrompt(expected, complete, groupsAttempted, groupsFailed, failures) {
+function assemblePrompt(expected, complete, external, groupsAttempted, groupsFailed, failures) {
   const parts = [
-    'uv run ' + JSON.stringify(SCRIPTS + '/assemble_findings.py'),
-    '--run-dir ' + JSON.stringify(OUTPUT_DIR),
-    '--threat-model ' + JSON.stringify(THREAT_MODEL),
-    '--severity-filter ' + JSON.stringify(SEVERITY_FILTER),
-    '--scope ' + JSON.stringify(SCOPE),
-    '--context-roots ' + JSON.stringify(CONTEXT_ROOTS),
-    '--worker-model ' + JSON.stringify(WORKER_MODEL || 'inherit'),
-    '--groups-attempted ' + JSON.stringify(groupsAttempted.join(',')),
-    '--groups-failed ' + JSON.stringify(groupsFailed.join(',')),
+    'uv run ' + shq(SCRIPTS + '/assemble_findings.py'),
+    '--run-dir ' + shq(OUTPUT_DIR),
+    '--threat-model ' + shq(THREAT_MODEL),
+    '--severity-filter ' + shq(SEVERITY_FILTER),
+    '--scope ' + shq(SCOPE),
+    '--context-roots ' + shq(CONTEXT_ROOTS),
+    '--worker-model ' + shq(WORKER_MODEL || 'inherit'),
+    // The declaration is only asked for in benchmark mode, so only benchmark mode may
+    // record it as asked. Inferring it from the part file lets a model that volunteers the
+    // optional property make an unasked cell look like a cleared one.
+    ...(BENCHMARK_MODE ? ['--benchmark-mode'] : []),
+    '--groups-attempted ' + shq(groupsAttempted.join(',')),
+    '--groups-failed ' + shq(groupsFailed.join(',')),
     '--no-judge',
   ]
-  for (const e of expected) parts.push('--expect ' + JSON.stringify(e))
-  for (const c of complete) parts.push('--expect-complete ' + JSON.stringify(c))
-  for (const f of failures) parts.push('--agent-failure ' + JSON.stringify(f))
+  for (const e of expected) parts.push('--expect ' + shq(e))
+  for (const c of complete) parts.push('--expect-complete ' + shq(c))
+  // The declaration the agent gave through the SCHEMA. Without it the assembler only ever
+  // sees the part file, which can be an earlier draft than the accepted return — the same
+  // staleness `--expect-complete` exists for — so an honest `true` could be dropped.
+  for (const x of external) parts.push('--external-source ' + shq(x))
+  for (const f of failures) parts.push('--agent-failure ' + shq(f))
 
   return [
     'Mechanical step. Run exactly this command and report its result. Do not analyse the content, do',
@@ -1258,16 +1490,32 @@ function assemblePrompt(expected, complete, groupsAttempted, groupsFailed, failu
     '  ' + parts.join(' \\\n    '),
     '',
     'It reads the part files each agent wrote, assembles findings.json deterministically, and',
-    'generates REPORT.md and REPORT.sarif from it. It exits non-zero and prints the reason if a part',
-    'file is missing, unreadable, or if there are no part files at all.',
+    'generates REPORT.md and REPORT.sarif from it.',
     '',
-    'If it fails, return ok=false with the stderr text in `error`. Do not hand-write the outputs and',
-    'do not retry with different arguments — a previous design had an agent transcribe this document',
-    'by hand and it silently summarised 86 findings down to 23 with every evidence field stripped.',
+    'Three exit codes, and they mean different things:',
+    '',
+'- 0 — everything written and the coverage gate accepted the ledger. Return ok=true.',
+    '- 1 — everything WAS written, but the coverage gate could not run or rejected the ledger. The',
+    '  review is assembled and unverified, and all three artifacts say so. Return ok=false and the',
+    '  stderr text in `error`.',
+    '- 2 — no artifact was written (a part file missing or unreadable, none at all, or a malformed',
+    '  part the assembler could not read). Return ok=false and the stderr text in `error`.',
+    '',
+    'Then LIST ' + shq(OUTPUT_DIR) + ' and set artifacts_written from what is actually there —',
+    'true only if findings.json, REPORT.md and REPORT.sarif are all present. Do not infer it from',
+    'the exit code: the code tells you what the script believes, and the directory is the fact.',
+    '',
+    'Never re-run it and never hand-write the outputs: it is deterministic, so a second run cannot',
+    'produce a different answer, and hand-transcribing this document silently drops findings and',
+    'strips evidence fields.',
     '',
     'It also runs the coverage gate in-process and writes ledger-gate.json, so there is no separate',
-    'gate step. On success, copy the counts from the JSON it printed into the matching fields,',
-    'including checks_required, checks_completed and checks_satisfied.',
+    'gate step. Copy the counts from the JSON it printed into the matching fields WHATEVER the exit',
+    'code was — checks_required, checks_completed, checks_satisfied and unrecognised_parts. The',
+    'script prints that JSON before it returns 1, so those numbers exist on a rejection too, and a',
+    'rejection is exactly when coverage matters: omitting them makes the skill report 400 of 445',
+    'satisfied as "coverage UNMEASURED". Copy unrecognised_parts even when it is 0 — an omitted',
+    'count is reported as UNCHECKED, not as none.',
   ].join('\n')
 }
 
@@ -1290,33 +1538,59 @@ const QUESTION_TEXT = {
     'What this unit assumes its caller guarantees about each parameter, and whether every caller actually guarantees it. Check the callers; do not assume.',
   'banned-api':
     'Each banned or deprecated API here: name the source of the data and the size that reaches it, and what validates between them. A bounded internal constant reaching one is a hardening note, not a vulnerability — say which.',
+  initialisation:
+    'Every field of every caller-provided out-parameter, and every local this unit returns through: is it written on every path before anything reads it? `malloc` does not zero and neither does the stack, so an early return through an error path leaves the caller reading whatever the previous owner of that memory left there.',
   'macro-contract':
     'Each function-like macro: what it assumes of its arguments, and whether that is enforced at every expansion site. A macro is textual, unscoped and untypechecked, so an invariant it relies on is invisible where it is used and can hold at four call sites and not the fifth.',
 }
 
+// Returns {selected, dropped}. `dropped` is the classes the PLATFORM or threat model
+// removed before anything looked at the code, and it has to be returned because such a
+// class appears in neither `silentClasses` nor `ruledOutClasses` — both are computed from
+// `selected` — so without it the class is absent from the review with nothing saying so.
 function selectGroups(detect) {
   const selected = []
+  const dropped = []
   for (const group of GROUPS) {
     if (group.gate === 'is_cpp' && !detect.is_cpp) continue
     if (group.gate === 'is_windows' && !detect.is_windows) continue
     const classIds = group.classes.filter((id) => {
       const c = CLASSES[id]
-      if (c.posix && !detect.is_posix) return false
-      if (c.skipRemote && THREAT_MODEL === 'REMOTE') return false
-      return true
+      const why = c.posix && !detect.is_posix ? 'not a POSIX target'
+        : c.skipRemote && THREAT_MODEL === 'REMOTE' ? 'out of scope under REMOTE'
+        : null
+      if (why) dropped.push(id + ' (' + why + ')')
+      return !why
     })
     if (classIds.length) selected.push({ group: group, classIds: classIds })
   }
-  return selected
+  return { selected: selected, dropped: dropped }
 }
 
+// Port of `normalize_path` in assemble_findings.py, INCLUDING the scope-root
+// relativisation and the `.`/`..` folding. Both halves need all of it: two reviewers
+// filing one bug at `src/parse.c:142` and `/proj/src/parse.c:142` are merged by the
+// assembler, which owns findings.json, and any rule short of the assembler's sees two
+// different files here — `collisionBuckets` groups by file, so the pair never shares a
+// bucket, the dedup agent is never shown it, and `stats.primaries` returns 2 over a
+// document holding 1.
 function normalizePath(p) {
   let s = String(p == null ? '' : p).replace(/\\/g, '/').trim()
   const link = s.match(/^\[([^\]]+)\]\([^)]*\)$/)
   if (link) s = link[1]
-  while (s.startsWith('./')) s = s.slice(2)
   while (s.indexOf('//') !== -1) s = s.replace('//', '/')
-  return s
+  const root = SCOPE.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (root && s.startsWith(root + '/')) s = s.slice(root.length + 1)
+  const parts = []
+  for (const segment of s.split('/')) {
+    if (segment === '.' || (segment === '' && parts.length)) continue
+    if (segment === '..' && parts.length && parts[parts.length - 1] !== '' && parts[parts.length - 1] !== '..') {
+      parts.pop()
+      continue
+    }
+    parts.push(segment)
+  }
+  return parts.join('/')
 }
 
 const CONFIDENCE_RANK = { High: 3, Medium: 2, Low: 1 }
@@ -1326,7 +1600,7 @@ const CONFIDENCE_RANK = { High: 3, Medium: 2, Low: 1 }
 // dedup and judge decisions land on the right finding without either side needing
 // the other's numbering. Public ids (BOF-001) are assigned by the assembler alone.
 function normalizeFinding(raw, partId, index) {
-  const bugClass = CLASSES[raw.bug_class] ? raw.bug_class : 'logic-flaw'
+  const bugClass = knownClass(raw.bug_class) ? raw.bug_class : 'logic-flaw'
   return {
     key: partId + '#' + index,
     bug_class: bugClass,
@@ -1336,7 +1610,7 @@ function normalizeFinding(raw, partId, index) {
     line: Number.isFinite(raw.line) && raw.line > 0 ? Math.floor(raw.line) : 1,
     function: String(raw.function || '(file-level)').trim(),
     unit_id: String(raw.unit_id || ''),
-    confidence: CONFIDENCE_RANK[raw.confidence] ? raw.confidence : 'Medium',
+    confidence: CONFIDENCE_RANK[raw.confidence] > 0 ? raw.confidence : 'Medium',
     description: String(raw.description || ''),
     code: String(raw.code || ''),
     data_flow: String(raw.data_flow || ''),
@@ -1349,9 +1623,23 @@ function normalizeFinding(raw, partId, index) {
   }
 }
 
+// Must match `_election_key` in assemble_findings.py, which owns the artifact. Location
+// PRECISION first — a named function beats `(file-level)` — then confidence, then key.
+// Ranking on confidence alone elects a different primary from the assembler on the same
+// pair, so the workflow log and findings.json disagree about which finding survived and a
+// merge the log reports comes back as a second primary in REPORT.md.
+function precisionRank(f) {
+  return normFunction(f.function) ? 1 : 0
+}
+
 function pickPrimary(a, b) {
-  const ra = CONFIDENCE_RANK[a.confidence] || 2
-  const rb = CONFIDENCE_RANK[b.confidence] || 2
+  const pa = precisionRank(a)
+  const pb = precisionRank(b)
+  if (pa !== pb) return pa > pb ? a : b
+  // `> 0`, not truthiness: `CONFIDENCE_RANK['constructor']` is a Function off the
+  // prototype chain, which is truthy and compares as neither greater nor less.
+  const ra = CONFIDENCE_RANK[a.confidence] > 0 ? CONFIDENCE_RANK[a.confidence] : 2
+  const rb = CONFIDENCE_RANK[b.confidence] > 0 ? CONFIDENCE_RANK[b.confidence] : 2
   if (ra !== rb) return ra > rb ? a : b
   return a.key <= b.key ? a : b
 }
@@ -1376,15 +1664,26 @@ function tier1(findings) {
   return mergedInto
 }
 
-// Prose that appears in almost every data_flow description. Without these the
-// comparison measures how similarly two reviewers write English rather than whether
-// they are describing one chain.
-// Tier 1.5, mirroring `assemble_findings.py`. Two findings in one function within
-// three lines are the same bug described twice, including across bug classes — the
-// case tier 1's exact (file, line, class) match cannot see. Doing it here as well as
-// in the assembler is not redundancy: the assembler owns the artifact, and this copy
-// is what keeps these pairs out of the dedup agent's prompt. Both sides use the same
-// rule and the same window, and the assembler's tests pin it.
+// Does this component hold a cross-class pair further apart than the cap allows?
+// Port of `_cross_class_too_far` in assemble_findings.py.
+function crossClassTooFar(component) {
+  for (let i = 0; i < component.length; i++) {
+    for (let j = i + 1; j < component.length; j++) {
+      const a = component[i]
+      const b = component[j]
+      if (a.bug_class === b.bug_class) continue
+      if (Math.abs(a.line - b.line) > CROSS_CLASS_NEARBY_LINES) return true
+    }
+  }
+  return false
+}
+
+// Tier 1.5, mirroring `assemble_findings.py`. Two findings in one function within three
+// lines are the same bug described twice, including across bug classes — the case tier 1's
+// exact (file, line, class) match cannot see. Doing it here as well as in the assembler is
+// not redundancy: the assembler owns the artifact, and this copy is what keeps these pairs
+// out of the dedup agent's prompt. Equal constants are not enough to keep the two in step,
+// so the assembler's tests pin the rule itself over fixtures.
 function autoMergeNearby(findings, mergedInto) {
   const live = findings.filter((f) => !mergedInto.has(f.key))
   const byFn = new Map()
@@ -1397,29 +1696,73 @@ function autoMergeNearby(findings, mergedInto) {
   }
   let merged = 0
   for (const members of byFn.values()) {
+    if (members.length < 2) continue
     members.sort((a, b) => a.line - b.line || (a.key < b.key ? -1 : 1))
+    // Connected components, not pairs, exactly as tier1_5 does it: findings at 100, 102
+    // and 104 are one group even though the outer two are four lines apart. A pairwise
+    // rule merges 100 into 102 and then refuses 104 because 102 is already merged, so it
+    // leaves 104 live, buckets it against 100, and spawns a dedup agent to judge a merge
+    // the assembler has already made.
+    const parent = new Map(members.map((f) => [f.key, f.key]))
+    const find = (k) => {
+      while (parent.get(k) !== k) {
+        parent.set(k, parent.get(parent.get(k)))
+        k = parent.get(k)
+      }
+      return k
+    }
     for (let i = 0; i < members.length; i++) {
       for (let j = i + 1; j < members.length; j++) {
         const a = members[i]
         const b = members[j]
-        const gap = Math.abs(a.line - b.line)
+        const gap = b.line - a.line
         if (gap > NEARBY_LINES) break
-        // Mirrors CROSS_CLASS_NEARBY_LINES in assemble_findings.py. If this side merged a
-        // cross-class pair the assembler now leaves alone, the pair would be dropped from
-        // the dedup agent's prompt as "already handled" and then never merged by anyone —
-        // the two rules have to agree or a pair falls between them.
+        // Mirrors CROSS_CLASS_NEARBY_LINES in assemble_findings.py. The two rules have to
+        // agree exactly: a cross-class pair merged here but left for the dedup step there
+        // is dropped from the dedup agent's prompt as "already handled" and then merged by
+        // nobody — the pair falls between them.
         if (gap > CROSS_CLASS_NEARBY_LINES && a.bug_class !== b.bug_class) continue
-        if (mergedInto.has(a.key) || mergedInto.has(b.key)) continue
-        const primary = pickPrimary(a, b)
-        const dup = primary.key === a.key ? b : a
-        mergedInto.set(dup.key, primary.key)
+        const ra = find(a.key)
+        const rb = find(b.key)
+        if (ra !== rb) parent.set(ra, rb)
+      }
+    }
+    const components = new Map()
+    for (const f of members) {
+      const root = find(f.key)
+      if (!components.has(root)) components.set(root, [])
+      components.get(root).push(f)
+    }
+    for (const component of components.values()) {
+      if (component.length < 2) continue
+      // The cap above is pairwise but the merge is by connected component, so
+      // A(buffer-overflow,100) + B(integer-overflow,100) + C(buffer-overflow,102) put B
+      // and C — cross-class, two lines apart — in one group through A. Mirrors
+      // `_cross_class_too_far` in assemble_findings.py, which rejects the WHOLE component
+      // for that reason; anything narrower merges a component the assembler leaves alone
+      // and REPORT.md shows three findings where this workflow reported one primary.
+      if (crossClassTooFar(component)) continue
+      let primary = component[0]
+      for (const m of component.slice(1)) primary = pickPrimary(primary, m)
+      const demoted = new Set(component.filter((f) => f.key !== primary.key).map((f) => f.key))
+      for (const key of demoted) {
+        mergedInto.set(key, primary.key)
         merged++
+      }
+      // A tier-1 primary can lose here — it is live, so this pass considers it — and
+      // everything tier 1 folded into it has to follow it down, or mergedInto holds a
+      // chain. Not counted: they were merged already.
+      for (const [dup, target] of [...mergedInto]) {
+        if (demoted.has(target) && !demoted.has(dup)) mergedInto.set(dup, primary.key)
       }
     }
   }
   return merged
 }
 
+// Prose that appears in almost every data_flow description. Without these the comparison
+// measures how similarly two reviewers write English rather than whether they are
+// describing one chain.
 const FLOW_STOPWORDS = new Set([
   'the', 'and', 'from', 'into', 'with', 'this', 'that', 'then', 'than', 'when', 'where',
   'which', 'value', 'values', 'data', 'input', 'source', 'sink', 'size', 'length', 'len',
@@ -1443,13 +1786,11 @@ function flowTokens(text) {
   return out
 }
 
-// Deliberately hard to trigger. Two findings describing one chain name the same
-// specific identifiers — the variable, the field, the callee — so a genuine match has
-// several distinctive tokens in common. A loose threshold instead measures prose
-// similarity: at three tokens and 34% overlap, two unrelated findings fifty lines
-// apart bucketed together purely because both descriptions were short. Every false
-// collision costs a dedup agent, and the phase is supposed to be near-empty under a
-// location partition.
+// Deliberately hard to trigger. Two findings describing one chain name the same specific
+// identifiers — the variable, the field, the callee — so a genuine match has several
+// distinctive tokens in common. A looser threshold measures prose similarity instead, and
+// lets short unrelated descriptions collide by chance. Every false collision costs a dedup
+// agent, and that phase is supposed to be near-empty under a location partition.
 function flowsIntersect(a, b) {
   const ta = flowTokens(a.data_flow)
   const tb = flowTokens(b.data_flow)
@@ -1501,7 +1842,7 @@ function collisionBuckets(findings, mergedInto) {
         const a = members[i]
         const b = members[j]
         const sameFn = normFunction(a.function) && normFunction(a.function) === normFunction(b.function)
-        const nearby = Math.abs(a.line - b.line) <= 8
+        const nearby = Math.abs(a.line - b.line) <= COLLISION_LINES
         if (sameFn || nearby || flowsIntersect(a, b)) union(a.key, b.key)
       }
     }
@@ -1520,17 +1861,22 @@ function collisionBuckets(findings, mergedInto) {
 
 const partsExpected = []
 const partsComplete = []
+const partsExternal = []
 const agentFailures = []
 
-// One command creates every directory the agents write into, so no agent has to
-// think about mkdir and no write fails on a missing parent.
+// `enumerate_units.py` creates `parts/` and clears any previous run's part files out of it,
+// inside the command the detect agent runs below. The cleanup belongs in the script rather
+// than in the prompt: two shell lines in a prompt are a step an LLM can summarise instead
+// of run, and nothing downstream can tell. `load_parts` globs `parts/*.json` and `--expect`
+// only asserts presence, so a leftover `review-unit-07.json` from a 9-agent run is
+// assembled into a later 6-agent run's findings.json and its stale ledger rows count as
+// that run's coverage.
 phase('Detect')
 const gateableClasses = Object.keys(CLASSES).filter((id) => CLASSES[id].evidence)
 const detect = await agent(
-  'First run this, exactly, and report nothing about it unless it fails:\n\n  mkdir -p ' +
-    JSON.stringify(PARTS_DIR) + '\n\nThen do the following.\n\n' + detectPrompt(gateableClasses),
+  detectPrompt(gateableClasses),
   workerOpts({ label: 'detect', phase: 'Detect', schema: DETECT_SCHEMA })
-)
+).catch(died('detect'))
 if (!detect) {
   throw new Error('c-review: detection agent returned nothing; there is no unit list to review')
 }
@@ -1545,32 +1891,72 @@ log(
 )
 log('units: ' + String(detect.units_summary || '').replace(/\s+/g, ' ').slice(0, 300))
 
-const assignmentIds = (detect.assignment_ids || []).map(String).filter(Boolean)
+const assignmentIds = asArray(detect.assignment_ids).map(String).filter(Boolean)
 if (!assignmentIds.length) {
   throw new Error(
     'c-review: the detect agent produced no assignment ids. units.json exists but nothing can be ' +
       'dispatched against it; re-run rather than reviewing an unpartitioned tree.'
   )
 }
+const malformedIds = assignmentIds.filter((id) => !ASSIGNMENT_ID.test(id))
+if (malformedIds.length) {
+  throw new Error(
+    'c-review: assignment id(s) ' + malformedIds.join(', ') + ' are not ' + ASSIGNMENT_ID +
+      '. `enumerate_units.py` emits `unit-NN`, so these were not copied from it; they reach a ' +
+      'shell command, an --expect operand and a part-file path.'
+  )
+}
+// Uniqueness, which the charset check above does not give. Two agents handed the same id
+// are told to write the same part path, so the second overwrites the first — one agent's
+// entire output lost — `normalizeFinding` then keys two different findings identically so
+// dedup sees one, and the two `--expect <id>=N` operands disagree, which fails the
+// assembler with exit 2 and NO artifacts for the whole run.
+if (new Set(assignmentIds).size !== assignmentIds.length) {
+  throw new Error(
+    'c-review: the detect agent returned duplicate assignment id(s) in ' +
+      assignmentIds.join(', ') + '. Each id is a part-file path; two agents sharing one means ' +
+      'one agent\'s whole output is overwritten before anything reads it.'
+  )
+}
+if (assignmentIds.length > AGENT_MAX) {
+  throw new Error(
+    'c-review: the detect agent returned ' + assignmentIds.length + ' assignment ids and ' +
+      'enumerate_units.py cannot emit more than ' + AGENT_MAX + '. These were not copied from ' +
+      'units.json, and each one costs an agent.'
+  )
+}
 const assignments = assignmentIds.map((id) => ({
   id: id,
   path: OUTPUT_DIR + '/assignments/' + id + '.json',
   // Deliberately nothing else. The unit count, line total and file list live in the
-  // assignment file, which the workflow cannot read; a previous version carried them
-  // as zero-valued "display hints" and every review prompt opened with the literal
-  // "Your slice is 0 unit(s), 0 line(s), in: ." The run only survived it because the
-  // prompt also says to read the assignment file first.
+  // assignment file, which the workflow cannot read, so carrying them here as "display
+  // hints" opens every review prompt with the literal "Your slice is 0 unit(s), 0
+  // line(s), in: ." — survivable only because the prompt also says to read the
+  // assignment file first.
 }))
 
 const evidenceById = new Map()
-for (const e of detect.class_evidence || []) {
-  if (e && e.bug_class && e.has_candidates) evidenceById.set(String(e.bug_class), String(e.citation || ''))
+for (const e of asArray(detect.class_evidence)) {
+  // NORMALIZED. `bug_class` is model output, so `format_string` and `Buffer Overflow` are
+  // both routine — and an id `knownClass` does not recognise can never match
+  // `sweepCandidate`, so a class the detect phase cited a real site for lands in `ruledOut`
+  // and both the log and `ruledOutClasses` assert "detect cited no candidate site" over it,
+  // removing it from the only pass that would have looked.
+  if (!e || !e.bug_class || !e.has_candidates) continue
+  const id = normClassId(e.bug_class)
+  if (id) evidenceById.set(id, String(e.citation || ''))
 }
-const selected = selectGroups(detect)
+const { selected, dropped: platformDropped } = selectGroups(detect)
 log(
   assignments.length + ' review assignment(s); ' + selected.length + ' live group(s); ' +
     evidenceById.size + ' class(es) with a cited candidate site'
 )
+if (platformDropped.length) {
+  log(
+    platformDropped.length + ' class(es) dropped before anything looked, by the platform ' +
+      'flags or the threat model: ' + platformDropped.join(', ')
+  )
+}
 
 // ------------------------------------------------------------------- review
 //
@@ -1584,74 +1970,108 @@ const reviewResults = await parallel(
   assignments.map((a) => () =>
     agent(
       reviewPrompt(a, detect),
-      workerOpts({ label: 'review:' + a.id, phase: 'Review', schema: REVIEW_SCHEMA })
-    ).then((r) => ({ partId: 'review-' + a.id, result: r }))
+      producingOpts({ label: 'review:' + a.id, phase: 'Review', schema: REVIEW_SCHEMA })
+    )
+      // `result == null` is already the failure shape the collector below expects, so
+      // `died` makes it the only one — see `died`.
+      .catch(died('review-' + a.id))
+      .then((r) => ({ partId: 'review-' + a.id, result: r }))
   )
 )
 
 // -------------------------------------------------------------------- sweep
 //
-// The class axis, in two agents. It is not the partition — location is — but it is
-// not decoration either: in the measurement it was the only thing that found four
-// bugs, a missing free on an open() failure path, a (void) cast hiding an unchecked
-// return, a 64-bit clamp done at the wrong width, and a state returning success
-// where it should have asked for more input. Three of the four are in cold error
-// paths, which is exactly the ground a reader working a region in order walks past.
+// The class axis: one agent, or two with `invariantAudit: true`. It is not the
+// partition — location is — but it is not decoration either. In the measurement it was
+// the only thing that found four bugs: a missing free on an open() failure path, a
+// (void) cast hiding an unchecked return, a 64-bit clamp done at the wrong width, and a
+// state returning success where it should have asked for more input. Three of the four
+// are in cold error paths, exactly the ground a reader working a region in order walks
+// past.
 
 phase('Sweep')
 const classesWithFindings = new Set()
-for (const entry of reviewResults) {
-  if (!entry || !entry.result) continue
-  for (const f of entry.result.findings || []) classesWithFindings.add(String(f.bug_class || ''))
+// The class each finding will actually be FILED under, by `normalizeFinding`'s rule —
+// exact catalogue match or `logic-flaw` — not a slug-folded guess at what the reviewer
+// meant. The two have to be the same rule. Folding `"Buffer Overflow"` to
+// `buffer-overflow` here marks the class covered and skips it in the sweep while the
+// artifacts file that finding as `logic-flaw`: no artifact holds a buffer-overflow
+// finding, `stillSilent` omits the class (it was never in `silentByGroup`), and
+// `ruledOutClasses` and `platformDroppedClasses` omit it too — zero coverage and no
+// coverage story in any of the four fields the skill reports.
+// CLASS_SWEEP_ESCAPE_HATCH tells the sweep agent its list is checked against this run's
+// output; this is what makes that true.
+function recordClasses(entries) {
+  for (const entry of entries) {
+    if (!entry || !entry.result) continue
+    // A part file that was never written contributes no finding to any artifact, so its
+    // classes are still SILENT. Counting them drops the class from the sweep AND from
+    // `stillSilent`: no artifact holds a finding in it and no coverage story anywhere
+    // says it is uncovered.
+    if (entry.result.part_written === false) continue
+    for (const f of asArray(entry.result.findings)) {
+      classesWithFindings.add(knownClass(f && f.bug_class) ? f.bug_class : 'logic-flaw')
+    }
+  }
 }
+recordClasses(reviewResults)
 
-// Every silent class with a cited candidate site goes to ONE agent, grouped for
-// readability rather than split across agents. v3 spent up to three agents here and
-// still capped, which meant reporting a cap AND paying for the fan-out.
+// Every silent class the detect phase did not rule out goes to ONE agent, grouped for
+// readability rather than split across agents: one agent means no cap to report and no
+// fan-out to pay for.
+//
+// `sweepCandidate`, not `evidenceById.has(id)`. Only classes carrying an `evidence` grep
+// are put to the detect phase, so a class without one can never hold a citation, and
+// gating on the citation makes 32 of the 56 classes structurally unreachable by the sweep
+// — including memory-leak, error-handling, integer-overflow and logic-flaw, the four this
+// pass is credited with uniquely finding. Ungateable means always-candidate, not
+// never-candidate.
+const sweepCandidate = (id) => evidenceById.has(id) || !CLASSES[id].evidence
 const silentByGroup = []
 for (const sel of selected) {
-  const silent = sel.classIds.filter((id) => !classesWithFindings.has(id) && evidenceById.has(id))
+  const silent = sel.classIds.filter((id) => !classesWithFindings.has(id) && sweepCandidate(id))
   if (silent.length) silentByGroup.push({ group: sel.group, classIds: silent })
 }
 
-// The invariant audit is OFF by default: where it has been measured it cost ~9% of the run
-// for no credited hit. It is kept rather than deleted because the shared-state-struct bugs
-// it targets have never been measured on a valid cell — unknown, not disproven. Turn it on
-// for state-machine-heavy targets.
-const INVARIANT_AUDIT = ARGS.invariantAudit === true
+// Silent, but ruled out by the detect phase rather than swept. Logged separately from the
+// swept set: "no candidate site" and "swept and found nothing" are different coverage
+// stories, and only one of them means a human should look.
+const ruledOut = selected.flatMap((sel) =>
+  sel.classIds.filter((id) => !classesWithFindings.has(id) && !sweepCandidate(id))
+)
+if (!evidenceById.size) {
+  log(
+    'WARNING: the detect phase cited no candidate site for any gateable class, so every ' +
+      'grep-gated class is out of the sweep. Expected on a small ISO-C target, suspicious on anything larger.'
+  )
+}
+if (ruledOut.length) {
+  log(ruledOut.length + ' silent class(es) NOT swept — detect cited no candidate site: ' + ruledOut.join(', '))
+}
 
 const sweepThunks = []
 if (silentByGroup.length) {
   const total = silentByGroup.reduce((n, g) => n + g.classIds.length, 0)
   log(
-    'class sweep: ' + total + ' silent class(es) with a cited candidate site across ' +
-      silentByGroup.length + ' group(s)'
+    'class sweep: ' + total + ' silent class(es) across ' + silentByGroup.length + ' group(s)'
   )
   sweepThunks.push(() =>
     agent(
       classSweepPrompt(silentByGroup, detect, evidenceById),
-      workerOpts({ label: 'sweep:classes', phase: 'Sweep', schema: REVIEW_SCHEMA })
-    ).then((r) => ({ partId: 'sweep-classes', result: r }))
-  )
-} else if (!evidenceById.size) {
-  // These two are very different coverage stories and must not share a message: one
-  // says the sweep had nothing left to do, the other says the gate that feeds it
-  // never fired, so no class sweep happened at all.
-  log(
-    'WARNING: the detect phase cited no candidate site for any gateable class, so no ' +
-      'class sweep ran. Expected on a small ISO-C target, suspicious on anything larger.'
+      producingOpts({ label: 'sweep:classes', phase: 'Sweep', schema: REVIEW_SCHEMA })
+    ).catch(died('sweep-classes')).then((r) => ({ partId: 'sweep-classes', result: r }))
   )
 } else {
-  log('every live class with a cited candidate site already has an entry; class sweep skipped')
+  log('every live class already has an entry or was ruled out by detect; class sweep skipped')
 }
 
-const structs = (detect.state_structs || []).map(String).filter(Boolean)
+const structs = asArray(detect.state_structs).map(String).filter(Boolean)
 if (INVARIANT_AUDIT) {
   sweepThunks.push(() =>
     agent(
       invariantSweepPrompt(structs, detect),
-      workerOpts({ label: 'sweep:invariants', phase: 'Sweep', schema: REVIEW_SCHEMA, effort: 'high' })
-    ).then((r) => ({ partId: 'sweep-invariants', result: r }))
+      producingOpts({ label: 'sweep:invariants', phase: 'Sweep', schema: REVIEW_SCHEMA, effort: 'high' })
+    ).catch(died('sweep-invariants')).then((r) => ({ partId: 'sweep-invariants', result: r }))
   )
   log(
     'invariant audit over ' +
@@ -1666,6 +2086,14 @@ if (INVARIANT_AUDIT) {
 }
 
 const sweepResults = await parallel(sweepThunks)
+
+// SKILL.md defines a silent class as one with no finding ANYWHERE, so it cannot be the set
+// computed before the sweep ran: that set reports a class the sweep filed three findings in
+// as silent, and makes a class the sweep cleared indistinguishable from one never looked
+// at. Recomputed over every producer instead.
+recordClasses(sweepResults)
+const stillSilent = silentByGroup.flatMap((g) => g.classIds).filter((id) => !classesWithFindings.has(id))
+
 // ---------------------------------------------------- collect the producers
 
 const producers = [...reviewResults, ...sweepResults]
@@ -1676,26 +2104,46 @@ for (const entry of producers) {
   if (!entry.result) {
     agentFailures.push(entry.partId + ': returned nothing')
     log('WARNING: ' + entry.partId + ' returned nothing; its units and classes are UNCOVERED')
+    // The stem WITHOUT a count, so the part file this agent may well have written is still
+    // allowlisted. `--expect` is an allowlist as well as an assertion: omit the stem and a
+    // worker that wrote parts/review-unit-07.json and then had its structured answer
+    // rejected has its complete, honest part file discarded as a ghost — five CRITICALs and
+    // a ledger row on disk, in no artifact, reported only as `unrecognised_parts`. There is
+    // no count to assert, since nothing came back, and the matching `--agent-failure` above
+    // means a genuinely absent file is expected rather than fatal.
+    partsExpected.push(entry.partId)
     continue
   }
-  const findings = entry.result.findings || []
+  const findings = asArray(entry.result.findings)
   findings.forEach((f, i) => rawFindings.push(normalizeFinding(f, entry.partId, i)))
   if (entry.result.part_written === false) {
     agentFailures.push(entry.partId + ': did not write its part file')
     log(
       'WARNING: ' + entry.partId + ' says it did not write its part file. Its ' + findings.length +
-        ' finding(s) will be missing from the artifacts; the assembler will fail on the expectation.'
+        ' finding(s) are missing from the artifacts, and this run is short by that much.'
     )
   }
+  // The expectation is pushed EITHER WAY. Skipping it for a part whose agent said it did
+  // not write makes `part_written: false` an agent-controlled switch that disables the only
+  // check on that part's contents while the file, if present, is still read in full: a
+  // reviewer summarises 12 findings down to 3, sets the flag, and ships 3 with nothing
+  // comparing them against the 12 it returned. `--agent-failure` is what keeps the honest
+  // case cheap — the assembler does not treat a MISSING file as fatal for a part already
+  // named there, so self-reporting is not punished harder than silence.
   partsExpected.push(entry.partId + '=' + findings.length)
   // The workflow's copy of these findings came back through the schema, so it is complete
   // by construction. Tell the assembler that, and it can tell a part file that is merely
   // thin (the agent genuinely had nothing to say) from one that is STALE — written before
-  // a rejected structured answer was retried, and never rewritten. Measured on the
-  // 2026-08-07 container cell: the sweep agent's file held 7 findings with no
-  // `description` while its accepted return carried all 7.
+  // a rejected structured answer was retried, and never rewritten.
   if (findings.length && findings.every((f) => REQUIRED_PART_FIELDS.every((k) => f && f[k]))) {
     partsComplete.push(entry.partId)
+  }
+  // Same reasoning for the external-source declaration: benchmark mode makes the schema
+  // REQUIRE it, so the return is where the honest answer is. Reading it only from the part
+  // file throws that answer away and a contaminated arm scores VALID. Only a return that
+  // actually carried the key counts as an answer.
+  if (BENCHMARK_MODE && 'external_sources_consulted' in entry.result) {
+    partsExternal.push(entry.partId + '=' + (entry.result.external_sources_consulted ? 1 : 0))
   }
   if (entry.result.notes) notes.push(entry.partId + ': ' + entry.result.notes)
 }
@@ -1716,24 +2164,33 @@ phase('Dedup')
 const mergedInto = tier1(rawFindings)
 const autoMerged = autoMergeNearby(rawFindings, mergedInto)
 const buckets = collisionBuckets(rawFindings, mergedInto)
-// bucketOf keeps the single agent honest: a merge whose two members never collided
-// is discarded, so holding every bucket at once cannot invent a cross-bucket merge.
+// bucketOf keeps the single agent honest: a merge whose two members never collided is
+// discarded, so holding every bucket at once cannot invent a cross-bucket merge.
+// Populated from `sent` below, NOT from `buckets`: keys are `<partId>#<index>` and so are
+// guessable, and a guard built from every bucket accepts a merge over findings the agent
+// was never shown — the capped-away ones — which `assemble_findings.apply_agent_merges`
+// then applies to the part file by the identical rule. That is a real finding dropped from
+// REPORT.md on a hallucinated merge, with both sides agreeing.
 const bucketOf = new Map()
-for (let b = 0; b < buckets.length; b++) {
-  for (const f of buckets[b]) bucketOf.set(f.key, b)
-}
 
 let dedupAgents = 0
 if (buckets.length) {
   const pairs = buckets.reduce((n, b) => n + b.length, 0)
   let sent = buckets
   if (pairs > DEDUP_MAX_PAIRS) {
-    // One agent is the budget, so the cap is on what fits in its prompt rather than
-    // on how many agents run. Say what was dropped: unmerged duplicates are visible
-    // in the report as two findings, which is the safe direction, but it is still a
-    // thing the reader should know happened.
+    // One agent is the budget, so the cap is on what fits in its prompt rather than on how
+    // many agents run. The drop is logged: unmerged duplicates show up in the report as two
+    // findings, which is the safe direction, but the reader should still know it happened.
+    //
+    // A bucket only counts toward the budget when it is kept. Counting it unconditionally
+    // lets one oversized bucket poison the total for every bucket after it, so small groups
+    // that would fit are dropped too and the log claims they exceeded the budget alone.
     let running = 0
-    sent = buckets.filter((b) => (running += b.length) <= DEDUP_MAX_PAIRS)
+    sent = buckets.filter((b) => {
+      if (running + b.length > DEDUP_MAX_PAIRS) return false
+      running += b.length
+      return true
+    })
     log(
       'CAP: ' + pairs + ' colliding finding(s) exceed the ' + DEDUP_MAX_PAIRS + '-finding dedup ' +
         'prompt budget; ' + (pairs - sent.reduce((n, b) => n + b.length, 0)) + ' left unmerged ' +
@@ -1746,24 +2203,57 @@ if (buckets.length) {
   if (!sent.length) {
     log('dedup agent skipped: every collision group exceeded the prompt budget on its own')
   } else {
-    dedupAgents = 1
+    for (let b = 0; b < sent.length; b++) {
+      for (const f of sent[b]) bucketOf.set(f.key, b)
+    }
     log(
       sent.length + ' collision group(s) to one agent, ' + autoMerged +
         ' pair(s) already merged deterministically'
     )
+    // `.catch`, like every other producer — see `died`.
     const res = await agent(
       dedupPrompt(sent),
-      workerOpts({ label: 'dedup', phase: 'Dedup', schema: DEDUP_SCHEMA, effort: 'low' })
-    )
-    for (const merge of (res && res.merges) || []) {
-      if (!byKey.has(merge.primary) || mergedInto.has(merge.primary)) continue
-      for (const dup of merge.duplicates || []) {
-        if (dup === merge.primary || !byKey.has(dup) || mergedInto.has(dup)) continue
-        if (bucketOf.get(dup) !== bucketOf.get(merge.primary)) {
-          log('rejected cross-bucket merge ' + dup + ' -> ' + merge.primary)
+      producingOpts({ label: 'dedup', phase: 'Dedup', schema: DEDUP_SCHEMA, effort: 'low' })
+    ).catch(died('dedup-agent'))
+    // No `--expect` for the dedup part, in either branch. DEDUP_SCHEMA has no
+    // `part_written` field, so an agent that returns merges and never writes
+    // `parts/dedup-agent.json` is indistinguishable from one that wrote it, and the
+    // expectation would fail the assembler with exit 2 and no findings.json, no REPORT.md
+    // and no REPORT.sarif. This is the most skippable phase in the pipeline; it must not be
+    // able to cost the run. A merge that never reached disk is visible as two findings.
+    if (!res) {
+      agentFailures.push('dedup-agent: returned nothing')
+      log('WARNING: the dedup agent returned nothing; colliding findings stay unmerged')
+    }
+    if (res) dedupAgents = 1
+    for (const merge of asArray(res && res.merges)) {
+      const stated = merge && merge.primary
+      if (!byKey.has(stated) || mergedInto.has(stated)) continue
+      const live = []
+      // `asArray`, like every other agent-returned list — see `asArray`. This is the
+      // latest point in the run at which that throw discards everything.
+      for (const dup of asArray(merge && merge.duplicates)) {
+        if (dup === stated || !byKey.has(dup) || mergedInto.has(dup)) continue
+        // `has` first: two findings that are each in no bucket both read `undefined`, and
+        // `undefined !== undefined` is false, so without it a merge of two findings the
+        // agent was never shown — in different files, even — is accepted here while
+        // assemble_findings.py, which owns the artifact, refuses it.
+        if (!bucketOf.has(dup) || bucketOf.get(dup) !== bucketOf.get(stated)) {
+          log('rejected cross-bucket merge ' + dup + ' -> ' + stated)
           continue
         }
-        mergedInto.set(dup, merge.primary)
+        live.push(dup)
+      }
+      if (!live.length) continue
+      // RE-ELECT, exactly as `apply_agent_merges` does, rather than taking the agent's
+      // nomination: the agent knows nothing about how the site will be graded and does
+      // nominate a `(file-level)` Low report over one that named the function and the line.
+      // Trusting it makes the run log and `stats.primaries` say one finding survived while
+      // findings.json and REPORT.md say the other did.
+      let primary = byKey.get(stated)
+      for (const dup of live) primary = pickPrimary(primary, byKey.get(dup))
+      for (const key of [stated, ...live]) {
+        if (key !== primary.key) mergedInto.set(key, primary.key)
       }
     }
   }
@@ -1779,23 +2269,153 @@ log(primaries.length + ' primaries after dedup (' + mergedInto.size + ' merged)'
 
 phase('Assemble')
 const groupsAttempted = selected.map((s) => s.group.id)
-const groupsFailed = producers.filter((e) => e && !e.result).map((e) => e.partId)
-const assembled = await agent(
-  assemblePrompt(partsExpected, partsComplete, groupsAttempted, groupsFailed, agentFailures),
-  workerOpts({ label: 'assemble', phase: 'Assemble', schema: ASSEMBLE_SCHEMA, effort: 'low' })
+// Bug-class group ids, NOT part ids. The report renders this as "bug-class group(s)
+// returned nothing, so their classes are uncovered", which is only true when the class
+// sweep itself died — a failed location reviewer loses lines, not classes, and is already
+// reported through `agentFailures`. Mixing the two namespaces prints a slice id where a
+// class name belongs and misdescribes what was actually left uncovered.
+// `part_written === false` counts as died, exactly as it does in `recordClasses`: a sweep
+// whose part file was never written contributes nothing to any artifact, so its classes are
+// as uncovered as if it had returned nothing, and `groupsFailed: []` would say otherwise.
+const sweepDied = producers.some(
+  (e) => e && e.partId === 'sweep-classes' && (!e.result || e.result.part_written === false)
 )
-if (!assembled || !assembled.ok) {
+// Only the groups the sweep was actually GIVEN. `groupsAttempted` is every live group,
+// including ones whose classes every location reviewer already covered, so reporting those
+// as uncovered prints "their classes are uncovered" for classes that produced findings —
+// in REPORT.md and as one SARIF warning apiece.
+const groupsFailed = sweepDied ? silentByGroup.map((g) => g.group.id) : []
+const assembled = await agent(
+  assemblePrompt(
+    partsExpected,
+    partsComplete,
+    partsExternal,
+    groupsAttempted,
+    groupsFailed,
+    agentFailures
+  ),
+  workerOpts({ label: 'assemble', phase: 'Assemble', schema: ASSEMBLE_SCHEMA, effort: 'low' })
+).catch(died('assemble'))
+// null, not false, when the agent never came back: the assembler may well have written all
+// three artifacts and had its structured return rejected afterwards, and reporting that as
+// `artifactsWritten: false` tells the caller a complete report was lost. Absent is UNKNOWN,
+// and the only cure is to look at the directory.
+const artifactsWritten = assembled ? assembled.artifacts_written === true : null
+if (!assembled) {
   log(
-    'WARNING: artifacts were not written: ' +
-      ((assembled && assembled.error) || 'assemble agent returned nothing') +
+    'WARNING: the assemble agent returned nothing, so whether findings.json, REPORT.md and ' +
+      'REPORT.sarif were written is UNKNOWN — the command may have completed and only its ' +
+      'structured answer failed. List ' + OUTPUT_DIR + ' before re-running anything; the part ' +
+      'files are intact under ' + PARTS_DIR + '.'
+  )
+} else if (!assembled.ok || !artifactsWritten) {
+  // `|| !artifactsWritten`. The field is REQUIRED by ASSEMBLE_SCHEMA precisely so a lost
+  // report is detectable, so something has to read it beyond copying it into the return:
+  // `{ok: true, artifacts_written: false}` — the one shape meaning "the script says it
+  // exited 0 and the directory does not hold the artifacts" — is otherwise a run with no
+  // log line at all, `gateAccepted: true` and `artifactError: null`.
+  log(
+    'WARNING: ' +
+      (artifactsWritten
+        ? 'the artifacts were written but the coverage gate REJECTED this run: '
+        : 'artifacts were not written: ') +
+      (assembled.error ||
+        (assembled.ok
+          ? 'the assemble agent reported the script exited 0 and the artifacts are NOT in ' +
+            OUTPUT_DIR
+          : 'no reason given')) +
       '. The part files are intact under ' + PARTS_DIR + '; re-run assemble_findings.py by hand.'
   )
 }
+// null, not 0, when the agent did not transcribe the count: the field is optional in
+// ASSEMBLE_SCHEMA — it has to be, because the failure return carries only `ok` and `error` —
+// so defaulting to 0 turns "nobody looked" into "there were none" and suppresses the warning
+// below on exactly the runs that need it.
+const unrecognisedParts = (assembled && Number.isFinite(assembled.unrecognised_parts)) ? assembled.unrecognised_parts : null
+// Same absent-vs-zero problem, and the louder one: `coverage: null` means unmeasured, not
+// zero — a missing transcription, a missing units.json and a run with no ledger row are
+// otherwise identical to the caller. `Number.isFinite`, so a genuine 0 is a measurement and
+// not an absence, and the branches below log which of the three it was.
+const checksRequired = (assembled && Number.isFinite(assembled.checks_required)) ? assembled.checks_required : null
+const checksSatisfied =
+  assembled && Number.isFinite(assembled.checks_satisfied) ? assembled.checks_satisfied : null
+if (checksRequired === null) {
+  log(
+    'WARNING: no coverage number came back, so ledger coverage is UNMEASURED, not complete. ' +
+      'Either the assembler did not run, or units.json is not in ' + OUTPUT_DIR + ', or the ' +
+      'assemble agent did not copy checks_required. Read ' + OUTPUT_DIR + '/ledger-gate.json.'
+  )
+} else if (checksRequired === 0) {
+  log('WARNING: the ledger gate required 0 checks; nothing was verified against the unit parse.')
+} else if (checksSatisfied !== checksRequired) {
+  // The one rejection shape that reaches no branch above: the agent reported `ok`, the
+  // artifacts are on disk, the counts came back, and only their disagreement makes this a
+  // failure. Without this the run log is silent about the number the pipeline exists to
+  // produce, and only the returned object carries the rejection.
+  log(
+    'WARNING: the coverage gate REJECTED this run — ' + checksSatisfied + ' of ' +
+      checksRequired + ' required check(s) satisfied. The part files are intact under ' +
+      PARTS_DIR + '; re-run assemble_findings.py by hand.'
+  )
+}
+if (unrecognisedParts === null) {
+  log(
+    'WARNING: the assembler did not return an unrecognised-part count, so whether any part file ' +
+      'under ' + PARTS_DIR + ' matched no assembler rule is UNCHECKED, not none. Read the ' +
+      'assemble_findings.py output, or list ' + PARTS_DIR + ' against the dispatched part ids.'
+  )
+} else if (unrecognisedParts) {
+  log(
+    'WARNING: ' + unrecognisedParts + ' part file(s) under ' + PARTS_DIR + ' match no assembler ' +
+      'rule, so their findings are in NO artifact. A misnamed stem is one agent\'s whole output ' +
+      'dropped; check the names against the dispatched part ids.'
+  )
+}
+
+// `ok` is the agent's transcription of an exit code and nothing verifies it, while the
+// same object carries the two numbers that decide the same question: the assembler exits 0
+// only when every required check was satisfied, so `{ok: true, checks_required: 445,
+// checks_satisfied: 400}` is self-contradicting and must not read as a pass. Comparing the
+// numbers the agent already returned costs one `&&`, and a run whose agent declined to
+// transcribe them is UNMEASURED, which is not a gate that passed either.
+// `artifactsWritten` is in the conjunction for the same reason the two counts are: a gate
+// that accepted a ledger whose report is not on disk has certified nothing a reader can
+// open, so `artifacts_written: false` beside `ok: true` is not an accepted gate.
+const gateAccepted = !!(
+  assembled &&
+  assembled.ok &&
+  artifactsWritten &&
+  checksRequired !== null &&
+  checksSatisfied === checksRequired
+)
+// `artifactError` carries a reason for every failure the checks above can reach; deriving
+// it from `ok` alone would return a failure with no reason in it.
+const gateError = !assembled
+  ? 'assemble agent returned nothing'
+  : assembled.error ||
+    (!artifactsWritten
+      ? 'the assemble agent reported the script exited 0 and findings.json, REPORT.md and ' +
+        'REPORT.sarif are not all in ' + OUTPUT_DIR
+      : checksRequired === null
+        ? 'the assemble agent returned no coverage numbers, so the gate is unmeasured'
+        : checksSatisfied !== checksRequired
+          ? 'the assemble agent reported ok with ' + checksSatisfied + ' of ' + checksRequired +
+            ' required check(s) satisfied, which is a gate rejection'
+          : // `ok: false` with every other check passing and no `error` string — `error` is
+            // optional in ASSEMBLE_SCHEMA, so that return is valid. Falling through to null
+            // here would hand the caller a rejected gate with no reason attached.
+            'the assemble agent reported that assemble_findings.py did not exit 0, ' +
+            'without saying why')
 
 return {
   outputDir: OUTPUT_DIR,
-  artifactsWritten: !!(assembled && assembled.ok),
-  artifactError: assembled && assembled.ok ? null : (assembled && assembled.error) || 'assemble agent returned nothing',
+  artifactsWritten: artifactsWritten,
+  // A gate that measured NOTHING is not a gate that passed. `checks_required` is null when
+  // there was no units.json to measure against, which is reachable in production because
+  // the workflow dispatches on the detect agent's self-reported `units_ok` and nothing
+  // checks it against disk.
+  gateAccepted: gateAccepted,
+  artifactError: gateAccepted ? null : gateError,
   findingsJson: OUTPUT_DIR + '/findings.json',
   reportMd: OUTPUT_DIR + '/REPORT.md',
   reportSarif: OUTPUT_DIR + '/REPORT.sarif',
@@ -1804,10 +2424,20 @@ return {
   // No judge ran. Severity on every finding is the reviewer's own and nothing
   // rejected anything, so the skill has to say so next to the findings.
   judgeRan: false,
+  // Agents that came BACK, not agents that were dispatched. Counting dispatches reports
+  // `review_agents: 8` for 8 assignments of which 3 returned nothing, and leaves the truth
+  // in `agentFailures` — a separate field a reader may never correlate with the headline
+  // number. `dedup_agents` is set after its `await` for the same reason.
   stats: {
-    agents_total: 1 + assignments.length + sweepThunks.length + dedupAgents + 1,
-    review_agents: assignments.length,
-    sweep_agents: sweepThunks.length,
+    agents_total:
+      1 +
+      reviewResults.filter((e) => e && e.result).length +
+      sweepResults.filter((e) => e && e.result).length +
+      dedupAgents +
+      (assembled ? 1 : 0),
+    review_agents: reviewResults.filter((e) => e && e.result).length,
+    review_agents_dispatched: assignments.length,
+    sweep_agents: sweepResults.filter((e) => e && e.result).length,
     dedup_agents: dedupAgents,
     auto_merged: autoMerged,
     raw_findings: rawFindings.length,
@@ -1815,20 +2445,27 @@ return {
     primaries: primaries.length,
     reported: assembled && Number.isFinite(assembled.reported) ? assembled.reported : null,
   },
-  // Populated by the assembler, which now runs the ledger gate in-process; read
+  // Populated by the assembler, which runs the ledger gate in-process; read
   // ledger-gate.json for the per-row detail.
   // `satisfied` is the honest number: a row the gate rejected was answered but is not
   // coverage. Reporting only `completed` is how a run with live violations printed 100%.
-  coverage: assembled && assembled.checks_required
-    ? {
-        checksRequired: assembled.checks_required,
-        checksCompleted: assembled.checks_completed,
+  coverage: checksRequired === null
+    ? null
+    : {
+        checksRequired: checksRequired,
+        checksCompleted: Number.isFinite(assembled.checks_completed) ? assembled.checks_completed : null,
         checksSatisfied: Number.isFinite(assembled.checks_satisfied) ? assembled.checks_satisfied : null,
-      }
-    : null,
+      },
   groupsAttempted: groupsAttempted,
   groupsFailed: groupsFailed,
   agentFailures: agentFailures,
+  unrecognisedParts: unrecognisedParts,
   notes: notes,
-  silentClasses: silentByGroup.flatMap((g) => g.classIds),
+  // Swept and still with no finding anywhere.
+  silentClasses: stillSilent,
+  // Silent and NOT swept: the detect phase cited no candidate site, so no pass looked.
+  ruledOutClasses: ruledOut,
+  // Dropped by the platform flags or the threat model before anything looked at the code:
+  // a third coverage story, distinct from the two above.
+  platformDroppedClasses: platformDropped,
 }

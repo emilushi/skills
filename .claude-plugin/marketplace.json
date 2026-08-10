@@ -223,8 +223,8 @@
     },
     {
       "name": "c-review",
-      "version": "4.3.0",
-      "description": "C/C++ security code review driven by a Workflow script: location-partitioned review over a generated unit list, a per-unit coverage ledger checked against the parse, a shared-state invariant audit, a bug-class completeness sweep, and deterministic SARIF and report generation, in about a dozen agents",
+      "version": "5.0.0",
+      "description": "Comprehensive C/C++ security code review covering memory corruption, integer overflow, races, and Linux/macOS/Windows userspace issues, with review coverage verified against a parse of the source and deterministic Markdown and SARIF reports",
       "author": {
         "name": "Paweł Płatek"
       },

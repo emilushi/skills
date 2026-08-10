@@ -20,4 +20,25 @@
 #define SCRATCH_MAX 256
 #define ARENA_SLOTS 64
 
+/* Retransmit timer wheel (timer.c). */
+#define TIMER_BUCKETS 16
+#define TIMER_MAX_ARMED 4
+
+/* Flow-control credit scheduler (credit.c). */
+#define CREDIT_MAX_GRANT 4096
+#define CREDIT_HISTORY 4
+#define CREDIT_POOL_COUNT 4 /* bulk, normal, priority, control */
+
+/* Config/option parser (optparse.c). Depth counts brace nesting, not bytes. */
+#define OPT_MAX_DEPTH 4
+#define OPT_MAX_LEN 64
+
+/* Telemetry counters (stats.c). */
+#define STATS_MAX_COUNTERS 12
+
+/* Out-of-order fragment cache, the second reassembly strategy (reasm_oo.c). Each
+ * slot holds one fragment's worth of the fast-path payload. */
+#define REASM_OO_SLOTS 8
+#define OO_SLOT_CAP (FRAME_MAX / MAX_FRAGMENTS)
+
 #endif /* PL_CONFIG_H */

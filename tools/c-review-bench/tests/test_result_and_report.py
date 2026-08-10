@@ -23,12 +23,23 @@ import pytest
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
+from lib import anticheat as anticheat_mod  # noqa: E402
 from lib import plan as plan_mod  # noqa: E402
 from lib import recipe as recipe_mod  # noqa: E402
 from lib import report as report_mod  # noqa: E402
 from lib import result as result_mod  # noqa: E402
 
 FIXTURES = HERE / "fixtures"
+# A scan that found nothing, so an assessment built on it turns entirely on the declaration.
+EMPTY_SCAN = {
+    "transcripts": [],
+    "invocations_seen": 0,
+    "tool_definitions_seen": 0,
+    "violations": [],
+    "advisories": [],
+    "blocked": [],
+    "cve_mentioned_in_text": [],
+}
 SIGIL = HERE.parent / "corpora" / "sigil" / "recipe.json"
 WORKFLOW = plan_mod.plugin_root() / "workflows" / "c-review.js"
 
@@ -241,6 +252,42 @@ def test_collect_captures_judge_ran_ledger_and_severity_source(tmp_path):
     assert collected["judge_ran"] is False
     assert collected["ledger"] == {"total_pairs": 12, "unaccounted": 0}
     assert collected["findings"][0]["severity_source"] == "reviewer"
+
+
+def test_dead_review_agents_survive_normalisation():
+    """findings.json records them under `run.agent_failures`; if `collect` drops them the
+    report can never raise PARTIAL RUN for a per-agent loss."""
+    doc = {
+        "run": {"agent_failures": ["slice-03: returned nothing"]},
+        "stats": {},
+        "findings": [],
+    }
+    assert result_mod.normalise_c_review(doc)["agent_failures"] == ["slice-03: returned nothing"]
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [(False, 0), (True, 2), (None, 2)],
+)
+def test_only_hunters_that_were_asked_count_as_declarations(declared, expected):
+    """`declared: false` means the cell ran without `benchmarkMode`, so nobody was asked
+    and `consulted: false` is silence. Counting those records made `declarations_seen`
+    non-zero, which suppresses the "this layer established nothing" warning — the same
+    zero-item blindness the field was added to remove, one layer further in. `declared`
+    absent is the pre-4.4.0 document, where the declaration was always on."""
+    entry = {"group": "g", "consulted": False, "detail": "none"}
+    if declared is not None:
+        entry["declared"] = declared
+    doc = {
+        "run": {"hunter_external_sources": [dict(entry, group="a"), dict(entry, group="b")]},
+        "stats": {},
+        "findings": [],
+    }
+    collected = result_mod.normalise_c_review(doc)
+    assert collected["declarations_seen"] == expected
+    assessment = anticheat_mod.assess(EMPTY_SCAN, collected)
+    established_nothing = "established nothing" in anticheat_mod.format_assessment(assessment)
+    assert established_nothing is (expected == 0)
 
 
 @pytest.mark.parametrize(
@@ -801,6 +848,24 @@ def test_failed_hunter_groups_are_surfaced_in_the_report(tmp_path):
     text = report_mod.format_report(report_mod.score_run(run, workroot=tmp_path / "work"))
     assert "PARTIAL RUN: 2 of 3 hunter group(s) failed" in text
     assert "floor, not a" in text
+
+
+def test_dead_review_agents_are_surfaced_in_the_report(tmp_path):
+    """The same 13-of-16 loss, recorded per agent rather than per group.
+
+    `groups_failed` is bug-class group ids; a slice reviewer that returns nothing loses
+    lines, not classes, so it is recorded in `agent_failures`. If only `groups_failed`
+    raises the banner, that loss is invisible and the surviving agents' recall reads as a
+    measurement of the configuration."""
+    run = scaffold(tmp_path)
+    _collect(run, "bare", "result_perfect.json", BASE_META)
+    collected = run / "collected" / "bare__sigil__bench.json"
+    doc = json.loads(collected.read_text(encoding="utf-8"))
+    doc["agent_failures"] = ["slice-03: returned nothing", "slice-07: returned nothing"]
+    write(collected, doc)
+    text = report_mod.format_report(report_mod.score_run(run, workroot=tmp_path / "work"))
+    assert "PARTIAL RUN: 2 review agent(s) failed" in text
+    assert "slice-03" in text
 
 
 def test_an_unfilled_placeholder_is_refused():

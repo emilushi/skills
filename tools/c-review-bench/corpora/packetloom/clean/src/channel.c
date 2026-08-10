@@ -3,6 +3,10 @@
  * Invariant, maintained by every writer of pending_acks: pending_acks <= window, and
  * window <= MAX_WINDOW. retry_slots is indexed by pending_acks, so a writer that skips
  * the bound writes past the end of the array.
+ *
+ * channel_find_by_label() and channel_list_ids() are read-only conveniences added
+ * for the option parser's per-channel group syntax and a diagnostic control reply,
+ * respectively; neither mutates the table.
  */
 
 #include "relay.h"
@@ -20,6 +24,27 @@ channel_t *channel_find(session_t *s, uint16_t chan_id) {
   for (i = 0; i < s->channel_count; i++) {
     if (s->channels[i] != NULL && s->channels[i]->id == chan_id) {
       return s->channels[i];
+    }
+  }
+  return NULL;
+}
+
+/* Linear lookup by label, for the option parser's "chanlabel:<name>{...}" group
+ * form. label is compared as a bounded byte range, not a C string, since a caller
+ * may pass a slice straight out of a wire buffer with no NUL terminator. */
+channel_t *channel_find_by_label(session_t *s, const char *label, size_t label_len) {
+  size_t i;
+
+  if (s == NULL || label == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < s->channel_count; i++) {
+    channel_t *chan = s->channels[i];
+    if (chan == NULL) {
+      continue;
+    }
+    if (strlen(chan->label) == label_len && memcmp(chan->label, label, label_len) == 0) {
+      return chan;
     }
   }
   return NULL;
@@ -83,6 +108,7 @@ int channel_open(session_t *s, const char *label, size_t label_len, channel_t **
     log_field(s, slot, "open");
   }
 
+  stats_record(&s->stats, STATS_CTR_CHANNEL_OPEN);
   *out = chan;
   return PL_OK;
 }
@@ -154,6 +180,24 @@ int channel_inject_control(session_t *s, channel_t *chan, uint16_t slot) {
   return PL_OK;
 }
 
+/* Copy up to out_cap open channel ids into out, for a diagnostic control reply.
+ * *out_count is always set to the number actually written, which may be fewer than
+ * s->channel_count when the reply buffer is smaller than the channel table. */
+int channel_list_ids(session_t *s, uint16_t *out, size_t out_cap, size_t *out_count) {
+  size_t i;
+  size_t n;
+
+  if (s == NULL || out == NULL || out_count == NULL) {
+    return PL_ERR;
+  }
+  n = s->channel_count < out_cap ? s->channel_count : out_cap;
+  for (i = 0; i < n; i++) {
+    out[i] = s->channels[i] != NULL ? s->channels[i]->id : 0xFFFFu;
+  }
+  *out_count = n;
+  return PL_OK;
+}
+
 int channel_close(session_t *s, uint16_t chan_id) {
   channel_t *chan;
   size_t i;
@@ -181,6 +225,7 @@ int channel_close(session_t *s, uint16_t chan_id) {
     }
   }
   arena_free(s->arena, chan);
+  stats_record(&s->stats, STATS_CTR_CHANNEL_CLOSE);
   return PL_OK;
 }
 
@@ -198,5 +243,19 @@ int channel_close_all(session_t *s) {
       s->channel_count--;
     }
   }
+  return PL_OK;
+}
+
+/* Runtime flow-control resize: shrink or grow a channel's advertised window, well
+ * after the channel was opened. */
+int channel_resize_window(session_t *s, channel_t *chan, uint16_t new_window) {
+  (void)s;
+  if (chan == NULL) {
+    return PL_ERR;
+  }
+  if (new_window > MAX_WINDOW) {
+    new_window = MAX_WINDOW;
+  }
+  chan->window = new_window;
   return PL_OK;
 }

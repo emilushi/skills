@@ -21,7 +21,8 @@ Workflow({
     severityFilter:   "all",
     findingScopeRoot: "{{SCOPE}}",
     contextRoots:     ".",
-    workerModel:      "<the model this whole run uses>"
+    workerModel:      "<the model this whole run uses>",
+    benchmarkMode:    true
   }
 })
 ```
@@ -35,8 +36,9 @@ maps the prose onto the enum and refuses to guess when it cannot.
 - `severityFilter: "all"` — the grader distinguishes reported from suppressed findings,
   and a filter that drops a correct finding shows up as `SUPPRESSED` rather than as a
   miss. Filtering at the source would hide that distinction.
-- Do **not** pass `injectFindings`. It is the judge-benchmark hook, and anything passed
-  to it is reported as though a hunter found it.
+- `benchmarkMode: true` is required for a scored cell. It adds the external-source
+  declaration the anti-cheat gate reads; without it every finding reports
+  `external_sources_consulted: false` whether or not the reviewer looked anything up.
 - Do not tell the reviewer that bugs were injected, how many there are, or where. Do not
   paste the threat model anywhere except the workflow argument above.
 - Say nothing about the corpus's provenance. The de-identification is what makes an

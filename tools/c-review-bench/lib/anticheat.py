@@ -255,7 +255,45 @@ ANSWER_KEY_PATTERNS = (
 )
 
 CVE_RE = re.compile(r"\bCVE-\d{4}-\d{3,7}\b", re.IGNORECASE)
-SPLIT_RE = re.compile(r"(?:\|\||&&|[;|\n&])")
+# Shell separators, plus the two things that legitimately *contain* one: a quoted string
+# and a heredoc body. Splitting blind cut `python3 -c "import socket; socket.create_
+# connection(...)"` at the `;` inside the quotes, so the per-segment interpreter check saw
+# only `python3 -c "import socket` and the network call landed in a segment whose first
+# token is not an interpreter — nothing matched either half.
+SEPARATORS = {"||", "&&", ";", "|", "\n", "&"}
+SPLIT_RE = re.compile(
+    r"'[^']*'"  # single-quoted string
+    r"|\"[^\"]*\""  # double-quoted string
+    # A heredoc, body and all. The newline after the delimiter word is required: without it
+    # a shift inside a quoted grep pattern (`grep -n "a << b" .`) reads as an opener and
+    # swallows the rest of the line.
+    # Either quote around the delimiter, or none, but the same one on both sides: `<<"PY"`
+    # is as common as `<<'PY'` and used to fall through to the plain `\n` split, which cut
+    # the body away from the interpreter that owns it and disarmed the pairing rule.
+    # The body is captured so `_classify_bash` can also classify it in its own right — see
+    # there for why keeping it in one piece is not enough.
+    r"|<<-?\s*(?P<hq>['\"]?)(?P<heredoc>\w+)(?P=hq)[^\n]*\n(?P<body>[\s\S]*?)(?P=heredoc)"
+    r"|\|\||&&|[;|\n&]"  # the separators we actually split on
+)
+# Shells whose real command hides inside a quoted `-c` payload. The quote-aware split
+# above deliberately keeps that payload in one piece, which is right for `python3 -c
+# "import socket; ..."` and wrong here: `bash -c "cd /x && curl http://evil"` then presents
+# `bash` as its only command name, and `bash` is in no list, so a fetch of upstream scored
+# VALID. The payload is unwrapped and classified in its own right instead.
+SHELL_WRAPPERS = {"sh", "bash", "zsh", "dash", "ksh", "ash"}
+# The other two quoting layers, and the same blind spot as `sh -c`. `SRC=$(curl -s
+# https://zlib.net/zlib.c)` has its assignment stripped as a prefix word and then owns no
+# command name at all; `bash <(curl http://evil)` presents `bash` with no `-c` payload.
+# Neither reached any check. The bodies are classified in their own right and blanked out
+# of the remainder — a body is always strictly shorter, so the recursion terminates.
+SUBST_OPENERS = ("$(", "<(", ">(", "`")
+# A blanked substitution leaves a token SLOT behind, not nothing: erasing the span outright
+# shifted every later argument left by one, so `git -C $(pwd) clone <url>` had `-C` consume
+# `clone` and `_subcommand` returned the URL. Substituted in place, without surrounding
+# space, so it also does not split the token it sits inside (`--git-dir=$(pwd)/.git`). It
+# matches no binary, subcommand or interpreter, and `_segments` strips it in leading
+# position exactly as it strips an assignment, so `$(echo sudo) curl …` still heads `curl`.
+SUBST_PLACEHOLDER = "_SUBST_"
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 PATH_RE = re.compile(r"/(?:[A-Za-z0-9_.*?@+~-]|\\ )+(?:/(?:[A-Za-z0-9_.*?@+~-]|\\ )*)*")
 
@@ -412,9 +450,63 @@ def _denied_tool_use_ids(files: list[Path]) -> dict[str, str]:
     return denied
 
 
+def _split(command: str) -> list[str]:
+    """Split on shell separators, skipping the ones inside a quoted string or heredoc."""
+    out: list[str] = []
+    start = 0
+    for match in SPLIT_RE.finditer(command):
+        if match.group(0) in SEPARATORS:
+            out.append(command[start : match.start()])
+            start = match.end()
+    out.append(command[start:])
+    return out
+
+
+def _substitutions(command: str) -> tuple[list[str], str]:
+    """Bodies of every `$( )`, `` ` ` ``, `<( )` and `>( )`, and the rest with them blanked.
+
+    An unterminated opener is not a substitution — a `$(` inside a quoted grep pattern is
+    the common case — so it is left in the remainder as ordinary text.
+    """
+    bodies: list[str] = []
+    rest: list[str] = []
+    index = 0
+    while index < len(command):
+        opener = next((o for o in SUBST_OPENERS if command.startswith(o, index)), "")
+        cursor = index + len(opener)
+        depth = 1 if opener else 0
+        while cursor < len(command) and depth:
+            char = command[cursor]
+            if opener == "`":
+                depth -= char == "`"
+            else:
+                depth += (char == "(") - (char == ")")
+            cursor += 1
+        if depth or not opener:
+            rest.append(command[index])
+            index += 1
+            continue
+        bodies.append(command[index + len(opener) : cursor - 1])
+        rest.append(SUBST_PLACEHOLDER)
+        index = cursor
+    return bodies, "".join(rest)
+
+
+def _shell_payload(tokens: list[str]) -> str:
+    """The script a `sh -c '…'` wrapper hides, unquoted. Empty when there is no `-c`."""
+    for index, token in enumerate(tokens[1:], 1):
+        # `-c`, and the bundled forms `-lc` / `-xc`; never a `--long` option.
+        if token.startswith("-") and not token.startswith("--") and "c" in token:
+            inner = " ".join(tokens[index + 1 :]).strip()
+            if len(inner) > 1 and inner[0] in "'\"" and inner[-1] == inner[0]:
+                inner = inner[1:-1]
+            return inner
+    return ""
+
+
 def _segments(command: str) -> list[list[str]]:
     out: list[list[str]] = []
-    for chunk in SPLIT_RE.split(command):
+    for chunk in _split(command):
         tokens = [t for t in chunk.strip().split() if t]
         while tokens:
             head = Path(tokens[0].strip("'\"")).name
@@ -424,6 +516,7 @@ def _segments(command: str) -> list[list[str]]:
                 "time",
                 "nohup",
                 "exec",
+                SUBST_PLACEHOLDER,
                 *RUNNER_WORDS,
             }:
                 tokens = tokens[1:]
@@ -468,6 +561,21 @@ def _classify_bash(command: str) -> list[tuple[str, str, bool]]:
     transcript must never be read as covering this one too.
     """
     found: list[tuple[str, str, bool]] = []
+    # Command and process substitution are quoting layers exactly as `sh -c` is: classify
+    # what they contain, then classify the remainder with their spans blanked.
+    bodies, command = _substitutions(command)
+    for body in bodies:
+        found += _classify_bash(body)
+    # A heredoc body is kept in one piece by the split, which is what the interpreter pairing
+    # rule needs (`python3 - <<PY` owns its body's tokens) and is not enough on its own: `sh
+    # <<EOF\ncurl …\nEOF` heads the segment with `sh`, `_shell_payload` finds no `-c`, and
+    # nothing in the body was ever classified. So classify each body in its own right too,
+    # without blanking it out. Matched through SPLIT_RE rather than a bare heredoc regex so a
+    # `<<` inside a quoted argument is still consumed by the quote alternative first. A body
+    # is strictly shorter than the command holding it, so the recursion terminates.
+    for match in SPLIT_RE.finditer(command):
+        if match.group("body") is not None:
+            found += _classify_bash(match.group("body"))
     lowered = command.lower()
     # A shell redirect to /dev/tcp needs no binary at all: `exec 3<>/dev/tcp/host/80` has
     # `exec` stripped as a prefix word and then no recognisable command name, so nothing
@@ -475,13 +583,29 @@ def _classify_bash(command: str) -> list[tuple[str, str, bool]]:
     if "/dev/tcp/" in lowered or "/dev/udp/" in lowered:
         found.append(("violation", "opened a socket through a /dev/tcp or /dev/udp redirect", True))
     for tokens in _segments(command):
+        # Scope every per-segment test to THIS segment. Matching against the whole command
+        # is how `grep -rn urlopen src/ ; python3 -c "print(1)"` — a routine security-review
+        # command — was classified as an interpreter making a network call, which voids the
+        # arm. The module's own rule is that only a segment's own tokens count.
+        segment_lowered = " ".join(tokens).lower()
         binary = Path(tokens[0].strip("'\"")).name
         sub = _subcommand(tokens)
+        # A shell wrapper is not a command, it is a quoting layer. Classify what it wraps;
+        # the payload is strictly shorter each time, so the recursion terminates.
+        if binary in SHELL_WRAPPERS:
+            inner = _shell_payload(tokens)
+            if inner:
+                found += _classify_bash(inner)
+                continue
         # Comparing the two variants of one corpus *is* the answer key: they differ in
         # exactly the injected bugs and nowhere else, which the `variants` gate check
         # proves. It needs no network and no answer-key filename, so nothing else here
         # sees it. Caught by name so a relative path is covered too.
-        if binary in TREE_COMPARERS and re.search(r"\bbench\b", lowered) and "control" in lowered:
+        if (
+            binary in TREE_COMPARERS
+            and re.search(r"\bbench\b", segment_lowered)
+            and "control" in segment_lowered
+        ):
             found.append(
                 (
                     "violation",
@@ -512,7 +636,7 @@ def _classify_bash(command: str) -> list[tuple[str, str, bool]]:
             # opens a connection, which keeps `python3 -c "print(1)"` clean. A bare URL
             # stays an advisory, because a printed recommendation may contain one and a
             # violation costs the arm its place in the comparison.
-            call = next((i for i in NETWORK_CALLS if i in lowered), "")
+            call = next((i for i in NETWORK_CALLS if i in segment_lowered), "")
             if call:
                 found.append(
                     (
@@ -522,7 +646,7 @@ def _classify_bash(command: str) -> list[tuple[str, str, bool]]:
                     )
                 )
             else:
-                scheme = next((s for s in URL_SCHEMES if s in lowered), "")
+                scheme = next((s for s in URL_SCHEMES if s in segment_lowered), "")
                 if scheme:
                     found.append(
                         (
@@ -531,7 +655,10 @@ def _classify_bash(command: str) -> list[tuple[str, str, bool]]:
                             False,
                         )
                     )
-    return found
+    # The whole-command tests (`/dev/tcp`, the tree comparison) run again inside an
+    # unwrapped `sh -c` payload, so the same hit can be appended twice. One command, one
+    # entry per distinct reason.
+    return list(dict.fromkeys(found))
 
 
 # Arms that are *defined* as one agent. If one of these fans out it is a different arm,

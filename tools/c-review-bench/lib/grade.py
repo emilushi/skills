@@ -444,7 +444,12 @@ def grade(
 
     decoys = ground_truth.get("decoys") or []
     decoy_hits = []
-    for finding in findings:
+    # Only findings the arm actually REPORTED can be false positives. `findings` is a
+    # superset for a multi-stage arm — it also holds merged duplicates and candidates the
+    # pipeline itself rejected — and charging those at a decoy penalises exactly the arms
+    # that do their own filtering, while a single-shot arm has no suppressed candidates to
+    # be charged for. UNMATCHED below is already filtered this way; this is the same rule.
+    for finding in [f for f in findings if _reported(f)]:
         # A finding that already matched an injected bug is correct, whatever else it
         # sits near. Counting it as a decoy hit too would charge an arm a false
         # positive for a true positive. Kept deliberately: `matched` is populated whenever
@@ -524,10 +529,28 @@ def grade(
     control_fps = []
     if not present:
         by_id = {str(f.get("id", "?")): f for f in findings}
+        # One finding, one charge. Two ground-truth items in the same function can both
+        # accept the same finding as evidence — `_resolve_ambiguity` already refuses to
+        # credit it twice on the recall side, and charging it twice here would inflate the
+        # control-tree false-positive count for a corpus property rather than an arm's
+        # behaviour. Colocated items are common, not a corner case.
+        charged: set[str] = set()
         for row in rows:
             evidence = row["evidence"]
             if evidence is None or row["outcome"] not in (HIT, SUPPRESSED, AMBIGUOUS):
                 continue
+            # Only findings the arm actually REPORTED can be false positives — the same rule
+            # the decoy scan above applies, and `report.py` adds the two into one precision
+            # number, so they have to count the same thing. A SUPPRESSED row is by
+            # construction one whose evidence the arm's own filter dropped; charging it here
+            # while exempting it at a decoy penalised exactly the arms that filter, against a
+            # single-shot arm that has no suppressed candidates to be charged for. The row
+            # still prints, as FP_DROPPED.
+            if not evidence["reported"]:
+                continue
+            if evidence["id"] in charged:
+                continue
+            charged.add(evidence["id"])
             # A control-tree claim is a false positive "certain by construction" only if
             # there is genuinely nothing to find there. Where the recipe itself records a
             # weakness of the clean code at that function, there is: the weakness is present

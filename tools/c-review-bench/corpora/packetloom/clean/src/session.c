@@ -2,6 +2,15 @@
  *
  * The session owns rx_buf/rx_len/rx_cap. Nothing outside frame.c and reassembly.c
  * writes rx_len, and both keep rx_len <= rx_cap.
+ *
+ * A session also owns one instance each of the subsystems added alongside the
+ * original relay/session/frame/reassembly/channel core: a retransmit timer wheel
+ * (timer.c), a session-scoped emergency credit scheduler plus four per-class credit
+ * pools (credit.c), a telemetry counter block (stats.c) and an out-of-order fragment
+ * cache (reasm_oo.c). All four are created in session_init() and torn down in
+ * session_destroy(), in the same order every time, so a partially-initialised
+ * session is never handed back to a caller: any allocation failure during init
+ * unwinds everything allocated before it and returns PL_ERR_NOMEM.
  */
 
 #include "relay.h"
@@ -56,6 +65,20 @@ int session_init(session_t *s) {
     s->rx_buf = NULL;
     return PL_ERR_NOMEM;
   }
+  s->timers = timer_wheel_create();
+  if (s->timers == NULL) {
+    intern_destroy(s->intern);
+    s->intern = NULL;
+    arena_destroy(s->arena);
+    s->arena = NULL;
+    free(s->rx_buf);
+    s->rx_buf = NULL;
+    return PL_ERR_NOMEM;
+  }
+  credit_init(&s->credit);
+  credit_pools_init(s);
+  stats_init(&s->stats);
+  reasm_oo_init(&s->oo);
   s->channel_count = 0;
   s->retry_depth = 0;
   s->active = 1;
@@ -164,6 +187,9 @@ int session_destroy(session_t *s) {
   s->arena = NULL;
   intern_destroy(s->intern);
   s->intern = NULL;
+  timer_wheel_destroy(s->timers);
+  s->timers = NULL;
+  credit_pools_reclaim_all(s);
   free(s->rx_buf);
   s->rx_buf = NULL;
   s->rx_len = 0;

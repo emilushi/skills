@@ -66,9 +66,14 @@
       "file": "src/relay.c",
       "function": "relay_on_frame",
       "note": "The on_frame hook is documented as permitted to call relay_close_session(s), and relay_on_frame invokes it as the last statement so nothing touches the session afterwards. A reviewer who flags the re-entrant hook without noticing that no use follows it is reporting a property of the clean tree. Recorded so repeat runs stop re-triaging it."
+    },
+    {
+      "file": "src/codec_table.c",
+      "function": "codec_table_reset",
+      "note": "g_table/g_registered are process-global, not per-session: codec_init_all() and codec_table_reset() run from every session_init()/session_destroy(). Destroying one session while a second is still alive resets state the second session's own eventual destroy will find already at rest, so that second session_destroy() reports PL_ERR from this check even though every other part of its teardown succeeds. Pre-existing in the original clean tree (the codec table was never made per-session), present identically in the control variant, and only visible when two sessions overlap \u2014 no single-session entry point exercises it. Recorded so repeat runs stop re-triaging it."
     }
   ],
-  "bug_count": 16,
-  "decoy_count": 6,
+  "bug_count": 30,
+  "decoy_count": 10,
   "_sealed": true
 }

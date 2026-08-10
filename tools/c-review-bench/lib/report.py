@@ -167,6 +167,7 @@ def score_run(run_dir: Path, workroot: Path) -> dict[str, Any]:
                 "grade": scored,
                 "groups_attempted": result.get("groups_attempted") or [],
                 "groups_failed": result.get("groups_failed") or [],
+                "agent_failures": result.get("agent_failures") or [],
                 "cost": {
                     "agents": int(meta["agents"]),
                     "tokens": int(meta["tokens"]),
@@ -301,12 +302,27 @@ def format_report(scored: dict[str, Any]) -> str:
         # run. It is not a disqualification — a partial run is a real data point — but it
         # cannot be invisible.
         failed = arm.get("groups_failed") or []
-        if failed:
+        # `groups_failed` covers the class sweep only. A slice reviewer that dies loses
+        # lines rather than bug classes and is recorded per agent, so both have to raise
+        # this banner or the 13-of-16 case comes back invisible through the other door.
+        agents = arm.get("agent_failures") or []
+        if failed or agents:
             attempted = arm.get("groups_attempted") or []
+            what = []
+            if failed:
+                what.append(
+                    f"{len(failed)} of {len(attempted) or '?'} hunter group(s) failed "
+                    f"({', '.join(str(f) for f in failed[:8])})"
+                )
+            if agents:
+                what.append(
+                    f"{len(agents)} review agent(s) failed "
+                    f"({'; '.join(str(a) for a in agents[:8])})"
+                )
             lines += [
-                f"PARTIAL RUN: {len(failed)} of {len(attempted) or '?'} hunter group(s) failed "
-                f"({', '.join(str(f) for f in failed[:8])}). This arm's recall is a floor, not a "
-                f"measurement of the configuration.",
+                "PARTIAL RUN: "
+                + "; ".join(what)
+                + ". This arm's recall is a floor, not a measurement of the configuration.",
                 "",
             ]
         if arm["grade"] is None:

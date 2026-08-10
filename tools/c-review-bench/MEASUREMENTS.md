@@ -72,14 +72,48 @@ noise as a slice-size effect. Use `reviewAgents` to pin the fan-out.
 
 Recovers both lost bugs, changes nothing else, no precision cost.
 
+### 1.4 v5.0.0, 2026-08-09 — the best sigil cell recorded
+
+| cell | recall | agents | tokens | wall | gate |
+|---|---|---|---|---|---|
+| v5.0.0 container | **16/17** (94.1%) | 8 | **2.10M** | 35 min | VALID |
+
+`suppressed 0, near-miss 1, miss 0`. By tier: EASY 5/5, MEDIUM 9/9, HARD 2/3. Decoys: 4
+charged of 10; 0 control-tree claims; 5 unmatched findings needing human triage.
+
+**Collected with no waiver.** `incomplete_findings: []`, so unlike §1.2's `‡` cell this
+number does not depend on `--allow-incomplete-findings` — the comparable v4.0.1 figure is
+15/17 *with* the waiver and 9/17 without. Cost rose 1.81M → 2.10M (+16%) against that cell.
+
+The one non-hit is SGL-B14 (`nonce-iv-reuse`, HARD) as NEAR_MISS: the finding lands within
+12 lines but names `tags_equal` rather than `tag_check` and carries none of the expected
+keywords, so the grader will not credit it. Whether that is a miss or a grading artifact
+needs someone who did not run the cell to decide.
+
+**Ledger coverage 75.9% — 116 required, 116 answered, 88 satisfied.** The v5 gate rejected
+28 answered rows as unsupported by their own evidence. Recall rose while measured coverage
+fell, because the coverage number got stricter, not because less was read. Do not compare
+this percentage with a pre-5.0.0 one.
+
 ---
 
-## 2. packetloom — 16 bugs, 1,846 lines, built to separate two hypotheses
+## 2. packetloom — built to separate two hypotheses
 
 Corpus design: [CORPUS-DESIGN-DISCRIMINATING.md](../../CORPUS-DESIGN-DISCRIMINATING.md).
 Bug ids carry the experimental group (`PL-B*` enumeration-shaped, `PL-C*` locally visible)
 independently of difficulty, so "better at enumeration-shaped bugs" can be told apart from
-"better at hard bugs". Both arms ran in the same hermetic container; all four cells VALID.
+"better at hard bugs".
+
+> **The corpus was expanded on 2026-08-09 and §2.1's rows describe a different tree.**
+> It went from 16 bugs / 6 decoys / 1,846 lines to **30 bugs / 10 decoys / 3,434 lines**,
+> adding `backoff.c`, `credit.c`, `optparse.c`, `reasm_oo.c`, `stats.c` and `timer.c`.
+> Nothing in §2.1 is comparable with §2.2, and no fanout cell exists on the new tree.
+
+### 2.1 The 16-bug corpus, c-review v4 vs fanout
+
+Corpus design: [CORPUS-DESIGN-DISCRIMINATING.md](../../CORPUS-DESIGN-DISCRIMINATING.md).
+Bug ids carry the experimental group (`PL-B*` enumeration-shaped, `PL-C*` locally visible)
+Both arms ran in the same hermetic container; all four cells VALID.
 
 | replicate | c-review | fanout |
 |---|---|---|
@@ -115,6 +149,44 @@ a person other than the corpus's author must read the ten enumeration bugs cold,
 mechanism column, and confirm each is genuinely invisible on a single careful pass. If they
 are not, that is the alternative explanation for fanout's 8–9 out of 10 and these cells
 cannot distinguish it.
+
+### 2.2 The 30-bug corpus, c-review v5.0.0, 2026-08-09
+
+One cell. **No fanout counterpart exists on this tree**, so nothing here is an arm comparison.
+
+| cell | recall | agents | tokens | wall | gate |
+|---|---|---|---|---|---|
+| v5.0.0 container | **24/30** (80.0%) | 8 | 2.71M | 45 min | VALID |
+
+`suppressed 0, near-miss 2, miss 4`. Decoys: 2 charged of 10; 0 control-tree claims; 19
+unmatched findings needing human triage.
+
+**The tier breakdown is inverted and that is the finding worth chasing:**
+
+| tier | n | hit |
+|---|---|---|
+| HARD | 10 | **10/10** |
+| MEDIUM | 9 | 8/9 |
+| EASY | 11 | **6/11** |
+
+Every HARD bug was found and nearly half the EASY ones were not. The five EASY non-hits:
+
+- **PL-B09, PL-B16, PL-B20** — all `oob-read`, all outright MISS. Three misses in one class
+  is a pattern, not variance, and `oob-read` exists precisely because `buffer-overflow` is
+  the out-of-bounds *write*. Worth checking whether the class brief or the `bounds` ledger
+  question is steering reviewers to writes only.
+- **PL-C08, PL-C10** — both `buffer-overflow`, both NEAR_MISS at the right function
+  (`reasm_oo_peek`, `stats_name_copy`), failing only the grader's keyword groups
+  (`no check` / `never checked` / …). These may be grading artifacts rather than misses;
+  someone who did not run the cell should decide.
+
+PL-B08 — the unchecked return in a five-call teardown that fanout missed in both §2.1
+replicates — was MISSED here too, on the larger tree.
+
+**Ledger coverage 46.6% — 427 required, 427 answered, 199 satisfied.** Every owed row was
+written and more than half were rejected by the gate. Markedly worse than sigil's 75.9% on
+the same plugin build, and the obvious hypothesis is unit count: 154 units across 3,434
+lines against sigil's 43 across 901. Not investigated.
 
 **PL-B09 is a grading artifact, not a lost bug.** c-review filed it at both the cause site
 (the dispatch table) and the consequence site; the dedup agent correctly merged them, and the
@@ -183,6 +255,9 @@ visible in a passing test suite. Recorded because this class of bug is the expen
 | Assembler exited 0 with zero *producing* parts | a dead run reported as "found nothing" |
 | Hand assembly passed no `--expect` | `agent_failures: []` on a run with a lost slice |
 | Workflow rejected a JSON-encoded `args` string | lost a full cell ~45 min in |
+| `run-cell.sh` exits **0** on a void cell | two dead packetloom cells both reported `rc=0`; a scripted sequence cannot tell a scored cell from a failed one without reading the log |
+| `drive.py:35` hardcodes a **host** path for its cost step | crashes inside the container after the cell has completed, so no `.meta.json` is written. The cell is fine; collect host-side with `bench.py cost` |
+| The driver nudges an already-finished session | packetloom attempt 1 finished in ~51 min, then took 70 more nudging a dead session to the 7200s deadline. `!! gave up waiting` reads like a slow cell and was not one |
 
 **The rule they all violate: a checker that inspects zero items must fail, not pass.**
 
@@ -192,7 +267,15 @@ visible in a passing test suite. Recorded because this class of bug is the expen
 
 - **Never `git checkout` a corpus recipe.** That restores the answers to disk while leaving
   the sealed archive in place, and the seal is silently gone. Use `bench.py unseal`, and
-  re-seal with the same key.
+  re-seal with the same key. On 2026-08-09 this happened to `packetloom/recipe.public.json`
+  and reverted the corpus from 30 bugs to 16 in the only file a reader checks. It was
+  recoverable **only because the private recipe travels inside `sealed.tar.gz.enc` and
+  `seal` regenerates the public file from it** — that is the design working, not luck.
+- **Budget three attempts per cell.** Of three packetloom cells on 2026-08-09, one scored:
+  the first lost a review slice (one agent wrote no part file, and v5's `--expect` allowlist
+  correctly refused to assemble a short document), the second died on
+  `401 OAuth access token has been revoked` mid-run. Check the token before a long cell —
+  the failure arrives an hour in and voids everything after it.
 - **While a corpus is sealed, ~40 harness tests fail.** That is expected, not a regression.
 - **Report unique true positives, and state the variance floor before any ranking.**
 - **Name the token basis on every table.**

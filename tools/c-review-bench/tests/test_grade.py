@@ -281,6 +281,27 @@ def test_control_variant_turns_every_claim_into_a_false_positive(gt):
     assert len(scored["false_positives"][grade.CONTROL_FP]) == 3
 
 
+def test_a_control_claim_the_arm_itself_dropped_is_not_a_false_positive(gt):
+    """Same rule as the decoy scan: only findings the arm REPORTED can be false positives.
+
+    `report.py` adds DECOY_FP and CONTROL_FP into one precision number, so the two have to
+    count the same thing. Charging a suppressed candidate here while exempting it at a decoy
+    penalised exactly the multi-stage arms that filter their own output, against a
+    single-shot arm that has no suppressed candidates to be charged for.
+    """
+    gt["variant"] = "control"
+    for item in gt["items"]:
+        item["present"] = False
+    doc = arm("result_perfect.json", variant="control")
+    for finding in doc["findings"]:
+        finding["reported"] = False
+    scored = grade.grade(doc, gt)
+    assert scored["false_positives"][grade.CONTROL_FP] == []
+    # Not discarded, just not charged: the rows still print, as FP_DROPPED.
+    assert scored["suppressed"] == 3
+    assert "FP_DROPPED" in grade.format_grade(scored)
+
+
 def test_the_control_table_relabels_outcomes_so_a_claim_reads_as_a_claim(gt):
     gt["variant"] = "control"
     for item in gt["items"]:
@@ -609,3 +630,58 @@ def test_a_documented_clean_tree_weakness_is_not_a_control_false_positive(gt):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def _gt(decoy_line=10):
+    return {
+        "items": [
+            {
+                "id": "B-1",
+                "bug_class": "buffer-overflow",
+                "difficulty": "EASY",
+                "file": "src/z.c",
+                "line": 5,
+                "function": "g",
+                "mechanism": "overflow",
+                "mechanism_all_of": [["overflow"]],
+            }
+        ],
+        "decoys": [
+            {
+                "id": "D-1",
+                "decoy_kind": "extra-assert",
+                "file": "src/a.c",
+                "line": decoy_line,
+                "function": "f",
+                "safe_because": "the dominating clamp above guarantees it" + "." * 20,
+            }
+        ],
+    }
+
+
+def _decoy_finding(reported):
+    return {
+        "findings": [
+            {
+                "id": "F-1",
+                "file": "src/a.c",
+                "line": 10,
+                "function": "f",
+                "title": "assertion is redundant",
+                "description": "the assert here is redundant and can be removed",
+                "reported": reported,
+            }
+        ]
+    }
+
+
+def test_a_decoy_is_charged_only_when_the_arm_actually_reported_it():
+    """`findings` is a superset for a multi-stage arm — it also holds merged duplicates and
+    candidates the pipeline itself rejected. Charging those at a decoy penalises exactly the
+    arms that filter their own output, while a single-shot arm has no suppressed candidates
+    to be charged for. UNMATCHED is already filtered this way."""
+    charged = grade.grade(_decoy_finding(True), _gt())["false_positives"]
+    assert len(charged["DECOY_FP"]) == 1
+
+    suppressed = grade.grade(_decoy_finding(False), _gt())["false_positives"]
+    assert suppressed.get("DECOY_FP", []) == []
