@@ -225,7 +225,7 @@ def test_a_case_with_a_null_name_fails_cleanly_rather_than_crashing(tmp_path: Pa
 
 def test_a_clean_ablation_passes_isolation(tmp_path: Path):
     result = _one_case(
-        _trace(tmp_path, "w", [{"name": "fp-check", "version": "2.6.0"}]),
+        _trace(tmp_path, "w", [{"name": "fp-check", "version": "2.0.0"}]),
         _trace(tmp_path, "b", []),
     )
     checked, problems = isolation(result)

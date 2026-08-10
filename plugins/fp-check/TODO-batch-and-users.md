@@ -1,6 +1,6 @@
 # TODO: the two capabilities that did not survive the merge
 
-**Written 2026-08-07**, against fp-check 2.2.0. Two items, independent of each
+**Written 2026-08-07**, mid-rebuild. Two items, independent of each
 other and of the measurement work recorded in
 [MEASUREMENTS.md](MEASUREMENTS.md).
 
@@ -14,7 +14,7 @@ decision that needs making before any code.
 
 # 1. `triage-batch.js` — shared context, fan out, then chain
 
-> **LANDED in 2.7.0.** Built close to the sketch below. `missingArgs`,
+> **LANDED, and ships in 2.0.0.** Built close to the sketch below. `missingArgs`,
 > `accountFindings`, `contextBlock`, `isChainable`, `pairReason`,
 > `chainCandidates` and `chainProblem` are pure and unit-tested in
 > `tests/batch.test.mjs`; the ledger, the chain fan-out, the cap and the
@@ -147,7 +147,7 @@ that is roughly a full sweep's spend on one dispatch. Two things make it viable:
 2. **The brocard pre-gate is the cheap filter it was always meant to be.** In a
    batch its economics finally make sense — dismissing three of ten findings for
    a few cents each before their layer fan-outs is exactly the saving it was
-   built for. (Note the tension with 2.2.0, where brocards 4 and 5 now *defer* to
+   built for. (Note the tension with the shipped behaviour, where brocards 4 and 5 *defer* to
    the specialised gates. The deferral is right for a single finding and should
    stay; batch does not change it.)
 
@@ -179,7 +179,7 @@ tests showing +0.60 and came in at +0.07 and −0.20.
 
 # 2. `triage-online-users` — the downstream-consumer census
 
-> **LANDED in 2.3.0.** Built as option C. `needsUserCensus` and `censusProblem`
+> **LANDED, and ships in 2.0.0.** Built as option C. `needsUserCensus` and `censusProblem`
 > are pure and unit-tested in `tests/online.test.mjs`; the dispatch, the skip and
 > the blind-census path are wire-tested there and in `tests/coverage.test.mjs`,
 > whose guard now exercises the capability instead of pinning its absence. Three
@@ -215,7 +215,7 @@ misuse lowers it.
 It was the only role in any parent that produced evidence about **the world**
 rather than about the project. `triage-online.js` advertised it in
 `meta.description` while dispatching no such agent; that claim is struck as of
-2.2.0, so the plugin is honest but poorer.
+the rebuild, so the plugin is honest but poorer.
 
 **There is a loose end it leaves.** Brocard 5's nuance says *"downstream usage
 that violates documented guidance is a valid finding against the downstream

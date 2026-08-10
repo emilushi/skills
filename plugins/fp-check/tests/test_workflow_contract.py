@@ -553,7 +553,7 @@ GATE_FIELD_CONTRACTS = [
     # requires it.
     ("triage-static.js", "upstreamFixStands", "HISTORY_SCHEMA", ("historyVerdict",), set()),
     ("triage-static.js", "decideVerdict", "VERDICT_SCHEMA", ("result",), set()),
-    # The brocard pre-gate and its BROCARD_SCHEMA row are gone as of 2.5.0. The
+    # The brocard pre-gate and its BROCARD_SCHEMA row are gone as of 2.0.0. The
     # four tests are guidance in references/dismissal-grounds.md now, read by the
     # agents that hold the traced path, and nothing dispatches an agent whose
     # verdict can end the stage on the shape of the claim alone.

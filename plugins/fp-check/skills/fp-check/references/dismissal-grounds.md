@@ -10,7 +10,7 @@ Adapted from William Woodruff,
 (2026). The plugin `vulnerability-triage-brocards` carries the full worked
 examples and edge cases.
 
-## Why these are guidance now, and were gates until 2.5.0
+## Why these are guidance now, and were gates before 2.0.0
 
 They used to be four agents dispatched before any data-flow work, each able to end
 the stage. That was measured over 65 runs and it went wrong in three distinct ways,

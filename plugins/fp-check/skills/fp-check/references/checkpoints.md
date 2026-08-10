@@ -551,6 +551,6 @@ replaces the claimed impact with the surviving one; the second is carried in
 
 **There is no cheap pre-gate row any more.** Stage 1b dispatched four brocard
 agents that could end the analysis on the shape of the claim alone; it was removed
-in 2.5.0 after 65 measured runs, and its content is guidance in
+before 2.0.0 after 65 measured runs, and its content is guidance in
 [dismissal-grounds.md](dismissal-grounds.md) that the agents holding the traced
 path apply. The reasoning is in that file.

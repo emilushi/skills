@@ -126,7 +126,7 @@ def guard_lines(source: Path = SEARCH_PY) -> set[str]:
 
 
 # The vocabulary OF THE RECORDED RUN, which is a capture of
-# concept-prover:verify-attack-path. It is deliberately NOT fp-check 2.4.0's
+# concept-prover:verify-attack-path. It is deliberately NOT fp-check 2.0.0's
 # vocabulary: fp-check renamed these to PAYLOAD_REACHES_SINK /
 # PAYLOAD_STOPPED_HERE (and the deep-route proofs to FINDING_SURVIVES /
 # FINDING_REFUTED) after a probe caught an agent returning `BLOCKS` with the

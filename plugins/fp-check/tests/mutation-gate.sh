@@ -176,7 +176,7 @@ run_mutation "gate proceeds when every layer agent died" "L2" \
 # before dispatch, so the truncation and its uncheckedLayers gate were dead code.
 # What replaced it as the thing that must not weaken is the affirmative read —
 # grading by exclusion made PROCEED the fall-through for an unrecognised verdict.
-# The brocard pre-gate was removed in 2.5.0 and its four tests became guidance in
+# The brocard pre-gate was removed before 2.0.0 and its four tests became guidance in
 # references/dismissal-grounds.md. A removal that deletes the mechanism and loses
 # the content is not what was decided, and the failure mode is silent: a prompt
 # that no longer points at the file reads exactly the same, and the agent simply
@@ -194,7 +194,7 @@ run_mutation "the brocard gate machinery is reintroduced" "L2" \
   'perl -0pi -e "s/const MAX_LAYERS = 4/const BROCARD_SCHEMA = { type: 0 }\nconst MAX_LAYERS = 4/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/coverage.test.mjs"'
 
-# `baseDir` shape, added 2.5.1 after it was measured as the largest single source
+# `baseDir` shape, added after it was measured as the largest single source
 # of variance: two of three sweep runs on identical input passed the target repo's
 # path, every reference read 404'd, and they scored 0.000 and 0.333 against the
 # third's 1.000. The failure is invisible without this guard — an agent that
@@ -203,7 +203,7 @@ run_mutation "any baseDir shape is accepted again" "L2" \
   'perl -0pi -e "s/if \\(base && !shaped\\)/if (false)/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/args.test.mjs"'
 
-# The external-precondition prohibition, added 2.6.0. Two directions, because the
+# The external-precondition prohibition. Two directions, because the
 # fix is a deliberate, BOUNDED relaxation and both bounds have to hold: it must
 # reach a non-internal finding, and it must NOT reach an internal one. An
 # unconditional version would weaken gateReachability for every finding, including
@@ -288,7 +288,7 @@ run_mutation "gate infers PAYLOAD_REACHES_SINK instead of reading it" "L2" \
   'perl -0pi -e "s/passed\.length !== attemptedLayers/false/" "$SANDBOX/workflows/triage-static.js"' \
   'node --test "$SANDBOX/tests/gate.test.mjs"'
 
-# Checkpoint 2.2's second half — "or confirmed none exist" — restored in 2.4.0
+# Checkpoint 2.2's second half — "or confirmed none exist" — restored in the rebuild
 # after the probe measured what its absence cost. Two directions, and the first is
 # the one that already shipped: with no declared path, the orchestrator is forced
 # to invent a layer, and the agent asked to rule on a layer that does not exist
@@ -557,7 +557,7 @@ run_mutation "the online stage accepts a dismissed finding" "L2" \
   'perl -0pi -e "s/  if \(!actionable\.includes\(status\)\) \{/  if (false) {/" "$SANDBOX/workflows/triage-online.js"' \
   'node --test "$SANDBOX/tests/online.test.mjs"'
 
-# The downstream-users census, restored in 2.3.0. Its failure mode is not a wrong
+# The downstream-users census, restored in the rebuild. Its failure mode is not a wrong
 # answer, it is never firing — `capSeverity`, `upstreamFixStands` and
 # `decideVerdict` each fired 0 times in 63 measured runs while every unit test
 # covering them was green. So the first two mutations break the gate in the
@@ -576,7 +576,7 @@ run_mutation "a census that never reached the network reads as a clean result" "
   'perl -0pi -e "s/  if \(result\.reachedNetwork !== true\) \{\n    return \`no consumer index/  if (false) {\n    return \`no consumer index/" "$SANDBOX/workflows/triage-online.js"' \
   'node --test "$SANDBOX/tests/online.test.mjs"'
 
-# Batch triage and the exploit-chain check, restored in 2.7.0. Both are
+# Batch triage and the exploit-chain check, restored in the rebuild. Both are
 # false-NEGATIVE guards, which is what makes them worth mutating: a finding that
 # is silently dropped and a pair that is never compared look exactly like a clean
 # run, so nothing but an assertion on the ledger and on the pairing can see them.

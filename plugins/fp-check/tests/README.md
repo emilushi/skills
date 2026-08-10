@@ -72,7 +72,7 @@ shared-context agent is paid for.
 happens to the payload (`PAYLOAD_REACHES_SINK` / `PAYLOAD_STOPPED_HERE`); a
 deep-route proof, whether its own argument leaves the finding alive
 (`FINDING_SURVIVES` / `FINDING_REFUTED`). They shared `PASSES` / `BLOCKS` until
-2.4.0, and an agent returned `BLOCKS` reasoning *"I labeled this BLOCKS meaning
+the rebuild, and an agent returned `BLOCKS` reasoning *"I labeled this BLOCKS meaning
 the payload is NOT blocked"* — which `decideGate` read as the label.
 
 `needsUserCensus` is the one gate reading a field **by exclusion** (an omitted
