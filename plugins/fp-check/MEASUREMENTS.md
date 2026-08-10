@@ -26,6 +26,20 @@ still parses as JSON and greps clean for the home directory. This bit on the
 2.6.1 sweep, which reached `tests/fixtures/` with `/Users/<name>/…` intact on the
 first attempt.
 
+> ## ⚠ The +0.281 row does NOT describe the current tree. Read this first.
+>
+> **Set 2026-08-10.** After the 2.6.1 sweep, an eight-round review/fix loop changed
+> the gate logic substantially: a new required `reimplementation` enum decided by
+> `artifactProblem`, an ambiguity refusal in all three severity caps, rewritten
+> `citedReference` and `capSeverity` rules, `byDesign` gated on an indicator count,
+> `uncitedFix`, and roughly 85 defects in total — several of which changed a
+> verdict. **None of that is measured.** The number below describes the tree as it
+> stood on 2026-08-09, before any of it.
+>
+> Do not quote +0.281 for the current code. Re-sweep first. A one-case
+> `integration-cap` probe at `--ablation none` (~$4) is the cheap way to confirm the
+> pipeline still dispatches before committing ~$30 to a full sweep.
+
 > **Resolved 2026-08-09.** 2.6.1 has now been swept. The review/fix loop after
 > 2.6.0 had found six defects, one in the change that sweep was run to evaluate:
 > the reworded `gateReachability` criterion dropped the attacker-control
