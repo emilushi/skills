@@ -56,12 +56,12 @@ const SCOPE_SCHEMA = {
   },
 }
 
-// The reachability agent had SCOPE_SCHEMA, which is the `inscope` agent's shape:
-// it was made to answer with a policy `verdict` and a quoted `clause`, and its
-// prompt asks it for neither. Nothing read either field. That is the same
-// "loosen one schema to fit two jobs" that gave DO_NOT_SUBMIT three outcomes, and
-// it is why this stage could not tell whether the sink is driven by the project's
-// own code or only by a consumer's — the one fact `needsUserCensus` turns on.
+// A shape of its own rather than a reuse of SCOPE_SCHEMA. One schema loosened to
+// fit two jobs carries fields no prompt asks for and no code reads — an agent
+// answering a policy `verdict` and a quoted `clause` it was never asked for — and
+// leaves the fact this step exists to establish with nowhere to live: whether the
+// sink is driven by the project's own code or only by a consumer's, which is the
+// one thing `needsUserCensus` turns on.
 //
 // Every field here is required and every field here is read.
 const REACHABILITY_SCHEMA = {
@@ -77,9 +77,9 @@ const REACHABILITY_SCHEMA = {
       description:
         "'in-repo-caller' when the project's own code reaches the sink, 'client-code' when only a consumer's code can, 'unknown' when the published evidence does not settle it",
     },
-    // Was optional, and read with a fallback in two prompts. Required for the
-    // same reason SUMMARY_SCHEMA requires openQuestions: the prompt asks for the
-    // unknowns that would change the verdict, and an omitted gap reads as none.
+    // Required rather than optional, for the same reason SUMMARY_SCHEMA requires
+    // openQuestions: the prompt asks for the unknowns that would change the
+    // verdict, and an omitted gap reads as none.
     eligibilityCaveats: { type: 'string', description: 'the unknowns that would change the verdict, and the mitigating factors' },
     evidence: { type: 'string' },
   },
@@ -108,8 +108,7 @@ const PAST_BUGS_SCHEMA = {
   },
 }
 
-// online-triage's `triage-online-users` role: the only role in any parent that
-// produced evidence about the WORLD rather than about the project.
+// The one agent in this stage whose subject is the WORLD rather than the project.
 //
 // `result` is an enum rather than a count because the two answers are not
 // symmetrical. `affected-users-found` is a positive claim backed by links;
@@ -156,9 +155,9 @@ const SUMMARY_SCHEMA = {
     // `out-of-scope` is deliberately NOT offered here, and this schema is the only
     // place that can withhold it. It is the one verdict that ends the work, so
     // SCOPE_SCHEMA makes it cost a quoted `clause` and `scopeHalt` refuses it
-    // without one — but this schema has no clause field at all, and SKILL.md tells
-    // the orchestrator to adopt `summary.scopeVerdict`, so an out-of-scope written
-    // here routed around the asymmetry and left SKILL.md's "OUT OF SCOPE — <the
+    // without one. This schema has no clause field at all, and SKILL.md tells the
+    // orchestrator to adopt `summary.scopeVerdict` — so an out-of-scope written
+    // here routes around that asymmetry and leaves SKILL.md's "OUT OF SCOPE — <the
     // clause>" with no clause to print.
     scopeVerdict: {
       enum: ['in-scope', 'unclear'],
@@ -187,31 +186,30 @@ function missingArgs(a) {
 
   need('baseDir', a && a.baseDir)
 
-  // `baseDir` had its PRESENCE validated and never its SHAPE, and that gap is the
-  // largest single source of variance measured on this plugin. On a 3-run sweep of
-  // `integration-cap` with identical input, two runs passed the TARGET REPO's path
-  // and one passed the plugin's: every read under `${baseDir}/references/` 404'd in
-  // first two. The impact agent could not read dismissal-grounds.md, the gate agent
-  // could not read false-positive-patterns.md, and those runs scored 0.000 and
-  // 0.333 against the third's 1.000. All three impact agents returned the same
-  // correct `Medium / integration` — the only difference was which files the
-  // agents downstream of them could open.
+  // `need` above validates baseDir's PRESENCE. Its SHAPE is checked separately
+  // because the wrong shape is silent: the dispatch that gets this wrong passes
+  // the TARGET REPO's path where the skill directory's belongs, and then every
+  // read under `${baseDir}/references/` 404s. The impact agent never opens
+  // dismissal-grounds.md, the gate agent never opens false-positive-patterns.md,
+  // and an agent that cannot read its reference file does not stop — it carries on
+  // and answers from memory, which is indistinguishable from a real answer in the
+  // transcript.
   //
   // A workflow has no filesystem access, so existence cannot be checked here. The
-  // SHAPE can be, and it is exactly what the two failing dispatches got wrong: an
+  // SHAPE can be, and it is exactly what a misdirected dispatch gets wrong: an
   // absolute path ending in the skill directory. Reported rather than silently
-  // tolerated, because the failure is otherwise invisible — an agent that cannot
-  // read its reference file carries on and answers from memory.
+  // tolerated, because the failure is otherwise invisible.
   //
   // Written without a regex literal on purpose: the Python contract suite lexes
   // these scripts to strip strings and comments, and it REJECTS a regex literal
   // rather than risk mis-lexing one (test_a_regex_literal_is_rejected_rather_than_mis_lexed).
-  // Adding one here failed 51 of its tests on unmutated code and took 27 mutations
-  // with it, because a mutation whose baseline is red proves nothing.
-  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir cleared
-  // `need` — it is neither undefined, null nor a blank string — and then read as
-  // '' here, so the shape check below was skipped entirely and every reference
-  // path became '[object Object]/references/...'.
+  // One here turns the whole suite red on unmutated code, and a mutation whose
+  // baseline is red proves nothing.
+  //
+  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir clears
+  // `need` — it is neither undefined, null nor a blank string — and would then read
+  // as '' here, skipping the shape check below entirely and making every reference
+  // path '[object Object]/references/...'.
   const base = String((a && a.baseDir) ?? '').trim()
   const withoutSlash = base.endsWith('/') ? base.slice(0, -1) : base
   const shaped = withoutSlash.startsWith('/') && withoutSlash.endsWith('/skills/fp-check')
@@ -226,8 +224,8 @@ function missingArgs(a) {
   need('finding.claimedImpact', finding.claimedImpact)
   // Without an identified upstream project there is nothing to look up, and the
   // agents would search for a plausible-sounding project instead of this one.
-  // A collision between two projects' analysis directories is the documented way
-  // this goes wrong quietly.
+  // A collision between two projects' analysis directories is how this goes wrong
+  // quietly.
   need('project.name', proj.name)
   need('project.url', proj.url)
 
@@ -235,16 +233,16 @@ function missingArgs(a) {
   // dismissed on the code does not need a policy check, and running one anyway
   // invites the online evidence to argue a dead finding back to life.
   //
-  // OUT_OF_SCOPE was on this list, because a DECLARED scope is exactly what a
-  // published policy can overturn. It cannot be honoured: triage-static decides
-  // OUT_OF_SCOPE inside `decideGate`, BEFORE the impact agent is dispatched, so the
-  // payload it returns carries no `impact` and no `severity` — and the two `need`
-  // calls below require both, because all three prompts here interpolate them and a
-  // Stage 2 run on an unverified impact would tell its agents "Stage 1 already
-  // traced the path in the code" when it did not. So every dispatch the entry
-  // invited was refused four lines later by a rejection that named OUT_OF_SCOPE as
-  // acceptable. Overturning a declared scope means re-running Stage 1 with the
-  // corrected `scope` arg, which is where that input lives.
+  // OUT_OF_SCOPE is deliberately absent, even though a DECLARED scope is exactly
+  // what a published policy can overturn. It cannot be honoured here: triage-static
+  // decides OUT_OF_SCOPE inside `decideGate`, BEFORE the impact agent is dispatched,
+  // so the payload it returns carries no `impact` and no `severity` — and the two
+  // `need` calls below require both, because all three prompts here interpolate them
+  // and a Stage 2 run on an unverified impact would tell its agents "Stage 1 already
+  // traced the path in the code" when it did not. Admitting the status here would
+  // only move the refusal four lines down. Overturning a declared scope means
+  // re-running Stage 1 with the corrected `scope` arg, which is where that input
+  // lives.
   //
   // Inline rather than a module const: the tests extract this function and
   // evaluate it alone, where a free variable is a ReferenceError. The alternative
@@ -259,20 +257,19 @@ function missingArgs(a) {
   }
   const impact = (a && a.verification && a.verification.impact) || {}
   need('verification.impact.impact', impact.impact)
-  // `impactLine` branches on this, and it was the field the round that added
-  // rootCause and classification here missed. Omitted, it reads as `undefined`
-  // and every one of the five prompts below opens "Impact CLAIMED but NOT
-  // established offline — Stage 1 graded it not at all", priming each agent to
-  // talk down a finding whose impact Stage 1 may well have VERIFIED. IMPACT_SCHEMA
-  // requires it, so a verbatim forward always carries it; SKILL.md's Stage 2 arg
-  // list names it as read.
+  // `impactLine` branches on this. Omitted, it reads as `undefined` and every one
+  // of the five prompts below opens "Impact CLAIMED but NOT established offline —
+  // Stage 1 graded it not at all", priming each agent to talk down a finding whose
+  // impact Stage 1 may well have VERIFIED. IMPACT_SCHEMA requires it, so a verbatim
+  // forward always carries it; SKILL.md's Stage 2 arg list names it as read.
   need('verification.impact.result', impact.result)
-  // Both are read by `needsUserCensus`, by the census prompt and by `censusWhy`,
-  // and neither was required — so a caller who trimmed the dispatch to the three
-  // fields SKILL.md named turned the integration/external trigger off silently
-  // (an absent rootCause matches neither branch) and put the literal string
-  // "undefined" in front of the census agent. triage-poc requires both; this is
-  // the same requirement, and SKILL.md's Stage 2 arg list now names them.
+  // Both are read by `needsUserCensus`, by the census prompt and by `censusWhy`.
+  // Required rather than optional because omitting them fails silently in both
+  // directions at once: an absent rootCause matches neither branch, so the
+  // integration/external census trigger is switched off without a word, and the
+  // literal string "undefined" is what the census agent is handed. triage-poc
+  // requires both; this is the same requirement, and SKILL.md's Stage 2 arg list
+  // names them.
   need('verification.impact.rootCause', impact.rootCause)
   need('verification.impact.classification', impact.classification)
   need('verification.severity', a && a.verification && a.verification.severity)
@@ -284,7 +281,7 @@ function missingArgs(a) {
     const list = Array.isArray(srcs) ? srcs : []
     // Zero sources means the past-bug search is skipped entirely and the summary
     // is written as though nothing similar had ever been reported. That is the
-    // same vacuous pass an empty `layers` was in Stage 1.
+    // same vacuous pass an empty `layers` is in Stage 1.
     if (list.length === 0) {
       missing.push(
         'sources (name at least one public venue to search — github-issues, github-advisories, a mailing list, a bounty platform; with none, the duplicate check silently does not happen)',
@@ -309,10 +306,10 @@ if (argProblems.length > 0) {
 
 // Stage 2 accepts NEEDS_MORE_INFO, and the commonest NEEDS_MORE_INFO Stage 1
 // returns is an impact agent that answered NOT_VERIFIED — "no impact could be
-// established either way". Every prompt below then told its agent "Impact
-// established offline: <it>", which is the self-report the comment above refuses
-// for OUT_OF_SCOPE arriving one field over: an unestablished impact asserted as
-// fact to the agents whose job is to price it.
+// established either way". Announcing that to the prompts below as "Impact
+// established offline: <it>" is the self-report the comment above refuses for
+// OUT_OF_SCOPE arriving one field over: an unestablished impact asserted as fact
+// to the agents whose job is to price it.
 const impactVerified = verification.impact.result === 'VERIFIED'
 const impactLine = impactVerified
   ? `Impact established offline: ${verification.impact.impact}`
@@ -354,10 +351,10 @@ and found nothing.`,
   { label: 'policy', phase: 'Policy', schema: POLICY_SCHEMA, effort: 'medium' },
 )
 
-// Pure. online-triage's own rule is to stop when offline rather than triage from
-// memory, and it was prose in a reference file. As prose it inverts under
-// pressure: an agent with no network still has a prompt asking it for a scope
-// verdict, and the most likely completion is a plausible one.
+// Pure. The rule — stop when offline rather than triage from memory — is enforced
+// here in code rather than stated as prose in a reference file, because prose
+// inverts under pressure: an agent with no network still has a prompt asking it
+// for a scope verdict, and the most likely completion is a plausible one.
 //
 // A dead agent is treated exactly like an offline one. Both mean the same thing —
 // nothing was read — and the failure direction has to be the same.
@@ -417,14 +414,14 @@ Cite a link for every material claim.`,
   { label: 'reachability', phase: 'Scope', schema: REACHABILITY_SCHEMA, effort: 'medium' },
 )
 
-// The only agent result here that was read without a guard, and the reason it needs
-// one is not symmetry: `reachability.evidence` is interpolated into the two prompts
-// below and into the summary, so a dead agent threw a TypeError out of the workflow
-// instead of returning a status. That is not a fail-closed outcome — the
-// orchestrator is left holding a user request for a triage with no verdict to
-// relay, and this plugin's worst measured failure is exactly that shape: the gate
-// stops, and the analysis happens by hand outside it. BLOCKED, matching scopeHalt's
-// answer to a dead scope agent: nothing was read, so nothing can be claimed.
+// Guarded, and not for symmetry with the other agents: `reachability.evidence` is
+// interpolated into the two prompts below and into the summary, so an unguarded
+// dead agent throws a TypeError out of the workflow instead of returning a status.
+// That is not a fail-closed outcome — the orchestrator is left holding a user
+// request for a triage with no verdict to relay, and the worst shape this plugin
+// can fail in is exactly that: the gate stops, and the analysis happens by hand
+// outside it. BLOCKED, matching scopeHalt's answer to a dead scope agent: nothing
+// was read, so nothing can be claimed.
 if (!reachability) {
   const why = 'the reachability agent returned nothing; public call sites, actors and preconditions are unverified'
   log(`BLOCKED: ${why}`)
@@ -541,9 +538,9 @@ const attempted = Math.min(sources.length, MAX_SOURCES)
 
 // The venues the cap dropped, by name and carried rather than logged. A log is not
 // something any consumer reads: the summary prompt below is built from `attempted`,
-// so a 9-source dispatch told the summary agent about 6 venues and said nothing
-// about the other 3, and the agent has no way to tell a venue that was never
-// dispatched from one that came back clean. That is the same "an absent duplicate
+// so a 9-source dispatch tells the summary agent about 6 venues and nothing about
+// the other 3, and the agent has no way to tell a venue that was never dispatched
+// from one that came back clean. That is the same "an absent duplicate
 // check becomes a clean bill of health" that `unsearched` exists to stop, arriving
 // by the other route. Kept separate from `unsearched` because they are different
 // facts — never dispatched, versus dispatched and dead — and the summary is told
@@ -559,9 +556,9 @@ if (beyondCap.length > 0) {
 // sources are still evidence, and the summary is told which venues are blind.
 //
 // Matched by POSITION rather than by label: `parallel` preserves position and
-// substitutes null in place, and two sources sharing a label made the survivor
-// answer for its twin — one agent dies, `searched.some(r => r.source === label)`
-// finds the other, and the dead venue is summarised as searched.
+// substitutes null in place, and two sources sharing a label would let the
+// survivor answer for its twin — one agent dies, `searched.some(r => r.source ===
+// label)` finds the other, and the dead venue is summarised as searched.
 const unsearched = sources
   .slice(0, MAX_SOURCES)
   .filter((s, i) => !pastBugs[i])
@@ -572,23 +569,22 @@ if (unsearched.length > 0) {
 
 // ------------------------------------------------- Downstream-user census
 
-// Pure. online-triage's `triage-online-users` role was gated on the reachability
-// and scope files saying severity depends on downstream users, and the parent
-// gated it for a reason: for a bug directly exploitable in the target, a census
-// of consumers answers a question nobody asked.
+// Pure. The consumer census is gated rather than always run: for a bug directly
+// exploitable in the target itself, a census of that project's consumers answers a
+// question nobody asked.
 //
 // A gate in code rather than a third question at Step 0, because whether severity
 // turns on downstream usage is a FINDING of the reachability analysis and not
 // something the user knows when they start — and because every extra question is
 // one more thing a non-interactive harness silently defaults to `no`, which is how
-// this plugin has now shipped three capabilities that fired zero times.
+// a capability ships and then fires zero times.
 //
 // The last clause is read by exclusion, and that is deliberate. Everywhere else in
 // this stage the affirmative value is the one that counts, because there the risk
-// is a claim made on no evidence. Here the risk runs the other way: the measured
-// failure is a capability that never fires, and an omitted `driver` reading as "no
-// census needed" is exactly that. A false positive costs one agent; a false
-// negative loses the role again.
+// is a claim made on no evidence. Here the risk runs the other way: the failure to
+// guard against is a capability that never fires, and an omitted `driver` reading
+// as "no census needed" is exactly that. A false positive costs one agent; a false
+// negative loses the capability entirely.
 function needsUserCensus(verification, reachability, scope) {
   // Unreachable from the call site below — `scopeHalt` has already returned on an
   // out-of-scope verdict. Kept because the predicate is unit-tested on its own and
@@ -681,9 +677,9 @@ const censusIssue = censusWanted ? censusProblem(census) : null
 // every return below get this.
 const censusState = !censusWanted ? 'not-applicable' : censusIssue ? 'unperformed' : 'performed'
 // `why` is answered on ALL THREE states, including the one where the census
-// SUCCEEDED. It used to be `censusIssue`, which is null exactly then — so every
-// terminal return carried `census.why: null` on the one path where there was
-// something to say, and a reader looking for the rationale found nothing.
+// SUCCEEDED. `censusIssue` alone will not do: it is null exactly then, so every
+// terminal return would carry `census.why: null` on the one path where there is
+// something to say, and a reader looking for the rationale finds nothing.
 // `censusProblem` has already refused a blank `coverage` on this path, so the
 // fallback is unreachable rather than load-bearing.
 const censusWhy = !censusWanted
@@ -719,15 +715,15 @@ const duplicates = searched.filter((r) => r.duplicate)
 // What a duplicate is relayed with, in the summary prompt and in the DUPLICATE
 // return. Trimmed and in one place: `links` is optional and `required` checks
 // presence rather than content, so `links: '   '` is schema-valid AND truthy — it
-// displaced the `evidence` it was meant to fall back to, and the retraction went out
-// citing blank space. DUPLICATE is terminal, so that citation is the deliverable.
+// would displace the `evidence` it is meant to fall back to and send the retraction
+// out citing blank space. DUPLICATE is terminal, so that citation is the deliverable.
 //
-// The literal fallback that used to close this expression — 'no link or evidence
-// given' — let an entirely uncited duplicate end the stage as a retraction citing
-// that sentence. `upstreamFixStands` and `alreadyFixedStands` refuse the same
-// thing at the other two retraction sites, for the reason all three share: an
-// unreferenced retraction is the one failure mode that silently discards a real
-// finding. An uncited one still reaches the summary agent, as a claim.
+// No literal closes this expression, deliberately: a fallback string such as 'no
+// link or evidence given' lets an entirely uncited duplicate end the stage as a
+// retraction citing that sentence. `upstreamFixStands` and `alreadyFixedStands`
+// refuse the same thing at the other two retraction sites, for the reason all three
+// share: an unreferenced retraction is the one failure mode that silently discards a
+// real finding. An uncited one still reaches the summary agent, as a claim.
 const dupCite = (r) => String(r.links || '').trim() || String(r.evidence || '').trim()
 const cited = duplicates.filter(dupCite)
 
@@ -792,14 +788,15 @@ function summaryProblem(result) {
 
 // Pure, and the same arithmetic Stage 1 applies — checkpoints.md 2.4b and 2.5,
 // duplicated because a workflow script is standalone and cannot import Stage 1's
-// copy. Without it this stage undid the one mechanism the head-to-head credited
-// 3/3 against 0/3: Stage 1 caps an integration or external root cause at Medium,
-// then the summary agent was asked for a `finalSeverity` and SKILL.md told the
-// orchestrator to adopt it. The census that feeds that agent fires PRECISELY on
-// the capped root causes, and its `severityEffect: raise` invites the number back
-// up. The correction is reported, never silent.
-// Pure, and duplicated from triage-static.js with `capSeverity` — see the
-// reasoning there. Every DISTINCT rating level a string names, WORD-BOUNDED,
+// copy. Without it this stage undoes that cap: Stage 1 caps an integration or
+// external root cause at Medium, the summary agent is then asked for a
+// `finalSeverity`, and SKILL.md tells the orchestrator to adopt it. The census
+// feeding that agent fires PRECISELY on the capped root causes, and its
+// `severityEffect: raise` invites the number back up. The correction is reported,
+// never silent.
+//
+// `namedLevels` is duplicated from triage-static.js alongside `capSeverity` — see
+// the reasoning there. Every DISTINCT rating level a string names, WORD-BOUNDED,
 // most severe first: `low` sits inside "Allowlist", `high` inside "highly".
 function namedLevels(severity) {
   const LEVELS = ['critical', 'high', 'medium', 'low', 'informational']
@@ -809,11 +806,10 @@ function namedLevels(severity) {
 function capSeverity(severity, rootCause, classification) {
   const CAP = 'Medium'
   // Affirmative — "is this rating at or above the cap?" — rather than by
-  // exclusion. `severity !== 'Critical' && severity !== 'High'` returned early
+  // exclusion. `severity !== 'Critical' && severity !== 'High'` returns early
   // for every spelling the enum does not enforce, and `required` is the only
   // thing the runtime validator enforces: 'critical', 'CRITICAL' and
-  // 'Critical (RCE)' all escaped the cap uncorrected, which is the one mechanism
-  // the measured head-to-head credited 3/3 against 0/3.
+  // 'Critical (RCE)' would each escape the cap uncorrected.
   //
   // EXACTLY ONE level named is a rating. More than one is not: 'Medium/High',
   // 'Critical (affects low-privilege users)' and 'Low (the affected path is not
@@ -855,7 +851,7 @@ function capSeverity(severity, rootCause, classification) {
 // which is the one that was actually derived from evidence.
 // And the fallback is REPORTED, for the reason the cap two lines up is: this
 // stage substitutes a number the reader is told came from here, and `summary.
-// reasoning` is relayed verbatim beside it — so an unnoted substitution printed
+// reasoning` is relayed verbatim beside it — so an unnoted substitution prints
 // Stage 1's `High` next to a paragraph saying no severity could be determined.
 // `summary` may be null or incomplete here: this block runs BEFORE the duplicate
 // and summary gates, so that DUPLICATE — a terminal, non-BLOCKED status carrying
@@ -887,7 +883,7 @@ const severityNote = [
     ? `${unusable}: Stage 1's ${verification.severity} stands${impactVerified ? ', derived from the code' : ', which was rated on a CLAIMED impact Stage 1 did not establish'}`
     : '',
   capped.note,
-  // The fallback landed on a number that is itself unreadable. Stage 1 refuses to
+  // The fallback can land on a number that is itself unreadable. Stage 1 refuses to
   // return one, so this needs an upstream that is not Stage 1 — but `verification`
   // arrives as an argument, and a rating that no cap could be applied to must say
   // so rather than ship under a note claiming Stage 1's number stands.
@@ -901,7 +897,7 @@ if (severityNote) log(severityNote)
 // fact a past-bug agent established with a link; the summary agent's job is to write
 // it up, and its failure to do so cannot unmake it. The other way round, the single
 // most likely summary defect — an empty `openQuestions`, which is why that gate
-// exists at all — downgraded "already publicly reported at GHSA-x" to
+// exists at all — would downgrade "already publicly reported at GHSA-x" to
 // NEEDS_MORE_INFO, discarding a terminal answer the stage had already paid for and
 // sending the next reader to buy it again.
 //
@@ -913,9 +909,9 @@ if (cited.length > 0) {
   return {
     status: 'DUPLICATE',
     reason: `already publicly reported — ${where}`,
-    // Under the same keys every other terminal return uses. Without them this was
-    // the one non-BLOCKED status carrying a `summary` and no corrected number, so
-    // the pre-cap `summary.finalSeverity` was the only one a reader could reach.
+    // Under the same keys every other terminal return uses. Without them this is
+    // the one non-BLOCKED status carrying a `summary` and no corrected number,
+    // leaving the pre-cap `summary.finalSeverity` as the only one a reader can reach.
     severity: capped.severity,
     severityCorrection: severityNote,
     policy,
@@ -950,12 +946,12 @@ if (summaryIssue) {
 // gate: `required` is the only thing the runtime validator enforces, as three
 // comments in this file already say. So the one verdict that ends the analysis —
 // the one SCOPE_SCHEMA makes cost a quoted clause, and `scopeHalt` refuses
-// without one — could still be written here, where there is no clause field at
-// all, and SKILL.md tells the orchestrator to take the scope from `summary`.
-// It printed "OUT OF SCOPE" with nothing after the dash.
+// without one — can still be written here, where there is no clause field at
+// all, and SKILL.md tells the orchestrator to take the scope from `summary`. The
+// output is "OUT OF SCOPE" with nothing after the dash.
 //
 // Read affirmatively, like every other gate in this file, and surfaced at the top
-// level beside the corrected severity, which is where SKILL.md now reads it.
+// level beside the corrected severity, which is where SKILL.md reads it.
 const scopeVerdict = summary.scopeVerdict === 'in-scope' ? 'in-scope' : 'unclear'
 if (scopeVerdict !== summary.scopeVerdict) {
   log(`summary returned scopeVerdict '${summary.scopeVerdict}', which this step cannot decide; reporting unclear`)

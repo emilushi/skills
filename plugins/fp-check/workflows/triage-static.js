@@ -13,10 +13,9 @@ export const meta = {
 
 // args: { baseDir, finding, entryPoint, layers[], scope, route }
 //
-// The shape and every defensive habit below is inherited from concept-prover's
-// verify-attack-path.js, where each one is a bug that shipped. The comments
-// recording why are kept: they are the only reason the next person does not
-// re-simplify them away.
+// Every defensive habit below guards one specific fail-open. The comments
+// recording which one are the only reason the next reader does not simplify
+// them away.
 
 // `args || {}`, not `args`. A dispatch with no args at all — a mistyped `arg:`,
 // or an omitted block — makes this destructure throw before `missingArgs` can
@@ -25,9 +24,9 @@ export const meta = {
 const { baseDir, finding, entryPoint, scope, layersSearched } = args || {}
 // `|| []`, not a destructure default: the default only fires on `undefined`, and
 // `missingArgs` reads a null `layers` as "none supplied" and passes it whenever
-// `layersSearched` declares the absence. It then reached `layers.map` below and
-// threw a TypeError, killing the run with no status at all — the one outcome this
-// script's whole arg gate exists to prevent.
+// `layersSearched` declares the absence. A null would then reach `layers.map`
+// below and throw a TypeError, killing the run with no status at all — the one
+// outcome this script's whole arg gate exists to prevent.
 const layers = (args && args.layers) || []
 
 const MAX_LAYERS = 4
@@ -54,29 +53,24 @@ const LAYER_SCHEMA = {
 }
 
 // The deep-route proofs. A layer's verdict and a proof's are DIFFERENT questions
-// and no longer share an enum: a layer is asked what happens to the payload, a
-// proof is asked whether its own argument leaves the finding alive. Sharing one
-// enum is part of how the polarity got inverted — "the payload passes" and "the
-// bounds proof passes" are opposite directions of the same word.
+// and do not share an enum: a layer is asked what happens to the payload, a
+// proof is asked whether its own argument leaves the finding alive. One enum
+// across both inverts the polarity — "the payload passes" and "the bounds proof
+// passes" are opposite directions of the same word.
 //
 // `applies` is the other field that tells them apart.
 //
 // A layer is ON the attack path and is always applicable — it either stops the
 // payload or it does not. A proof is an auxiliary argument, and two of the three
 // are asked a question that frequently does not apply at all: there is no
-// algebra in a logic bug and no threading model in a synchronous one. The escape
-// used to be a line of prompt telling the agent to answer UNCERTAIN in that case,
-// and a prompt is not an enforcement mechanism — an agent asked "is concurrent
-// access actually possible?" about a finding with no concurrency in it answers
-// the question it was asked, truthfully, with the refuting verdict.
-//
-// Measured: `integration-cap` scored 0/3 on the latest sweep, and two of those
-// three runs came back NOT_EXPLOITABLE from this path with every one of the other
-// twelve sub-agents saying the finding was real and unblocked. One run's answer
-// says so in terms — *"the top-line label was self-contradicting against its own
-// reasoning text"* — and the orchestrator then discarded the whole workflow and
-// reported its own uncapped Critical. The severity cap the case exists to
-// exercise never ran.
+// algebra in a logic bug and no threading model in a synchronous one. Telling
+// the agent in the prompt to answer UNCERTAIN in that case is not an enforcement
+// mechanism — an agent asked "is concurrent access actually possible?" about a
+// finding with no concurrency in it answers the question it was asked,
+// truthfully, with the refuting verdict, and the finding is then dismissed on a
+// question it never raised. The label also contradicts the agent's own reasoning
+// text, so the orchestrator's rational response is to discard the whole workflow
+// and report its own uncapped severity — every gate below this one included.
 //
 // `applies` is required so the model is asked, and read as `applies === true` so
 // an omitted or non-boolean answer cannot block — the same `!== true` idiom
@@ -126,10 +120,9 @@ const THREAT_SCHEMA = {
   },
 }
 
-// Stage 3's challenge 4 is the only place concept-prover looked for an existing
-// fix, and challenge 4 runs only when the user asked for a PoC. On the cheap
-// path — which is the default — an already-fixed finding would pass unexamined,
-// so the same search runs here.
+// Stage 3's challenge 4 asks the same question, but Stage 3 runs only when the
+// user asked for a PoC. On the cheap path — which is the default — an
+// already-fixed finding would pass unexamined, so the same search runs here.
 const HISTORY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -143,11 +136,11 @@ const HISTORY_SCHEMA = {
     // `fixed: YES` carrying an empty reference is treated as unproven: a
     // retraction has to point at something.
     reference: { type: 'string', description: 'the commit, PR, issue or advisory that fixed it; empty if none' },
-    // Required for the same reason `reference` is, and it was optional: the two
-    // fields make the same claim about the same retraction. `upstreamFixStands`
-    // reads it, and an omitted one was `undefined`, which is not `false`, which is
-    // read as a WHOLE fix — so a partial fix nobody flagged retracted the finding
-    // entirely. Required makes the model answer instead of the default guessing.
+    // Required for the same reason `reference` is: the two fields make the same
+    // claim about the same retraction. `upstreamFixStands` reads it, and an
+    // omitted one is `undefined`, which is not `false`, which reads as a WHOLE
+    // fix — so a partial fix nobody flagged retracts the finding entirely.
+    // Required makes the model answer instead of the default guessing.
     complete: { type: 'boolean', description: 'false for a partial fix, which is still a finding' },
     searched: { type: 'string', description: 'what was actually searched, so a null result is auditable' },
     evidence: { type: 'string' },
@@ -209,9 +202,9 @@ const VERDICT_SCHEMA = {
 // Pure. Reject an arg shape this script does not understand BEFORE spending
 // agents on it. Every field named here is interpolated into a prompt below, so a
 // missing one reaches an agent as the literal text 'undefined' and it spends a
-// full turn reasoning about nothing. That is not hypothetical: a live dispatch
-// asked the threat-model agent about "Finding: undefined, Component: undefined,
-// Declared scope: [object Object]".
+// full turn reasoning about nothing — an unvalidated dispatch degrades the
+// threat-model prompt to "Finding: undefined, Component: undefined, Declared
+// scope: [object Object]" and the agent answers it anyway.
 //
 // maxLayers is a defaulted parameter rather than a reference to MAX_LAYERS
 // because the tests extract this function and evaluate it in isolation, where a
@@ -231,31 +224,29 @@ function missingArgs(a, maxLayers = 4) {
 
   need('baseDir', a && a.baseDir)
 
-  // `baseDir` had its PRESENCE validated and never its SHAPE, and that gap is the
-  // largest single source of variance measured on this plugin. On a 3-run sweep of
-  // `integration-cap` with identical input, two runs passed the TARGET REPO's path
-  // and one passed the plugin's: every read under `${baseDir}/references/` 404'd in
-  // first two. The impact agent could not read dismissal-grounds.md, the gate agent
-  // could not read false-positive-patterns.md, and those runs scored 0.000 and
-  // 0.333 against the third's 1.000. All three impact agents returned the same
-  // correct `Medium / integration` — the only difference was which files the
-  // agents downstream of them could open.
+  // PRESENCE is not enough without SHAPE, and the shape is the larger source of
+  // variance: `baseDir` is interpolated into every reference path, and the
+  // plausible wrong value is the TARGET REPO's root, because that is the working
+  // directory. Every read under `${baseDir}/references/` then misses — the impact
+  // agent cannot open dismissal-grounds.md, the gate agent cannot open
+  // false-positive-patterns.md — while the layers and the impact verdict come
+  // back correct, so the degradation is invisible from the result.
   //
   // A workflow has no filesystem access, so existence cannot be checked here. The
-  // SHAPE can be, and it is exactly what the two failing dispatches got wrong: an
-  // absolute path ending in the skill directory. Reported rather than silently
-  // tolerated, because the failure is otherwise invisible — an agent that cannot
-  // read its reference file carries on and answers from memory.
+  // SHAPE can be, and it is exactly what a wrong dispatch gets wrong: an absolute
+  // path ending in the skill directory. Reported rather than silently tolerated,
+  // because the failure is otherwise invisible — an agent that cannot read its
+  // reference file carries on and answers from memory.
   //
   // Written without a regex literal on purpose: the Python contract suite lexes
   // these scripts to strip strings and comments, and it REJECTS a regex literal
   // rather than risk mis-lexing one (test_a_regex_literal_is_rejected_rather_than_mis_lexed).
-  // Adding one here failed 51 of its tests on unmutated code and took 27 mutations
-  // with it, because a mutation whose baseline is red proves nothing.
-  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir cleared
-  // `need` — it is neither undefined, null nor a blank string — and then read as
-  // '' here, so the shape check below was skipped entirely and every reference
-  // path became '[object Object]/references/...'.
+  // One here turns that suite red on unmutated code, and its mutation gate proves
+  // nothing from a baseline that is already red.
+  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir clears
+  // `need` — it is neither undefined, null nor a blank string — and then reads as
+  // '' here, which skips the shape check below entirely and lets every reference
+  // path become '[object Object]/references/...'.
   const base = String((a && a.baseDir) ?? '').trim()
   const withoutSlash = base.endsWith('/') ? base.slice(0, -1) : base
   const shaped = withoutSlash.startsWith('/') && withoutSlash.endsWith('/skills/fp-check')
@@ -281,10 +272,10 @@ function missingArgs(a, maxLayers = 4) {
   need('entryPoint.location', entry.location)
   need('entryPoint.payload', entry.payload)
   // `scope` is the input the threat-model checkpoint is entirely about. Absent,
-  // the prompt read "Declared scope: none declared — report UNCERTAIN rather
-  // than assuming" and the workflow returned a verdict whenever the agent
-  // answered YES anyway. That instruction is a prompt, and a prompt is not an
-  // enforcement mechanism.
+  // the best the prompt can say is "Declared scope: none declared — report
+  // UNCERTAIN rather than assuming", and the workflow returns a verdict whenever
+  // the agent answers YES anyway. That instruction is a prompt, and a prompt is
+  // not an enforcement mechanism.
   need('scope', a && a.scope)
   if (a && a.scope !== undefined && a.scope !== null && typeof a.scope !== 'string') {
     missing.push('scope (must be a string; an object interpolates as [object Object])')
@@ -293,22 +284,19 @@ function missingArgs(a, maxLayers = 4) {
   // would kill the run instead of being reported.
   const layers = a && a.layers
   // Checkpoint 2.2 passes on "identified at least 1 layer (OR CONFIRMED NONE
-  // EXIST)", and until 2.4.0 only the first half was reachable. An empty list on
-  // its own still confirms nothing — `layers` defaults to [] in the destructure,
-  // so a forgotten field and a deliberate "nothing validates this path" were the
-  // same value, zero agents ran, and a verdict came back having inspected
-  // nothing.
+  // EXIST)", and an empty list on its own confirms nothing — `layers` defaults to
+  // [] in the destructure, so a forgotten field and a deliberate "nothing
+  // validates this path" are the same value, zero agents run, and a verdict comes
+  // back having inspected nothing.
   //
-  // The old fix was to demand the absence be passed AS a layer. The probe on
-  // 2.3.0 measured what that costs: on `integration-cap`, where nothing on the
-  // path validates anything, the orchestrator did exactly as instructed and sent
-  // `{name: 'rate-value validation between fetch_rate and ledger.debit',
-  // description: 'No validation layer exists between...'}`. An agent then had to
-  // answer "does this layer stop the payload?" about a layer that is the absence
-  // of a layer, and returned the stopping verdict with a reason saying it meant
-  // the opposite. The finding died at `decideGate` before the impact agent, and
-  // the severity cap the case exists to exercise did not run. **The contract
-  // manufactured the fabrication that broke it.**
+  // Demanding the absence be passed AS a layer is the worse fix, not the safer
+  // one. A caller told to do that sends `{name: 'rate-value validation between
+  // fetch_rate and ledger.debit', description: 'No validation layer exists
+  // between...'}`, and an agent asked "does this layer stop the payload?" about a
+  // layer that is the absence of a layer cannot answer coherently: what comes
+  // back is the stopping verdict carrying a reason that says the opposite. The
+  // finding then dies at `decideGate` before the impact agent ever runs. **A
+  // contract that asks for a fabrication gets one, and is then broken by it.**
   //
   // So the second half of the checkpoint gets its own input. `layersSearched` is
   // an affirmative, auditable statement of what was read and what was not found —
@@ -324,9 +312,9 @@ function missingArgs(a, maxLayers = 4) {
       )
     }
   } else if (searched !== undefined && searched !== null && !declaredNone) {
-    // Present but blank, alongside real layers. Reported rather than ignored:
-    // silently dropping it is how a blank `links` came to displace the evidence
-    // it was meant to fall back to.
+    // Present but blank, alongside real layers. Reported rather than ignored: a
+    // blank field that is silently dropped reads downstream as a field that was
+    // answered, so the fallback it should have triggered never fires.
     missing.push('layersSearched (present but empty; omit it or say what was read)')
   }
   // Reject an over-long list HERE rather than after dispatching. Failing closed
@@ -351,15 +339,15 @@ function missingArgs(a, maxLayers = 4) {
   return missing
 }
 
-// Pure. fp-check's standard/deep routing, decided from the dispatch rather than
-// from the orchestrator's mood.
+// Pure. The standard/deep routing, decided from the dispatch rather than from
+// the orchestrator's mood.
 //
-// This is the reason Stage 1 is not an unconditional fan-out. Measured:
-// fp-check's linear checklist never escalated on any of the seven eval cases and
-// still matched a full pipeline at 2.3x less cost, so the cheap path is doing
-// real work and replacing it with "always run everything" would spend 3x for no
-// measured gain. What deep adds is the three extra proofs listed at the
-// dispatch site, not a second opinion on the same questions.
+// This is the reason Stage 1 is not an unconditional fan-out. On a finding whose
+// bug class needs none of the three extra proofs, the cheap path reaches the same
+// verdict for a fraction of the spend, so "always run everything" buys nothing
+// and costs several times as much. What deep adds is those three proofs, listed
+// at the dispatch site — not a second opinion on the questions the standard route
+// already asks.
 //
 // An explicit `route` wins: the user asking for full verification is one of
 // fp-check's own escalation criteria.
@@ -378,11 +366,11 @@ function selectRoute(a) {
   if (layers.length >= 3) return 'deep'
   const bugClass = String(finding.bugClass || '').toLowerCase()
   // Keyed on the CLASS NAMES in references/bug-class-verification.md first, then
-  // on the ways the same bug gets written by hand. Both halves are needed, and
-  // leaving one out was a live defect: SKILL.md sends the orchestrator to that
-  // reference for the bug class, so "Memory Corruption" — the heading it reads
-  // there — took the cheap route with no algebraic bounds proof, while "buffer
-  // overflow" took the deep one. Same finding, opposite route, decided by which
+  // on the ways the same bug gets written by hand. Both halves are needed:
+  // SKILL.md sends the orchestrator to that reference for the bug class, so with
+  // only the hand-written spellings "Memory Corruption" — the heading it reads
+  // there — takes the cheap route with no algebraic bounds proof while "buffer
+  // overflow" takes the deep one. Same finding, opposite route, decided by which
   // words got typed.
   //
   // test_every_bug_class_has_a_routing_decision pins this against the reference's
@@ -454,12 +442,12 @@ phase('Layers')
 // layers" — a fan-out over an enumerated list, which one agent reading in a
 // single pass cannot honestly satisfy.
 //
-// This is the mechanism the head-to-head measured: on `blocked-attack-path`,
-// where the sink is genuinely injectable but no attacker-reachable path exists,
-// the arm with per-layer verdicts scored 3/3 and the arm with a linear checklist
-// scored 1/3 against a 1/9 pooled baseline. Both arms NAMED the blocking
-// allowlist 6/6 — naming it is not the hard part, refusing to call the finding
-// real is. Do not collapse this into one agent to save money.
+// The case this shape is for is a sink that is genuinely injectable with no
+// attacker-reachable path to it. A single reader names the blocking check
+// reliably and still calls the finding real: naming it is not the hard part,
+// being made to record a per-layer verdict against it is, because that verdict
+// then decides the gate in code instead of being weighed in prose. Do not
+// collapse this into one agent to save money.
 const checks = [
   ...layers.map((layer, i) => () =>
     agent(
@@ -504,8 +492,9 @@ not there stops nothing.`,
 // Positions are recorded as the list is built rather than computed as
 // `layers.length + 1`, `+ 2` and so on. The arithmetic form is what makes the
 // deep-route extras dangerous to add: one off-by-one and a recovery verdict is
-// read as a threat-model verdict, which was a live fail-open before
-// `additionalProperties: false` closed it by accident.
+// read as a threat-model verdict. `additionalProperties: false` on the schemas
+// catches some of those mix-ups, but only by accident of the two shapes
+// differing, so the positions are recorded rather than derived.
 const at = {}
 const add = (key, thunk) => {
   at[key] = checks.length
@@ -684,9 +673,9 @@ no concurrency in it at all dismisses it on a question it never asked.`,
 //
 // Disaggregating by shape instead — `.filter(Boolean)` then
 // `results.find((r) => r.inScope)` — is a fail-open: the recovery thunk precedes
-// the threat thunk, so a recovery agent that volunteered an `inScope: 'YES'` key
-// won the threat-model lookup, the real `inScope: 'NO'` verdict was discarded,
-// and the workflow returned a verdict on an out-of-scope finding.
+// the threat thunk, so a recovery agent that volunteers an `inScope: 'YES'` key
+// wins the threat-model lookup, the real `inScope: 'NO'` verdict is discarded,
+// and the workflow returns a verdict on an out-of-scope finding.
 //
 // The barrier is justified: the gate below is a decision over ALL layers, and a
 // blocking layer skips the impact agent and both later stages entirely.
@@ -706,10 +695,10 @@ const recovery = raw[at.recovery] || null
 const threat = raw[at.threat] || null
 // Downgraded here rather than at each reader, so no consumer sees the raw value.
 // The history prompt promises "YES without a reference is downgraded to
-// UNCERTAIN" and nothing performed it: `upstreamFixStands` refused the
-// retraction, and then the unreferenced `YES` was interpolated verbatim into the
-// gate prompt and carried in this payload to Stage 3's challenge 4 — so the
-// retraction the code refused arrived as prose instead, in front of the two
+// UNCERTAIN", and `upstreamFixStands` alone only refuses to ACT on such a
+// retraction: the unreferenced `YES` is still interpolated verbatim into the gate
+// prompt and carried in this payload to Stage 3's already-fixed challenge, so the
+// retraction the code refused arrives as prose instead, in front of the two
 // agents most able to act on it.
 const history = downgradeUnreferencedFix(raw[at.history] || null)
 const proofs = route === 'deep'
@@ -720,23 +709,24 @@ const proofs = route === 'deep'
     ]
   : []
 
-// Pure. Checkpoint 5.1 challenge 4's rule — Stage 3 enforces the same rule
-// over the challenge verdicts, under its original name `alreadyFixedStands` — "a fix exists -> DO NOT SUBMIT, and
+// Pure. Checkpoint 5.1 challenge 4's rule — "a fix exists -> DO NOT SUBMIT, and
 // this outcome overrides everything else" — applied at Stage 1c so it also holds
-// on the cheap path.
+// on the cheap path. Stage 3 enforces the same rule over its challenge verdicts,
+// as `alreadyFixedStands`.
 //
 // Pure. What counts as a citation, for both stages' already-fixed rule.
 // Duplicated verbatim in triage-poc.js, where challenge 4's `reference` is held
 // to the same test: these scripts have no module system, and the alternative to
-// two copies was two different rules, which is what shipped.
+// two copies is two rules that drift apart.
 //
 // A citation is a TOKEN of a recognisable shape — a sha, `#412`, `CVE-2024-1234`,
-// `GHSA-jf85-cpcp-j695`, a release tag, a URL. Not "non-blank", which retracted
-// findings on `n/a`, `unknown commit`, `see evidence` and `TBD`; and not
-// "contains a digit", which retracts on `see evidence at auth.py:31` and
-// `fixed sometime in the 2.x line` while REFUSING an all-hex-letter short sha
-// like `deadbeef`. Wrong in either direction loses a finding: a stand-in
-// discards a live bug, and a refused sha reports a dead one.
+// `GHSA-jf85-cpcp-j695`, a release tag, a URL. Not "non-blank", which accepts
+// `n/a`, `unknown commit`, `see evidence` and `TBD` — the stand-ins an agent
+// reaches for when it has no citation — and not "contains a digit", which accepts
+// `see evidence at auth.py:31` and `fixed sometime in the 2.x line` while
+// REFUSING an all-hex-letter short sha like `deadbeef`. Wrong in either direction
+// loses a finding: a stand-in retracts a live bug terminally, and a refused sha
+// reports a dead one.
 function citedReference(value) {
   // `new RegExp` from strings rather than regex literals: the contract suite
   // lexes these scripts and rejects a bare `/` in code position, because reading
@@ -744,11 +734,11 @@ function citedReference(value) {
   // check built on that text green.
   //
   // Matched ANYWHERE in the string, bounded by non-identifier characters, rather
-  // than split on whitespace with each token anchored. Anchoring rejected every
+  // than split on whitespace with each token anchored. Anchoring rejects every
   // ordinary wrapper a citation arrives in: `openssl/openssl#12345` — the
-  // canonical cross-repo form, and the integration case this search exists for —
-  // `torvalds/linux@a1b2c3d`, a backticked sha, `<https://...>`, a markdown link,
-  // and `PR 4521`. A rejection here is not harmless in either direction: Stage 1
+  // canonical cross-repo form — `torvalds/linux@a1b2c3d`, a backticked sha,
+  // `<https://...>`, a markdown link, and `PR 4521`. A rejection here is not
+  // harmless in either direction: Stage 1
   // writes a note saying no reference was given and reports an already-fixed bug
   // as live, and Stage 3 turns a genuine retraction into NEEDS_MORE_INFO.
   //
@@ -765,13 +755,13 @@ function citedReference(value) {
       // #412, and owner/repo#412
       '[0-9a-z._-]*#[0-9]+',
       // Advisory IDs, recognised by REGISTRY NAME rather than by shape. Every
-      // shape rule tried here mis-classified in both directions: "one hyphen and
-      // a digit" made `internal-fix-2` and `fixed in a post-2020 refactor`
-      // advisory IDs and retracted live findings, "the last segment ends in a
-      // digit" threw out about 1 real GHSA ID in 20, and "every segment is four
-      // or more characters" then threw out `PYSEC-2021-19`, `OSV-2021-9`,
-      // `DSA-4879-1` and `USN-5678-1` — writing "no reference given" over a
-      // correct citation and reporting a fixed bug as live. A shape cannot tell
+      // shape rule mis-classifies in both directions: "one hyphen and a digit"
+      // makes `internal-fix-2` and `fixed in a post-2020 refactor` advisory IDs
+      // and retracts live findings, "the last segment ends in a digit" throws out
+      // roughly one real GHSA ID in twenty, and "every segment is four or more
+      // characters" throws out `PYSEC-2021-19`, `OSV-2021-9`, `DSA-4879-1` and
+      // `USN-5678-1` — writing "no reference given" over a correct citation and
+      // reporting a fixed bug as live. A shape cannot tell
       // an ID from an English phrase because registries did not agree on one. An
       // allowlist is honest about what it knows: a name it has never heard of is
       // not silently promoted, and a name it has is matched against that
@@ -791,8 +781,8 @@ function citedReference(value) {
       bound + '(cve|rustsec|pysec|osv|go|dsa|usn|dla|zdi|mal|alsa|elsa|talos)[-:][0-9]+[-:][0-9a-z]+',
       // v3, v2.3.1, 2.3.1. The trailing lookahead refuses a version that is part
       // of a FILENAME: `src/handlers/auth-v2.go:118` is the bare file:line
-      // challenge 4's own prompt names as a non-citation, and `v2` inside it
-      // satisfied a consuming boundary group.
+      // challenge 4's own prompt names as a non-citation, and without the
+      // lookahead the `v2` inside it satisfies a consuming boundary group.
       bound + '(v[0-9]+([.][0-9]+)*|[0-9]+([.][0-9]+){2,})(?![0-9a-z]|[.][a-z])',
       // PR 4521, issue #1234, release 3, gh-1234.
       bound + '(pr|pull|issues?|bug|ticket|gh|release)[ #-]+[0-9]+',
@@ -800,7 +790,7 @@ function citedReference(value) {
       // keyword may NOT be reached through a path separator, and that is the
       // whole difference between this branch and the one above it: with `/` in
       // the shared separator class, `src/bug/12.go` and `tests/issues/42/repro.py`
-      // both became citations, contradicting this function's own rule that a bare
+      // are both citations, contradicting this function's own rule that a bare
       // `file:line` is not one. Inside a full URL the `https?://` branch already
       // matches, so nothing is lost by refusing the path form here.
       '(^|[^0-9a-z/])(pr|pull|issues?|bug|ticket|gh|release)/[0-9]+',
@@ -822,9 +812,9 @@ function upstreamFixStands(historyVerdict) {
   if (!ref) return null
   // `!== true`, not `=== false`. Only an affirmative "this fix is complete"
   // retracts, because the caller treats a non-partial fix as terminal: with
-  // `=== false`, an omitted flag was `undefined`, which is not `false`, so a
-  // PARTIAL fix that nobody flagged retracted the whole finding — the same
-  // silent discard the `reference` check above exists to stop, one field over.
+  // `=== false`, an omitted flag is `undefined`, which is not `false`, so a
+  // PARTIAL fix that nobody flagged retracts the whole finding — the same silent
+  // discard the `reference` check above exists to stop, one field over.
   // A fix flagged partial is not lost: the impact prompt is told about it and the
   // analysis continues against what remains.
   const partial = historyVerdict.complete !== true
@@ -866,7 +856,8 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   // arg validator reads it — an affirmative, non-blank statement of what was read.
   // Anything else, including a forgotten `layers` field, is still the vacuous pass
   // and still BLOCKED. This is the checkpoint's own "or confirmed none exist",
-  // which was unreachable while the only way to say it was to invent a layer.
+  // which is unreachable unless there is a way to say it other than inventing a
+  // layer.
   const declaredNone = typeof layersSearched === 'string' && layersSearched.trim() !== ''
   if (attemptedLayers === 0 && !declaredNone) {
     return {
@@ -876,10 +867,10 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   }
 
   // Counted, not tested for zero yet: the two signs are two different failures
-  // and they do not belong at the same precedence. `> 0` alone was the original
-  // defect — a negative difference silently passed a check meant to catch a
-  // missing one — and `!== 0` fixed that by promoting BOTH to the same rank,
-  // which was the next one.
+  // and they do not belong at the same precedence. `> 0` alone lets a negative
+  // difference slip silently past a check meant to catch a missing verdict;
+  // `!== 0` catches both by collapsing them to one rank, which is the opposite
+  // error, for the reason the next two blocks give.
   const missing = attemptedLayers - verdicts.length
 
   // MORE verdicts than agents dispatched first, and above everything else: some
@@ -896,28 +887,29 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   // The layer verdicts are decided BEFORE every "did that agent run" check, and
   // the order is load-bearing. A blocking layer means the finding is unreachable
   // whatever recovery, the threat model or the git history say, so it outranks a
-  // dead sibling agent: putting the liveness checks first turned a firm
-  // NOT_EXPLOITABLE into "could not determine" whenever the recovery agent
-  // happened to die, which throws away the answer the fan-out had already found.
+  // dead sibling agent: with the liveness checks first, a firm NOT_EXPLOITABLE
+  // degrades to "could not determine" whenever the recovery agent happens to die,
+  // throwing away the answer the fan-out has already found.
   //
-  // The missing-LAYER-agent count is such a check, and it used to sit above this
-  // filter — so the same discarding happened whenever a sibling LAYER agent died,
-  // which is the likeliest death of all: there are up to four of them. The layers
-  // are conjunctive (a PROCEED needs the payload to survive every one), so one
-  // that stops the payload settles reachability on its own and the dead sibling
-  // cannot overturn it.
+  // The missing-LAYER-agent count is such a check, and it sits BELOW this filter
+  // for the same reason: above it, the same discarding happens whenever a sibling
+  // LAYER agent dies, which is the likeliest death of all — there are up to four
+  // of them. The layers are conjunctive (a PROCEED needs the payload to survive
+  // every one), so one that stops the payload settles reachability on its own and
+  // the dead sibling cannot overturn it.
   const blocked = verdicts.filter((l) => l.verdict === 'PAYLOAD_STOPPED_HERE')
 
-  // A referenced, complete upstream fix outranks the blocking layer, and this is
-  // a reordering rather than a new rule: both outcomes retract the finding, so
-  // nothing here makes a false positive easier to report — only the REASON the
-  // orchestrator relays changes, and one of the two reasons is strictly better.
+  // A referenced, complete upstream fix outranks the blocking layer. Both
+  // outcomes retract the finding, so the order cannot make a false positive
+  // easier to report — only the REASON the orchestrator relays changes, and one
+  // of the two reasons is strictly better.
   //
   // The two coincide constantly, because the usual shape of an already-fixed
   // finding is a fix one layer up that a layer agent then correctly reports as
-  // BLOCKS. `already-fixed`'s grader asks for the commit — "the reason has to be
-  // the fix, cited as evidence" — and `blocked at _digest (auth.py:31)` does not
-  // carry it. The blocking layer is named in the reason too, so nothing is lost.
+  // stopping the payload. `blocked at _digest (auth.py:31)` does not tell the
+  // reader the bug is dead upstream, and it cites nothing they can go and read;
+  // `already fixed by <commit>` does both. The blocking layer is named in the
+  // reason too, so nothing is lost.
   const fix = upstreamFixStands(historyVerdict)
   if (fix && !fix.partial) {
     return {
@@ -955,8 +947,8 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   }
 
   // Read the affirmative value. Grading by exclusion — anything not stopped and
-  // not UNCERTAIN — made a pass the fall-through for a verdict this script does
-  // not recognise, on the checkpoint that carries the measured delta.
+  // not UNCERTAIN — makes a pass the fall-through for any verdict this script
+  // does not recognise, on the checkpoint that decides reachability.
   const passed = verdicts.filter((l) => l.verdict === 'PAYLOAD_REACHES_SINK')
   if (passed.length !== attemptedLayers) {
     return {
@@ -1001,15 +993,15 @@ function decideGate(verdicts, recoveryVerdict, threatVerdict, historyVerdict, at
   if (threatVerdict.inScope !== 'YES') {
     return { status: 'NEEDS_MORE_INFO', reason: 'scope ambiguous; the declared scope does not settle whether this component is covered' }
   }
-  // `byDesignIndicators`, the field collected to gate this, was never read: the
-  // boolean alone returned NOT_VULNERABLE, which is the self-reported gate this
-  // plugin exists to replace. validation-dimensions.md and checkpoint 3.3 both
-  // set the bar at "two or more, plus a search", and the captured run in
-  // tests/fixtures shows the split — `byDesign: true, byDesignIndicators: 1`
-  // beside evidence reading "Count = 1/3. Below the 'two or more' bar, so this
-  // is not a by-design dismissal on indicators alone". The prose was right and
-  // the boolean dismissed anyway. Below the bar this is a flag to check, not a
-  // verdict, so the analysis continues rather than halting.
+  // The COUNT gates this, not the boolean: returning NOT_VULNERABLE on the
+  // boolean alone is the self-reported gate this plugin exists to replace.
+  // validation-dimensions.md and checkpoint 3.3 both set the bar at "two or more,
+  // plus a search", and the two fields routinely disagree — an agent will report
+  // `byDesign: true, byDesignIndicators: 1` beside evidence reading "Count = 1/3.
+  // Below the 'two or more' bar, so this is not a by-design dismissal on
+  // indicators alone", the prose right and the boolean dismissing anyway. Below
+  // the bar this is a flag to check, not a verdict, so the analysis continues
+  // rather than halting.
   if (threatVerdict.byDesign && Number(threatVerdict.byDesignIndicators) >= 2) {
     return { status: 'NOT_VULNERABLE', reason: why('threat-model agent reported by-design but gave no evidence') }
   }
@@ -1035,7 +1027,7 @@ if (gate.status !== 'PROCEED') {
 
 // Pure. Which deep-route proofs actually block the finding.
 //
-// Two rules, and each of them cost a graded case:
+// Two rules:
 //
 // `applies === true`, not merely truthy and not defaulted. A proof that says the
 // question does not bear on this finding has not answered it, and an omitted or
@@ -1046,8 +1038,8 @@ if (gate.status !== 'PROCEED') {
 // The result is CARRIED rather than terminal. A layer is on the attack path and
 // is conjunctive with its siblings — one that stops the payload settles it. A
 // proof is an auxiliary argument by a single agent that saw one question, and
-// making it terminal put it above the impact stage, the severity cap and the six
-// gates, none of which then ran. `gateMathBounds` and `gateEnvironment` are those
+// making it terminal puts it above the impact stage, the severity cap and the six
+// gates, none of which then run. `gateMathBounds` and `gateEnvironment` are those
 // same two questions asked again with all the evidence in view, so routing a
 // blocking proof to them produces a verdict that names the gate it failed
 // instead of naming the agent that raised its hand first.
@@ -1080,7 +1072,8 @@ if (blockingProof.length > 0) {
 // algebraic bounds proof or establishes the threading model, so a null read as
 // "did not block" pays for the deep route and enforces none of it — the finding
 // reaches the six gates with the extra evidence missing and only a line of prose
-// telling the gate agent so, which is the self-report this port exists to remove.
+// telling the gate agent so, which is the self-report the deep route exists to
+// replace.
 //
 // UNCERTAIN is not a death — two of the three are asked a question that often does
 // not apply and set `applies: false` — so only a missing verdict blocks.
@@ -1131,7 +1124,7 @@ verified impact is the downgraded one, not the original claim.
                  available.
     DISPROVEN    the evidence positively shows there is no impact.
   Only VERIFIED continues, so grading a real-but-smaller impact as NOT_VERIFIED
-  discards a genuine finding. That is not hypothetical: it cost a graded case.
+  discards a genuine finding.
 
 Attribute the root cause: internal, integration, or external. If it is not
 internal, state the external precondition the attack requires.
@@ -1160,14 +1153,14 @@ finding specifically has to establish.`,
   { label: 'impact', phase: 'Impact', schema: IMPACT_SCHEMA, effort: 'high' },
 )
 
-// The cap is applied HERE, before any early exit, and this position is the fix
-// for a defect the first measured sweep exposed. It used to run after the impact
-// guard and after `missingPrecondition`, both of which return the `impact` object
-// verbatim — so a finding that exited at either one handed the orchestrator the
-// agent's own uncapped `severity`, with no correction and no note. The second of
-// those exits fires PRECISELY when the root cause is integration or external with
-// the precondition unstated, which is the single most likely non-passing outcome
-// for exactly the findings the cap exists to bound.
+// The cap is applied HERE, before any early exit, and the position is
+// load-bearing. The impact guard and `missingPrecondition` below both return the
+// `impact` object verbatim, so a cap applied after them hands the orchestrator
+// the agent's own uncapped `severity` on every finding that exits at either one,
+// with no correction and no note. The second of those exits fires PRECISELY when
+// the root cause is integration or external with the precondition unstated, which
+// is the most likely non-passing outcome for exactly the findings the cap exists
+// to bound.
 //
 // `impact` may be null if the agent died; `capSeverity` is total over that.
 const capped = impact
@@ -1184,11 +1177,10 @@ const severityFields = { severity: capped.severity, severityCorrection: capped.n
 // which is not a licence to spend the rest of the pipeline on it.
 //
 // "No impact established" is not the same as "the reported severity was too
-// high", and conflating the two cost a graded case: the impact agent performed
-// exactly the downgrade it was asked for — "NOT VERIFIED as stated and is
-// downgraded to LOW" — and then returned NOT_VERIFIED, so the gate killed a
-// real, demonstrable bug and the case scored below the arm with no plugin at
-// all. NOT_VERIFIED now returns NEEDS_MORE_INFO rather than a false-positive
+// high", and the two are easy to conflate: an agent that performs exactly the
+// downgrade it was asked for — "NOT VERIFIED as stated and is downgraded to
+// LOW" — and then reports NOT_VERIFIED is describing a real, demonstrable bug.
+// NOT_VERIFIED therefore returns NEEDS_MORE_INFO rather than a false-positive
 // verdict, because "could not establish" is not "does not exist".
 if (!impact || impact.result !== 'VERIFIED') {
   const stated = impact ? impact.result : 'missing'
@@ -1277,13 +1269,12 @@ if (capped.ambiguous) {
 // both, and a prompt is not an enforcement mechanism: what comes back is
 // whatever severity the agent chose, and an inflated severity on a finding that
 // only fires when a third party misbehaves is exactly the failure this skill
-// exists to prevent. Measured: this is why the arm that enforced it scored 3/3
-// on `integration-cap` where the arm that asked for it scored 0/3.
+// exists to prevent.
 //
-// It CORRECTS rather than blocks. concept-prover returned BLOCKED here, which is
-// right when an agent has already written the severity into a report file — that
-// file is now wrong and re-running the workflow will not fix it, so Stage 3
-// keeps that behaviour. On the cheap path there is no file, Stage 1 owes the
+// It CORRECTS rather than blocks. BLOCKED is the right answer once an agent has
+// written the severity into a report file — that file is now wrong and re-running
+// the workflow will not fix it, which is why Stage 3 blocks. On the cheap path
+// there is no file, Stage 1 owes the
 // user a verdict, and the cap is arithmetic: applying it is strictly better than
 // refusing to answer. The correction is reported, never silent.
 //
@@ -1294,13 +1285,13 @@ if (capped.ambiguous) {
 // `high` inside "highly" and `critical` inside "critically", and an unbounded
 // substring test read all three as ratings.
 //
-// It reports what the string names and decides nothing. Five consecutive rounds
-// tried to make one string yield one rating — leftmost name, then highest named,
-// then highest-only-where-it-lowers — and each traded a false accept for a false
-// reject, because "Critical (affects low-privilege users)" and "Low (the path is
-// not business-critical)" are the same shape with opposite intent. No positional
-// rule can separate them. Reading the levels out and letting the caller refuse
-// the ambiguous ones can.
+// It reports what the string names and decides nothing. Every rule that tries to
+// make one string yield one rating — leftmost name, highest named,
+// highest-only-where-it-lowers — trades a false accept for a false reject,
+// because "Critical (affects low-privilege users)" and "Low (the path is not
+// business-critical)" are the same shape with opposite intent. No positional rule
+// can separate them. Reading the levels out and letting the caller refuse the
+// ambiguous ones can.
 function namedLevels(severity) {
   const LEVELS = ['critical', 'high', 'medium', 'low', 'informational']
   return LEVELS.filter((name) => new RegExp(`\\b${name}\\b`, 'i').test(String(severity)))
@@ -1309,11 +1300,10 @@ function namedLevels(severity) {
 function capSeverity(severity, rootCause, classification) {
   const CAP = 'Medium'
   // Affirmative — "is this rating at or above the cap?" — rather than by
-  // exclusion. `severity !== 'Critical' && severity !== 'High'` returned early
-  // for every spelling the enum does not enforce, and `required` is the only
-  // thing the runtime validator enforces: 'critical', 'CRITICAL' and
-  // 'Critical (RCE)' all escaped the cap uncorrected, which is the one mechanism
-  // the measured head-to-head credited 3/3 against 0/3.
+  // exclusion. `severity !== 'Critical' && severity !== 'High'` returns early for
+  // every spelling the enum does not enforce, and `required` is the only thing
+  // the runtime validator enforces: 'critical', 'CRITICAL' and 'Critical (RCE)'
+  // then escape the cap uncorrected, which is the whole mechanism gone.
   //
   // EXACTLY ONE level named is a rating. More than one is not: 'Medium/High',
   // 'Critical (affects low-privilege users)' and 'Low (the affected path is not
@@ -1361,22 +1351,24 @@ function capSeverity(severity, rootCause, classification) {
 phase('Verdict')
 
 // Gate 2 is stated TWICE below, under one `impact.rootCause` conditional, and the
-// duplication is the point. 2.6.0 rewrote the criterion to be about the PATH only,
-// so that an integration finding could stop being charged for its external trigger
-// twice — but it rewrote it for every finding, and `decideVerdict` branches on the
-// enum alone, so the trust-of-source requirement left the pipeline entirely.
+// duplication is the point. Stating the criterion as being about the PATH only —
+// so an integration finding is not charged twice for its external trigger — is
+// correct where that trigger is the accepted premise and wrong everywhere else,
+// and `decideVerdict` branches on the enum alone, so one relaxed wording for all
+// findings drops the trust-of-source requirement out of the pipeline entirely.
 // Checkpoint 2.4b does NOT answer it for an internal root cause: 2.4b asks whether
 // the trigger comes from outside this repository, not whether the value at the sink
-// is attacker-controlled. `internal` therefore keeps the pre-2.6.0 wording, which
-// is the one every measured false positive was caught by; the relaxation applies
-// only where the premise it relies on is actually established.
+// is attacker-controlled. `internal` therefore keeps the strict wording — the one
+// that catches a real sink fed by a value no attacker can influence — and the
+// relaxation applies only where the premise it relies on is actually established.
 //
-// The by-design objection that did NOT reach the dismissal bar. checkpoint 3.3
+// The by-design objection that did NOT reach the dismissal bar. Checkpoint 3.3
 // puts that bar at two indicators plus a search, so one is "a flag to check, not
-// a verdict" — but raising the bar routed the below-bar signal NOWHERE: the
-// impact prompt, this prompt and `decideVerdict` all went on never seeing
-// `threat`, so a documented design-intent objection was dropped and the finding
-// came back TRUE_POSITIVE with no record it had been raised. It is carried here,
+// a verdict" — but a bar with nothing below it routes the below-bar signal
+// NOWHERE: the impact prompt, this prompt and `decideVerdict` otherwise never see
+// `threat` at all, so a documented design-intent objection is dropped and the
+// finding comes back TRUE_POSITIVE with no record it was ever raised. It is
+// carried here,
 // to the one agent holding every other piece of evidence, and deliberately NOT
 // added to `overruled`: that list forbids TRUE_POSITIVE outright, which is the
 // terminal dismissal on a single indicator that raising the bar removed.
@@ -1418,8 +1410,8 @@ data, not an assumption; and inventing a mitigation you have not read in the
 source is the failure mode that loses real findings.
 
 Then apply the six gates and report each as PASS or FAIL. The criteria are here
-rather than in a reference file on purpose: they used to be in both, and a gate
-criterion that exists in two places is one an agent can read the stale copy of.
+rather than in a reference file on purpose: a gate criterion that exists in two
+places is one an agent can read the stale copy of.
 
   gateProcess         every stage above produced concrete evidence, not assertion
   gateReachability    ${impact.rootCause === 'internal' ? `attacker-controlled data reaches the sink through a path a
@@ -1479,9 +1471,9 @@ No speculative language in verdictReason: "probably", "likely", "might", "would"
   { label: 'gates', phase: 'Verdict', schema: VERDICT_SCHEMA, effort: 'high' },
 )
 
-// Pure. fp-check's rule is "all six gate reviews must pass" before anything is
-// reported as a vulnerability, and it was prose in a reference file that an
-// agent was asked to honour. The six gates are now arithmetic over six enums.
+// Pure. The rule is "all six gate reviews must pass" before anything is reported
+// as a vulnerability. As prose in a reference file that is something an agent is
+// asked to honour; here it is arithmetic over six enums.
 //
 // A missing verdict counts AGAINST the finding, and unresolved uncertainty is
 // its own outcome rather than being resolved in either direction.
@@ -1494,9 +1486,8 @@ No speculative language in verdictReason: "probably", "likely", "might", "would"
 // silently dropped, because a non-empty list forbids TRUE_POSITIVE. Deferring is
 // therefore only ever a decision to keep analysing, never a decision to report.
 //
-// It took a THIRD input until 2.5.0 — the unresolved brocard questions. The
-// brocard pre-gate is gone and nothing else produced that list, so a parameter
-// that is always empty has been removed rather than left to read as coverage.
+// Two inputs and no more: a parameter no stage still fills would read as coverage
+// while always arriving empty.
 function decideVerdict(result, overruled) {
   const dismissals = (overruled || []).filter(Boolean)
   if (!result) {

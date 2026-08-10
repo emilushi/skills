@@ -13,16 +13,44 @@ Three stages in a fixed order, behind two questions asked once up front.
 | **2 Online** | on request | the project's published policy, how the bug is reached in the published project, bounty scope, and one agent per named venue searching for past reports and duplicates. Fails closed when offline |
 | **3 PoC** | on request | build the exploit against the real code in an isolated worktree, execute it, then five agents that did not build it try to reject it |
 
-**Stage 1 alone reaches a verdict.** Stages 2 and 3 can only narrow or correct
-it, and both default to off: a full PoC pipeline was measured at **$13.34 against
-$2.15** on the same finding, which is worth paying to settle a disputed finding
-and wasteful when the static analysis already answered.
+Every finding gets **TRUE POSITIVE**, **FALSE POSITIVE**, or **NEEDS MORE INFO**.
+The third means the analysis could not settle the question — not that the finding
+was refuted, which is what FALSE POSITIVE means.
 
-Every finding gets **TRUE POSITIVE**, **FALSE POSITIVE**, or **NEEDS MORE
-INFO** — and the third is not a hedge. Conflating "the claim as stated is
-unproven" with "no vulnerability exists" killed a real, demonstrable finding
-during this plugin's development, so the schema carries that state explicitly and
-the verdict function returns it rather than guessing.
+A few terms used throughout:
+
+- **layer** — a validation check that exists between the entry point and the
+  vulnerable operation: an authorization check, an allowlist, a bounds check.
+  Stage 1 spends one agent on each.
+- **sink** — the vulnerable operation itself. **Entry point** — where attacker
+  data gets in.
+- **root cause** — where the bad value originates: `internal` (this code),
+  `integration` (a component this code trusts), or `external` (outside the
+  deployment). It decides the severity cap.
+
+## The six gates
+
+Stage 1 ends by putting the finding through six gates. **All six must pass before
+anything is called a TRUE POSITIVE**, and the decision is arithmetic over their
+values, not a judgement call:
+
+| Gate | Passes when |
+|---|---|
+| **1 Process** | every stage produced concrete evidence rather than assertion |
+| **2 Reachability** | attacker-controlled data reaches the sink by a path a real caller can drive |
+| **3 Real Impact** | the harm is RCE, privilege escalation or information disclosure — not reduced robustness, and not a defence-in-depth gap behind intact primary controls |
+| **4 PoC Validation** | the attack path is demonstrated end to end |
+| **5 Math Bounds** | the arithmetic permits the vulnerable condition. `N/A` when it is not a bounds or arithmetic finding — the only gate that may be N/A |
+| **6 Environment** | no compiler, runtime, OS or framework protection prevents exploitation **entirely**. Raising the bar is not preventing |
+
+**Gate 2 is where most false positives die.** A proof of concept that calls the
+vulnerable function directly proves attacker control *of the sink*, which is not
+control of any entry point a real caller can reach — the single most common way a
+reported bug turns out not to be one.
+
+Six passes are necessary but not sufficient: anything left unresolved returns
+NEEDS MORE INFO instead, so a payload showing six passes may still not be a
+TRUE POSITIVE.
 
 ## Installation
 
@@ -60,10 +88,12 @@ orchestrator cannot argue with:
 | Out-of-scope needs a quoted policy clause; "probably" is `unclear` | `scopeHalt` |
 | Destructive PoC operations only at safety levels 1–2 | `missingArgs` in Stage 3 |
 
-Two of them carry a measured delta. In a head-to-head over identical cases, the
-arm that enforced the already-fixed retraction scored 3/3 against 0/3, and the arm
-that enforced the severity cap 3/3 against 0/3. Both had previously been stated in
-a prompt and self-reported.
+Two of these were measured directly. On identical test cases, the configuration
+enforcing the already-fixed retraction got all 3 runs right where the one without
+it got 0 of 3, and the severity cap likewise. Both rules had previously been
+written in a prompt and left to the agent to apply — which is the difference the
+numbers are measuring. See [PR-COMMENT.md](PR-COMMENT.md) for the method and
+[MEASUREMENTS.md](MEASUREMENTS.md) for every run.
 
 ## Components
 
@@ -77,7 +107,7 @@ skills/fp-check/
   references/          the criteria, the dismissal grounds, the lookup tables
   scripts/poc-lint.sh  the PoC quality gate
 tests/                 four layers; see tests/README.md
-evals/                 7 cases with ablation baselines
+evals/                 7 cases, each run with and without the plugin
 ```
 
 ### Reference files
@@ -94,14 +124,13 @@ evals/                 7 cases with ablation baselines
 | [evidence-templates.md](skills/fp-check/references/evidence-templates.md) | Data flow, algebraic bounds proofs, attacker control, devil's advocate |
 | [poc-anti-patterns.md](skills/fp-check/references/poc-anti-patterns.md) | PoC construction rules, enforced by `scripts/poc-lint.sh` |
 | [test-integration.md](skills/fp-check/references/test-integration.md) | Framework patterns for a test-integrated PoC |
-| [safety-guidelines.md](skills/fp-check/references/safety-guidelines.md) | The five envelope levels |
+| [safety-guidelines.md](skills/fp-check/references/safety-guidelines.md) | The five safety envelope levels, from read-only analysis up to running an exploit against a live target |
 
 ## Routing
 
-Stage 1 picks its own route from the dispatch, and **standard is the default
-because the cheap path is doing real work**: measured, a linear checklist never
-escalated on any of seven eval cases and still matched a full pipeline at 2.3x
-less cost.
+Stage 1 picks its own route from the dispatch. **Standard is the default, and it
+is doing real work** — the cheaper path matched the full one on every test case,
+so do not reach for `deep` to feel thorough.
 
 **Deep** adds three proofs — API contracts and environmental protections, the
 algebraic bounds proof, and race feasibility — and runs the full 13
@@ -125,12 +154,3 @@ the suite to go red. Anything that survives is testing the model, not the plugin
 `tests/README.md` is the file to read before changing anything here. It records
 every dead end this plugin has been down — including four paid eval sweeps that
 were invalid, each of which produced a plausible-looking number.
-
-## Credits
-
-The dismissal grounds are adapted from William Woodruff,
-["Brocards for vulnerability triage"](https://blog.yossarian.net/2026/04/11/Brocards-for-vulnerability-triage);
-`vulnerability-triage-brocards` carries the full worked examples and edge cases.
-Stages 1 and 3 graft the checkpoint gates and the five independent
-false-positive challenges from the `concept-prover` plugin, and Stage 2 the roles
-from `online-triage`.

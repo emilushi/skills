@@ -11,12 +11,13 @@ export const meta = {
 //
 // `verification` is triage-static's return value, forwarded verbatim.
 //
-// Build and review are one script rather than two because the PoC is the only
-// thing that crosses between them, and as two dispatches that hand-off was a
-// standing hazard: build-poc's gate and review-poc's arg validator had to agree
-// on eight field names by hand, and twice they did not — a builder returning
-// whitespace for `path` or `pocType` returned BUILT and was then rejected
-// downstream, discarding a Phase 4 that had already been paid for.
+// Build and review are one script rather than two dispatches because the PoC is
+// the only thing that crosses between them, and split, that hand-off is a
+// standing hazard: the build gate and the review stage's arg validator would have
+// to agree on eight field names by hand, with nothing checking that they do. A
+// builder returning whitespace for `path` or `pocType` clears one and is rejected
+// by the other, discarding a build that has already been paid for. One script
+// means one definition of an acceptable build, in one place.
 
 // `args || {}`: an absent args object makes this destructure throw before
 // missingArgs can return BLOCKED.
@@ -86,14 +87,15 @@ const CHALLENGE_SCHEMA = {
       type: 'string',
       description: 'challenge 4 only: the commit, PR, issue or advisory ID for the fix. Empty for the other four',
     },
-    // Required for the same reason `reference` is, and against the same failure:
-    // `alreadyFixedStands` retracted on ANY cited award, so a fix that touched
-    // one of two sinks discarded a demonstrated, still-live bug whole. The
-    // prompt asked for complete-or-partial and the schema had nowhere to put it,
-    // so the answer arrived as prose and nothing read it. Required, because an
-    // omitted boolean is `undefined`, which is not `false`, and the gate below
-    // reads anything but an affirmative `true` as partial — with the field
-    // optional that would silently switch the retraction off instead.
+    // Required for the same reason `reference` is, and against the same failure.
+    // A fix that closes one of two sinks is not a retraction, but with no field
+    // for it the complete-or-partial answer challenge 4's prompt asks for arrives
+    // as prose and nothing reads it — leaving `alreadyFixedStands` to retract on
+    // ANY cited award and discard a demonstrated, still-live bug whole. Required
+    // rather than optional, because an omitted boolean is `undefined`, which is
+    // not `false`, and the gate below reads anything but an affirmative `true` as
+    // partial — so an optional field would silently switch the retraction off
+    // rather than default it to the safe answer.
     complete: {
       type: 'boolean',
       description: 'challenge 4 only: true only if the fix is WHOLE. false for a partial fix and for the other four',
@@ -118,12 +120,13 @@ const ARTIFACT_SCHEMA = {
     // Principle 5, and the ONLY place it is decided. poc-lint.sh's
     // `possible-reimplementation` is a NOTE that exits 0, because a grep cannot
     // tell a façade re-export, a pytest fixture or a local driver from a copy of
-    // the target — made fatal it returned BUILD_FAILED on all three. Demoting it
-    // without putting the question anywhere left nothing enforcing Principle 5
-    // at all: a PoC that pastes the vulnerable function in and exercises the copy
-    // passes the note AND rule 8, because the copy's own definition supplies the
-    // mention. This agent has Bash and both files, so it is the one reader that
-    // can answer it; `artifactProblem` reads the answer.
+    // the target — made fatal it would return BUILD_FAILED on all three. But a
+    // note enforces nothing on its own: a PoC that pastes the vulnerable function
+    // in and exercises the copy passes the note AND rule 8, because the copy's
+    // own definition supplies the mention rule 8 looks for. So the linter reports
+    // the fact and this gate decides on it: the reviewer compares the logic, and
+    // only the two clearing values clear. This agent has Bash and both files, so
+    // it is the one reader that can answer it; `artifactProblem` reads the answer.
     //
     // Required, and graded affirmatively below: an omitted or unrecognised value
     // is not a clearance. Three values rather than a boolean because the note
@@ -167,10 +170,7 @@ the usual way this finding is wrong.
 This is the challenge that separates a real finding from the most common false
 positive there is, so hold it to the entry point rather than to the sink. A PoC
 that calls the vulnerable function directly genuinely demonstrates attacker
-control OF THE SINK; that is not control of any reachable entry point. Measured:
-every baseline run on a case built exactly that PoC, exfiltrated seeded
-credentials, and reported a confirmed injection — while the guard at the entry
-point rejected the payload outright.`,
+control OF THE SINK; that is not control of any reachable entry point.`,
   },
   {
     key: 'recoverable',
@@ -232,26 +232,23 @@ path ever actually used?`,
 // dispatch: the finding was analysed and did not survive.
 //
 // It exists because the arg gate below is right about the outcome and wrong
-// about the reason, and the wrong reason is what the plugin's most expensive
-// failure mode feeds on. A settled finding used to come back as "triage-poc
+// about the reason, and the wrong reason is what this plugin's most expensive
+// failure mode feeds on. Without it, a settled finding comes back as "triage-poc
 // received an unusable arg shape: verification.status (...). Forward
 // triage-static's return value verbatim" — a complaint about the CALLER, on a
 // dispatch where the caller did everything right. The orchestrator is still
 // holding a user request for a PoC, reads that as "your dispatch was wrong, try
-// again", finds it cannot be made right, and builds the exploit by hand
-// instead. Traced, verbatim: "the downstream PoC-workflow's hard gate then
-// refused to run without a literal TRUE_POSITIVE string from that stage, so I
-// built and executed the PoC directly instead, per your explicit request."
+// again", finds it cannot be made right, and builds the exploit by hand instead.
 //
-// The behaviour it reverts to is measured, not hypothetical: three no-plugin
-// runs on `dead-route` wrote a PoC calling the sink directly, executed real
-// command injection, and led with "Confirmed command injection" before noting
-// the route does not exist.
+// What it falls back to is the behaviour this whole stage exists to replace: a
+// hand-built PoC calls the sink directly, executes real command injection, and
+// leads with "Confirmed command injection" — while the route that reaches the
+// sink does not exist.
 //
-// So this path builds nothing, spends nothing and relaxes nothing — the exploit
-// is refused exactly as before. It states the refusal in terms of the finding
-// rather than in terms of the arguments, and names the deliverable that takes
-// the PoC's place.
+// So this path builds nothing, spends nothing and relaxes nothing; the exploit is
+// refused exactly as the arg gate would refuse it. All it changes is that the
+// refusal is stated in terms of the finding rather than in terms of the
+// arguments, and names the deliverable that takes the PoC's place.
 //
 // NEEDS_MORE_INFO and BLOCKED are deliberately NOT here. Neither is an answer:
 // one is a fact still to establish, the other an analysis that could not run,
@@ -267,10 +264,9 @@ path ever actually used?`,
 function settledByStageOne(a) {
   const verification = (a && a.verification) || {}
   const status = typeof verification.status === 'string' ? verification.status.trim() : ''
-  // DISMISSED was here until nothing emitted it: it was the removed brocard
-  // pre-gate's status, and SKILL.md went on documenting it as a Stage 1 return for
-  // two versions after 2.5.0 deleted the only thing that returned it. A status no
-  // workflow can produce reads as coverage this list does not have.
+  // Every entry must be a status triage-static can actually emit. A status no
+  // workflow can produce reads as coverage this list does not have, and nothing
+  // fails when it drifts out of the producing end — it simply never matches.
   const settled = [
     'FALSE_POSITIVE',
     'NOT_EXPLOITABLE',
@@ -302,31 +298,33 @@ function missingArgs(a) {
 
   need('baseDir', a && a.baseDir)
 
-  // `baseDir` had its PRESENCE validated and never its SHAPE, and that gap is the
-  // largest single source of variance measured on this plugin. On a 3-run sweep of
-  // `integration-cap` with identical input, two runs passed the TARGET REPO's path
-  // and one passed the plugin's: every read under `${baseDir}/references/` 404'd in
-  // first two. The impact agent could not read dismissal-grounds.md, the gate agent
-  // could not read false-positive-patterns.md, and those runs scored 0.000 and
-  // 0.333 against the third's 1.000. All three impact agents returned the same
-  // correct `Medium / integration` — the only difference was which files the
-  // agents downstream of them could open.
+  // `baseDir` needs its SHAPE checked and not only its PRESENCE, because the two
+  // paths a caller might supply are equally present and only one of them works.
+  // The working directory is the TARGET repo, so a caller that reconstructs the
+  // path instead of copying it passes the target's root: every read under
+  // `${baseDir}/references/` 404s, the impact agent cannot open
+  // dismissal-grounds.md, the gate agent cannot open false-positive-patterns.md,
+  // and both answer from memory. Nothing else about the dispatch differs — the
+  // finding, the impact and the severity are identical — so the whole of the
+  // difference is which files the agents downstream can open, which is why this
+  // is worth a gate rather than a convention.
   //
   // A workflow has no filesystem access, so existence cannot be checked here. The
-  // SHAPE can be, and it is exactly what the two failing dispatches got wrong: an
-  // absolute path ending in the skill directory. Reported rather than silently
-  // tolerated, because the failure is otherwise invisible — an agent that cannot
-  // read its reference file carries on and answers from memory.
+  // SHAPE can be, and the shape is what a reconstructed path gets wrong: the one
+  // that works is an absolute path ending in the skill directory. Reported rather
+  // than silently tolerated, because the failure is otherwise invisible — an agent
+  // that cannot read its reference file carries on and answers from memory.
   //
   // Written without a regex literal on purpose: the Python contract suite lexes
   // these scripts to strip strings and comments, and it REJECTS a regex literal
   // rather than risk mis-lexing one (test_a_regex_literal_is_rejected_rather_than_mis_lexed).
-  // Adding one here failed 51 of its tests on unmutated code and took 27 mutations
-  // with it, because a mutation whose baseline is red proves nothing.
-  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir cleared
-  // `need` — it is neither undefined, null nor a blank string — and then read as
-  // '' here, so the shape check below was skipped entirely and every reference
-  // path became '[object Object]/references/...'.
+  // One here turns that whole suite red on unmutated code, and a mutation whose
+  // baseline is red proves nothing.
+  //
+  // `String(...)`, not a `typeof === 'string'` test. A non-string baseDir clears
+  // `need` — it is neither undefined, null nor a blank string — and would read as
+  // '' here, skipping the shape check below entirely while every reference path
+  // resolves to '[object Object]/references/...'.
   const base = String((a && a.baseDir) ?? '').trim()
   const withoutSlash = base.endsWith('/') ? base.slice(0, -1) : base
   const shaped = withoutSlash.startsWith('/') && withoutSlash.endsWith('/skills/fp-check')
@@ -347,13 +345,12 @@ function missingArgs(a) {
   // triage-static's return value verbatim always carries it.
   need('verification.history.fixed', history.fixed)
   need('verification.history.searched', history.searched)
-  // "Only a TRUE POSITIVE justifies building" was stated in SKILL.md and left to
-  // the orchestrator to honour. It is not safe there: triage-static's failing
-  // returns carry a fully populated `impact` and `severity`, so forwarding a
-  // FAILED verification verbatim — exactly what the orchestrator is told to do
-  // with a passing one — satisfies every other field here and buys a PoC for a
-  // finding that failed its own gates. A blocking gate the caller can skip by
-  // not reading it is not a gate.
+  // "Only a TRUE POSITIVE justifies building" cannot be left to the orchestrator
+  // to honour. triage-static's failing returns carry a fully populated `impact`
+  // and `severity`, so forwarding a FAILED verification verbatim — exactly what
+  // the orchestrator is told to do with a passing one — satisfies every other
+  // field here and buys a PoC for a finding that failed its own gates. A blocking
+  // gate the caller can skip by not reading it is not a gate.
   //
   // This is still the only gate on the build path. settledByStageOne runs
   // earlier and reaches the same outcome for the five statuses that are a
@@ -363,12 +360,13 @@ function missingArgs(a) {
   // Removing this check would let all of those through.
   const status = (a && a.verification && a.verification.status) || ''
   if (status !== 'TRUE_POSITIVE') {
-    // The message says TRUE_POSITIVE and not "cleared all six gates", which is
-    // what it used to say and is no longer the same thing: since a carried
-    // question blocks a TRUE_POSITIVE in code, Stage 1 can pass all six gates and
-    // still return NEEDS_MORE_INFO. The gate is unchanged — an open question is a
-    // fact to resolve, not a finding to demonstrate — but a rejection that names a
-    // criterion the finding did meet sends the reader looking in the wrong place.
+    // The message says TRUE_POSITIVE and not "cleared all six gates", because
+    // those are not the same criterion: a carried question blocks a TRUE_POSITIVE
+    // in code, so Stage 1 can pass all six gates and still return
+    // NEEDS_MORE_INFO. An open question is a fact to resolve rather than a finding
+    // to demonstrate, and this gate refuses it either way — but a rejection that
+    // names a criterion the finding DID meet sends the reader to the wrong place
+    // to fix it.
     missing.push(
       `verification.status (must be 'TRUE_POSITIVE'; got ${status ? `'${status}'` : 'nothing'} — only a finding Stage 1 confirmed outright justifies building an exploit. Six passing gates are necessary and not sufficient: an unresolved uncertainty still returns NEEDS_MORE_INFO, and that is a missing fact to answer rather than a bug to demonstrate)`,
     )
@@ -421,10 +419,11 @@ function missingArgs(a) {
 //
 // The status stays BLOCKED because BLOCKED means "this stage did not run", which
 // is exactly and correctly what happened. What tells a settled finding from a
-// malformed dispatch is `settledBy`, a field rather than a prefix of prose:
-// DO_NOT_SUBMIT is this plugin's cautionary tale about three outcomes sharing
-// one status and being told apart by pattern-matching the `reason`, and the
-// documented mapping sent all three to FALSE POSITIVE.
+// malformed dispatch is `settledBy`, a field rather than a prefix of prose. When
+// several outcomes share one status and are told apart by pattern-matching the
+// `reason`, whatever mapping the reader settles on is wrong for most of them:
+// that is how a retraction, a false positive and an incomplete report all end up
+// reported as FALSE POSITIVE under DO_NOT_SUBMIT.
 const settled = settledByStageOne(args)
 if (settled) {
   log(`BLOCKED: Stage 1 settled this as ${settled.status}; there is no exploit to build.`)
@@ -456,9 +455,10 @@ function selectAttempts(all, max) {
 // from a dead builder agent.
 //
 // Trimmed, not merely truthy. JSON Schema `required` checks presence and not
-// content, so `output: '   '` is schema-valid: a builder reporting whitespace for
-// all of them passed this gate, returned BUILT, and that whitespace reached all
-// five challenge prompts as the "Captured output" they are meant to judge.
+// content, so `output: '   '` is schema-valid: on a truthiness test a builder
+// reporting whitespace for all of them clears this gate and returns BUILT, and
+// that whitespace reaches all five challenge prompts as the "Captured output"
+// they are meant to judge.
 //
 // The string list is inline rather than hoisted to a const: the tests extract
 // this function and evaluate it alone, where a free variable is a ReferenceError.
@@ -585,8 +585,8 @@ discards a PoC that actually worked.${retryContext}`,
   // Trimmed, not merely truthy, for the same reason isAcceptableBuild trims: a
   // schema-valid `failureReason: '   '` is truthy, and this string is both
   // BUILD_FAILED's `reason` — which SKILL.md tells the orchestrator to relay as the
-  // missing fact — and the next attempt's "Why it failed:", which would have read as
-  // blank space.
+  // missing fact — and the next attempt's "Why it failed:", either of which would
+  // otherwise read as blank space.
   lastFailure = {
     candidate: candidate.description,
     failureReason: result
@@ -656,10 +656,11 @@ Do these, with Bash:
 Report what you observed. Do not repair the PoC and do not re-run the linter
 until it passes; a failing check is the finding.`
 
-// The artifact check runs at `medium`, not `low`. It was three shell facts until
-// the Principle 5 verdict moved into it, and that step is a logic comparison
-// across two files. The comment sits here rather than beside the call so that
-// test_no_unbounded_fanout still sees CHALLENGES inside its window.
+// The artifact check runs at `medium`, not `low`: three of its four steps are
+// shell facts, but the Principle 5 verdict is a logic comparison across two
+// files and does not survive a cheaper model. The comment sits here rather than
+// beside the call so that test_no_unbounded_fanout still sees CHALLENGES inside
+// its window.
 const checks = await parallel([
   () => agent(ARTIFACT_PROMPT, { label: 'artifact-check', phase: 'Challenges', schema: ARTIFACT_SCHEMA, effort: 'medium' }),
   ...CHALLENGES.map((c) => () =>
@@ -730,8 +731,8 @@ function artifactProblem(check) {
   }
   // And the CLEARING path is trimmed too, as every sibling gate in this file is.
   // `required` checks presence, not content, so `evidence: ''` validates: a
-  // reviewer could clear Principle 5 having compared nothing and the one check
-  // that decides it became a self-report. Both clearing answers are judgements
+  // reviewer can clear Principle 5 having compared nothing, and the one check that
+  // decides it collapses into a self-report. Both clearing answers are judgements
   // about the two bodies — NOT_DEFINED means no copy under ANY name, not merely
   // no symbol of that name — so both owe the locations they were reached from.
   if (!String(check.evidence || '').trim()) {
@@ -764,36 +765,35 @@ function tallyChallenges(challengeVerdicts, expectedKeys) {
 //
 // It then requires the fix to be CITED, and returns that citation or null. This
 // is triage-static's `upstreamFixStands` rule — `fixed: YES` with no reference is
-// not a retraction — arriving one stage later: an unreferenced retraction is the
-// one failure mode that silently discards a real finding, and here it discarded a
-// built, executed, lint-clean one on nothing but a dead agent. The missing verdict
+// not a retraction — applied one stage later, and it matters more here: an
+// unreferenced retraction is the one failure mode that silently discards a real
+// finding, and what it would discard at this point is a built, executed,
+// lint-clean PoC, on nothing better than an agent that died. The missing verdict
 // still counts against the finding, in the only place it can honestly count:
 // `tallyChallenges` has already lowered the band by it, and the report has to
 // address it as unrebutted.
-//
-// This is one of the two mechanisms the head-to-head attributed the delta to:
-// 3/3 on `already-fixed` against 0/3 for the arm with no already-fixed gate.
 function alreadyFixedStands(unrebutted, challengeVerdicts) {
   if (!(unrebutted || []).some((v) => v && v.key === 'already-fixed')) return null
   const verdict = (challengeVerdicts || []).find((v) => v && v.key === 'already-fixed')
   // A PARTIAL fix is not a retraction — checkpoints.md 5.1: "an incomplete or
   // partial fix is reported as such". `!== true`, and for the same reason Stage
   // 1's `upstreamFixStands` uses it one workflow over: an omitted flag is
-  // `undefined`, which is not `false`, so a fix that closed one of two sinks
-  // discarded a demonstrated, still-live bug whole. It falls through from here
-  // to the band, which has already counted the challenge against the finding.
+  // `undefined`, which is not `false`, so under a truthiness test a fix that
+  // closed one of two sinks discards a demonstrated, still-live bug whole. A
+  // partial fix falls through from here to the band, which has already counted
+  // the challenge against the finding.
   if (!verdict || verdict.complete !== true) return null
   // `reference`, not `evidence`. Every challenge is required to fill `evidence`,
-  // so reading the citation out of it made the check unfalsifiable — any argued
-  // win retracted. `reference` is the field that exists only to hold the commit,
+  // so reading the citation out of it makes the check unfalsifiable — any argued
+  // win retracts. `reference` is the field that exists only to hold the commit,
   // PR, issue or advisory ID, exactly as HISTORY_SCHEMA's is, and `'   '` is
   // schema-valid in both. `citedReference` is the shared test of what counts.
   return citedReference(verdict.reference)
 }
 
 // Pure. Duplicated verbatim from triage-static.js — see the reasoning there.
-// Two copies because these scripts have no module system; the alternative was
-// two different rules for one thing, which is what shipped.
+// Two copies because these scripts have no module system, and the alternative to
+// a duplicate is two divergent rules for one question.
 function citedReference(value) {
   // `new RegExp` from strings rather than regex literals: the contract suite
   // lexes these scripts and rejects a bare `/` in code position, because reading
@@ -801,9 +801,9 @@ function citedReference(value) {
   // check built on that text green.
   //
   // Matched ANYWHERE in the string, bounded by non-identifier characters, rather
-  // than split on whitespace with each token anchored. Anchoring rejected every
+  // than split on whitespace with each token anchored. Anchoring rejects every
   // ordinary wrapper a citation arrives in: `openssl/openssl#12345` — the
-  // canonical cross-repo form, and the integration case this search exists for —
+  // canonical cross-repo form, and the one a fix in an upstream dependency takes —
   // `torvalds/linux@a1b2c3d`, a backticked sha, `<https://...>`, a markdown link,
   // and `PR 4521`. A rejection here is not harmless in either direction: Stage 1
   // writes a note saying no reference was given and reports an already-fixed bug
@@ -822,11 +822,11 @@ function citedReference(value) {
       // #412, and owner/repo#412
       '[0-9a-z._-]*#[0-9]+',
       // Advisory IDs, recognised by REGISTRY NAME rather than by shape. Every
-      // shape rule tried here mis-classified in both directions: "one hyphen and
-      // a digit" made `internal-fix-2` and `fixed in a post-2020 refactor`
-      // advisory IDs and retracted live findings, "the last segment ends in a
-      // digit" threw out about 1 real GHSA ID in 20, and "every segment is four
-      // or more characters" then threw out `PYSEC-2021-19`, `OSV-2021-9`,
+      // available shape rule mis-classifies in both directions: "one hyphen and
+      // a digit" makes `internal-fix-2` and `fixed in a post-2020 refactor`
+      // advisory IDs and retracts live findings; "the last segment ends in a
+      // digit" throws out roughly one real GHSA ID in twenty; "every segment is
+      // four or more characters" throws out `PYSEC-2021-19`, `OSV-2021-9`,
       // `DSA-4879-1` and `USN-5678-1` — writing "no reference given" over a
       // correct citation and reporting a fixed bug as live. A shape cannot tell
       // an ID from an English phrase because registries did not agree on one. An
@@ -848,8 +848,8 @@ function citedReference(value) {
       bound + '(cve|rustsec|pysec|osv|go|dsa|usn|dla|zdi|mal|alsa|elsa|talos)[-:][0-9]+[-:][0-9a-z]+',
       // v3, v2.3.1, 2.3.1. The trailing lookahead refuses a version that is part
       // of a FILENAME: `src/handlers/auth-v2.go:118` is the bare file:line
-      // challenge 4's own prompt names as a non-citation, and `v2` inside it
-      // satisfied a consuming boundary group.
+      // challenge 4's own prompt names as a non-citation, and without the
+      // lookahead the `v2` inside it satisfies a consuming boundary group.
       bound + '(v[0-9]+([.][0-9]+)*|[0-9]+([.][0-9]+){2,})(?![0-9a-z]|[.][a-z])',
       // PR 4521, issue #1234, release 3, gh-1234.
       bound + '(pr|pull|issues?|bug|ticket|gh|release)[ #-]+[0-9]+',
@@ -857,7 +857,7 @@ function citedReference(value) {
       // keyword may NOT be reached through a path separator, and that is the
       // whole difference between this branch and the one above it: with `/` in
       // the shared separator class, `src/bug/12.go` and `tests/issues/42/repro.py`
-      // both became citations, contradicting this function's own rule that a bare
+      // are both citations, contradicting this function's own rule that a bare
       // `file:line` is not one. Inside a full URL the `https?://` branch already
       // matches, so nothing is lost by refusing the path form here.
       '(^|[^0-9a-z/])(pr|pull|issues?|bug|ticket|gh|release)/[0-9]+',
@@ -893,13 +893,13 @@ log(`${defeated}/${CHALLENGES.length} challenges defeated → ${band.label} (${b
 // The band alone would let 4/5 defeated proceed on an already-patched bug.
 //
 // FIRST, and ahead of the artifact gate below, because 5.1's rule is that this
-// outcome "overrides everything else" and the artifact gate was above it. The two
-// are different in kind: the artifact check is a judgement about whether this PoC is
-// real, and challenge 4 is a fact about the codebase — a fix, with a reference,
-// which no amount of PoC verification makes less true. With the gate first, a dead
-// artifact agent or a failing lint turned "already patched, retract it" into
-// BLOCKED, which SKILL.md relays as NEEDS MORE INFO and whose completion gate tells
-// the orchestrator to re-dispatch, buying the same answer twice for a bug that no
+// outcome "overrides everything else". The two are different in kind: the artifact
+// check is a judgement about whether this PoC is real, and challenge 4 is a fact
+// about the codebase — a fix, with a reference, which no amount of PoC
+// verification makes less true. Put the artifact gate first and a dead artifact
+// agent or a failing lint turns "already patched, retract it" into BLOCKED, which
+// SKILL.md relays as NEEDS MORE INFO and whose completion gate tells the
+// orchestrator to re-dispatch, buying the same answer twice for a bug that no
 // longer exists.
 const fixCitation = alreadyFixedStands(lost, verdicts)
 if (fixCitation) {
@@ -908,10 +908,10 @@ if (fixCitation) {
     // ALREADY_FIXED, not DO_NOT_SUBMIT. The bug was real and a fix landed, so this
     // is a RETRACTION with a reference — and Stage 1 already returns exactly this
     // status for exactly this rule. Under one shared DO_NOT_SUBMIT the orchestrator
-    // had to pattern-match the reason prefix to tell a retraction from a false
-    // positive from an incomplete report, and the documented mapping sent all three
-    // to FALSE POSITIVE. Two of the three were the rounding error this plugin
-    // exists to prevent.
+    // has to pattern-match the reason prefix to tell a retraction from a false
+    // positive from an incomplete report, and any mapping it writes reports all
+    // three as FALSE POSITIVE. Two of the three are then the rounding error this
+    // plugin exists to prevent.
     status: 'ALREADY_FIXED',
     reason: `already-fixed challenge unrebutted: ${fixCitation}. Retract rather than report at a lowered severity.`,
     band,
@@ -949,38 +949,38 @@ if (band.action === 'DO_NOT_SUBMIT') {
   }
 }
 
-// Challenge 4 was AWARDED on a WHOLE fix and cited nothing lookupable.
+// Challenge 4 AWARDED on a WHOLE fix, citing nothing lookupable.
 // `alreadyFixedStands` refuses to retract on that — a retraction has to point at
-// something — and the band must not quietly decide instead: at 4/5 it is MEDIUM,
-// so a bug a reviewer says is entirely patched came back REPORTED, which SKILL.md
-// maps to TRUE POSITIVE. It is neither a retraction nor a clean bill of health;
-// it is a fact still to establish.
+// something — and the band must not quietly decide instead: four other challenges
+// defeated puts the band at MEDIUM, so a bug a reviewer says is entirely patched
+// comes back REPORTED, which SKILL.md maps to TRUE POSITIVE. That claim is neither
+// a retraction nor a clean bill of health; it is a fact still to establish, and
+// this is the branch that says so.
 //
 // `complete === true`, so a PARTIAL fix never reaches here whether it cited
 // anything or not. checkpoints.md 5.1 and challenge 4's own prompt both say a
 // partial fix does not retract — the finding survives it and the report records
-// it — and the citation is only load-bearing for the outcome that DISCARDS the
-// finding. An uncited partial claim halted the stage on a bug everyone agreed was
-// still live. Stage 1's `downgradeUnreferencedFix` is the precedent and it does
-// not halt either: it downgrades `fixed` to UNCERTAIN and carries on to a verdict.
+// it — so the citation is only load-bearing for the outcome that DISCARDS the
+// finding. Halting on an uncited partial claim would stop the stage over a bug
+// nobody disputes is still live. Stage 1's `downgradeUnreferencedFix` takes the
+// same line: it downgrades `fixed` to UNCERTAIN and carries on to a verdict.
 //
-// A DEAD challenge-4 agent is deliberately not here — it returned no claim to
+// A DEAD challenge-4 agent is deliberately not here — it returns no claim to
 // establish, and `tallyChallenges` has already counted it against the finding.
 //
-// AFTER the artifact gate and the band, which is where the two findings this
-// answers put it. Ahead of them, a PoC whose file does not exist came back
-// NEEDS_MORE_INFO instead of BLOCKED, and one that lost ALL FIVE challenges came
-// back NEEDS_MORE_INFO instead of the FALSE POSITIVE that SKILL.md maps
-// `confidence NONE (0/5)` to — an uncited claim outranking four independent
-// refutations that did not need it.
+// AFTER the artifact gate and the band, because it outranks neither. Ahead of
+// them, a PoC whose file does not exist comes back NEEDS_MORE_INFO instead of
+// BLOCKED, and one that lost ALL FIVE challenges comes back NEEDS_MORE_INFO
+// instead of the FALSE POSITIVE that SKILL.md maps `confidence NONE (0/5)` to —
+// an uncited claim outranking four independent refutations that did not need it.
 //
 // `winner !== 'REBUTTAL'`, not `=== 'CHALLENGE'`, so that this and
 // `tallyChallenges` grade the same field the same way. The enum is advisory —
-// `required` is the only thing the runtime validator enforces — and an off-enum
-// `winner: 'challenge'` counted AGAINST the finding in the tally while escaping
-// this check entirely: 4/5, MEDIUM, REPORTED, on a finding the reviewer said was
-// entirely patched. A dead agent is still not here, because it leaves no entry in
-// `verdicts` at all.
+// `required` is the only thing the runtime validator enforces — so an off-enum
+// `winner: 'challenge'` counts AGAINST the finding in the tally while escaping an
+// `=== 'CHALLENGE'` test entirely, landing on REPORTED at MEDIUM for a finding the
+// reviewer said was entirely patched. A dead agent is still not here, because it
+// leaves no entry in `verdicts` at all.
 const uncitedFix = verdicts.find(
   (v) => v.key === 'already-fixed' && v.winner !== 'REBUTTAL' && v.complete === true && !citedReference(v.reference),
 )
@@ -1056,7 +1056,7 @@ are all disallowed. Say what the evidence shows.`,
 // Pure, and duplicated from triage-static.js with the cap it serves — see the
 // reasoning there. Every DISTINCT rating level a string names, WORD-BOUNDED,
 // most severe first: `low` sits inside "Allowlist", `high` inside "highly", and
-// an unbounded substring test read both as ratings.
+// an unbounded substring test reads both as ratings.
 function namedLevels(severity) {
   const LEVELS = ['critical', 'high', 'medium', 'low', 'informational']
   return LEVELS.filter((name) => new RegExp(`\\b${name}\\b`, 'i').test(String(severity)))
@@ -1069,21 +1069,15 @@ function reportProblem(result) {
   if (!String(result.reportPath || '').trim()) {
     return 'report gave no reportPath; the report has to be the path of a file that was written, not one that was planned'
   }
-  // The NUMBER, on the same reasoning and against a sharper failure than the
-  // rationale below it: `severityCapViolation` names no level in a blank string,
-  // so a blank reads as below the cap and returns null, and SKILL.md tells the
-  // orchestrator the top-level `severity` is the number the finding ships with.
-  // So REPORTED shipped a finding with no rating that no cap had been applied
-  // to. Stage 2 has a fallback for that shape (`unknownSeverity`); this has none.
   // EXACTLY ONE of the five levels, which is one check rather than the three
   // separate failures it covers. `required` validates `severity: ''`, the enum is
   // advisory, and SKILL.md tells the orchestrator the top-level `severity` IS the
-  // number the finding ships with — so a blank shipped a finding with no rating
-  // at all; `Unknown`, `n/a` and `TBD` shipped one that names no level, which
+  // number the finding ships with — so a blank ships a finding with no rating at
+  // all; `Unknown`, `n/a` and `TBD` ship one that names no level, which
   // `severityCapViolation` reads as below the cap and passes; and `Medium/High`
-  // and `Critical (affects low-privilege users)` shipped two ratings at once.
-  // Stage 2 falls back to Stage 1's number for the unreadable shapes. This stage
-  // has nothing to fall back to, so it refuses and names the fix.
+  // and `Critical (affects low-privilege users)` ship two ratings at once. Stage
+  // 2 can fall back to Stage 1's number for the unreadable shapes. This stage has
+  // nothing to fall back to, so it refuses and names the fix.
   const stated = String(result.severity || '').trim()
   const levels = namedLevels(stated)
   if (levels.length !== 1) {
@@ -1094,11 +1088,11 @@ function reportProblem(result) {
       ? `report gave severity "${stated}", which names none of Critical, High, Medium, Low or Informational; no cap can be applied to a rating that is not one of them`
       : `report gave severity "${stated}", which names ${levels.length} levels (${levels.join(', ')}); state exactly one`
   }
-  // Severity passes on "the rating is supported by evidence". The two fields
-  // above were trimmed on exactly this reasoning and this one was not, so a
-  // blank rationale returned REPORTED — and severityCapViolation below only
-  // inspects Critical and High, which leaves a Medium asserted with nothing
-  // behind it.
+  // Severity passes on "the rating is supported by evidence", so the rationale is
+  // trimmed for the same reason the two fields above are: untrimmed, a blank
+  // rationale returns REPORTED, and `severityCapViolation` below inspects only
+  // Critical and High — which leaves a Medium asserted with nothing behind it and
+  // nothing else looking at it.
   if (!String(result.severityRationale || '').trim()) {
     return 'report gave no severityRationale; the rating has to be justified, not just stated'
   }
@@ -1120,14 +1114,10 @@ if (reportIssue) {
 // agent has already written the number into a report file, so correcting the
 // return value would leave the file wrong and re-running the workflow would not
 // fix it. This blocks and names the file instead.
-//
-// The second of the two mechanisms the head-to-head attributed the delta to:
-// 3/3 on `integration-cap` against 0/3 for the arm whose severity was
-// self-reported.
 function severityCapViolation(severity, rootCause, classification) {
   // Affirmative, and for the reason `capSeverity` is one workflow over: the
   // REPORT_SCHEMA enum is advisory — `required` is the only thing the runtime
-  // validator enforces — so grading by exclusion let 'critical', 'CRITICAL' and
+  // validator enforces — so grading by exclusion lets 'critical', 'CRITICAL' and
   // 'Critical (RCE)' through the gate that exists to catch exactly them.
   //
   // EXACTLY ONE level named is a rating; more than one is an unusable answer, not
@@ -1166,27 +1156,29 @@ if (capViolation) {
     poc,
     artifact,
     verdicts,
-    // As every other Stage 3 return carries it. This was the one omission, and
-    // it is reachable at MEDIUM with a challenge still standing — so without it
-    // nothing here names the challenge the orchestrator has to report.
+    // As every other Stage 3 return carries it. This return is reachable at
+    // MEDIUM with a challenge still standing, so without it nothing here names
+    // the challenge the orchestrator has to report.
     unrebutted: lost,
     report,
   }
 }
 
 log(`REPORTED at ${report.severity}, confidence ${band.label} (${defeated}/${CHALLENGES.length}).`)
-// Every other terminal status carries a `reason`, and SKILL.md's Completion Gate
-// tells the orchestrator to relay it verbatim. This was the one exception.
+// A `reason`, as every terminal status here carries one: SKILL.md's Completion
+// Gate tells the orchestrator to relay it verbatim, so a return without one is
+// relayed as nothing.
 //
-// `unrebutted` too, and this is the only status reachable WITH a challenge still
-// standing: at MEDIUM the band proceeds and documents it. A dead agent leaves no
-// verdict object, so without this key nothing in the return names the challenge
-// that stood, and SKILL.md asks the orchestrator only for the band and the tally.
+// `unrebutted` too, and this is the only SUCCESSFUL status reachable with a
+// challenge still standing: at MEDIUM the band proceeds and documents it. A dead
+// agent leaves no verdict object, so without this key nothing in the return names
+// the challenge that stood, and SKILL.md asks the orchestrator only for the band
+// and the tally.
 //
-// `severity` at the TOP LEVEL, as Stage 1 and Stage 2 both surface it. This was
-// the one successful terminal return without it: SKILL.md tells the orchestrator
-// to state the verdict "with the severity", it read `undefined`, and the number
-// existed only at `report.severity`, which nothing tells it to look at.
+// `severity` at the TOP LEVEL, as Stage 1 and Stage 2 both surface it. SKILL.md
+// tells the orchestrator to state the verdict "with the severity"; nothing tells
+// it to look inside `report`, so a number that lives only at `report.severity`
+// reaches the user as `undefined`.
 return {
   status: 'REPORTED',
   reason: report.severityRationale,

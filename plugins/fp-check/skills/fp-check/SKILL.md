@@ -30,9 +30,8 @@ narrow or correct what Stage 1 returned.
                                 └──────────────────────────────────────┘
 ```
 
-The gates in each stage are **code**, not instructions. A workflow script returns
-a status you cannot talk it out of; that is the point of the port, and it is where
-the measured difference against a linear checklist came from.
+The gates in each stage are **code**, not instructions: a workflow script returns
+a status you cannot talk it out of.
 
 ## When to Use
 
@@ -56,22 +55,20 @@ record the open questions each later stage will resolve.
 
 | Question | Default | Why it is a question and not automatic |
 |---|---|---|
-| **Q1. Validate by building a PoC?** | **no** | Measured at **$13.34 against $2.15** on the same finding — 6x. Worth it to settle a disputed finding; wasteful when static analysis already answered. A yes authorises the *cost*, not the *conclusion*: Stage 1 may settle the finding first, and then the verdict is what the request gets. |
+| **Q1. Validate by building a PoC?** | **no** | It costs several times a static run. Worth it to settle a disputed finding; wasteful when static analysis already answered. A yes authorises the *cost*, not the *conclusion*: Stage 1 may settle the finding first, and then the verdict is what the request gets. |
 | **Q2. Run online checks?** | **no** | Needs network access and a real upstream project. Stage 2 fails closed when offline, so defaulting it on makes every offline invocation halt. |
 
 **Read the answers out of the request first, and only fall back to
-`AskUserQuestion` when they are genuinely absent.** Phrasings that answer Q1:
-*"build a PoC"*, *"prove it"*, *"write an exploit"*, *"demonstrate it"* → yes;
-*"static only"*, *"don't write a PoC"*, *"just tell me if it's real"* → no.
-Phrasings that answer Q2: *"check their security policy"*, *"is this in scope"*,
-*"look for duplicates"*, *"check upstream"* → yes; *"offline"*, *"don't go
-online"*, *"work from the code"* → no.
+`AskUserQuestion` when they are genuinely absent.** Answering Q1: *"build a PoC"*,
+*"prove it"*, *"write an exploit"*, *"demonstrate it"* → yes; *"static only"*,
+*"don't write a PoC"*, *"just tell me if it's real"* → no. Answering Q2: *"check
+their security policy"*, *"is this in scope"*, *"look for duplicates"*, *"check
+upstream"* → yes; *"offline"*, *"don't go online"*, *"work from the code"* → no.
 
-Asking when the answer was already given is not merely rude — under
-`claude plugin eval` and any other non-interactive harness there is nobody to
-answer, so the question either hangs until the timeout or silently falls through
-to the default. Both defaults are **no**, so a plugin that always asks measures
-Stage 1 and reports it as though all three stages had run.
+Asking when the answer was already given is worse than rude: in a non-interactive
+harness there is nobody to answer, so the question hangs or falls through to the
+default. Both defaults are **no**, so a skill that always asks runs Stage 1 alone
+and reports as though all three stages had run.
 
 Then restate the bug in your own words. **Half of false positives collapse here.**
 Establish, and if you cannot, ask:
@@ -90,63 +87,51 @@ Establish, and if you cannot, ask:
 - **Whether it is a finding at all** — read
   [dismissal-grounds.md]({baseDir}/references/dismissal-grounds.md): the attacker
   already holds what the exploit grants, the behaviour is specified or documented,
-  the cure is worse than the disease. **Guidance, not a gate** — four agents used
-  to dismiss on the shape of the claim, and over 65 measured runs they decided
-  cases the specialised gates were built for. Recognise the shape here; let the
-  stage holding the trace decide it
+  the cure is worse than the disease. **Guidance, not a gate** — recognise the
+  shape here, and let the stage holding the trace decide it
 - **The entry point and the layers between it and the sink** — the dispatch's
   most important input; see below
 
 ## Enumerating the layers
 
-Stage 1 spends one agent per validation layer, and the list you pass is what it
-inspects. Walk the path from the entry point to the sink and name every check
-between them: authorization, input sanitisation, allowlists, rate limiting, type
-checking, bounds checking.
+Stage 1 spends one agent per validation layer, so the list you pass is what it
+inspects. Walk the path from entry point to sink and name every check between
+them: authorization, input sanitisation, allowlists, rate limiting, type and
+bounds checking. At most **4** are dispatched; more is rejected before anything is
+spent, so narrow the attack path or split the finding.
 
 **A layer must be a check that EXISTS, with a `file:line`.** Never enumerate the
-*absence* of one. This used to say the opposite, and a traced run measured the
-cost: an agent asked whether a layer that does not exist stops the payload
-answered `PAYLOAD_STOPPED_HERE` while explaining in its own `reason` that it meant
-the opposite, and the finding died before the impact agent ran.
+*absence* of one — an agent asked whether a layer that does not exist stops the
+payload cannot answer coherently, and kills the finding before impact is reached.
 
 **If nothing on the path validates the payload, send `layers: []` together with
-`layersSearched`** — the files and functions you read, and what you did not find.
-That is checkpoint 2.2's "or confirmed none exist". An empty list alone is still
-rejected: a forgotten field and a deliberate "nothing guards this" are the same
+`layersSearched`** — what you read, and what you did not find. An empty list alone
+is rejected: a forgotten field and a deliberate "nothing guards this" are the same
 value, and the declaration is what tells them apart.
-
-At most **4** layers are dispatched. More than that is rejected before anything is
-spent: narrow the attack path or split the finding.
 
 ## Routing: standard or deep
 
-Stage 1 picks the route itself from the dispatch, and you can override it with
-`route: 'deep'` when the user asks for full verification.
+Stage 1 picks the route from the dispatch; override with `route: 'deep'` when the
+user asks for full verification. **Standard is the default and is doing real
+work** — do not reach for `deep` to feel thorough.
 
 **Deep** adds three proofs to the reachability phase — API contracts and
-environmental protections, the algebraic bounds proof, and race feasibility — and
-runs the full 13 devil's-advocate questions instead of the 7-question spot check.
-Both lists are in
-[false-positive-patterns.md]({baseDir}/references/false-positive-patterns.md).
-It fires automatically on 3+ layers; on a memory-safety, arithmetic, concurrency
-or availability bug class — the Route column of
+environmental protections, the algebraic bounds proof, race feasibility — and runs
+the full 13 devil's-advocate questions instead of the 7-question spot check; both
+lists are in
+[false-positive-patterns.md]({baseDir}/references/false-positive-patterns.md). It
+fires automatically on 3+ layers, on `crossComponent: true` or `ambiguous: true`,
+and on a memory-safety, arithmetic, concurrency or availability bug class — the
+Route column of
 [bug-class-verification.md]({baseDir}/references/bug-class-verification.md) is
-the authoritative list and the tests pin `selectRoute` against it; and on
-`crossComponent: true` or `ambiguous: true`.
-
-**Standard is the default and is doing real work.** Measured: a linear checklist
-never escalated on any of seven eval cases and still matched a full pipeline at
-2.3x less cost. Do not reach for `deep` to feel thorough.
+authoritative and the tests pin `selectRoute` against it.
 
 ## Dispatch
 
 Wait for each workflow. `Workflow` returns **on launch**, so the run continues in
-the background and ending your turn tears it down: measured, an orchestrator
-ended its turn 2.4 seconds after dispatching a review stage and the workflow was
-**killed** 140 seconds in, after four of five challenges had finished and before
-any report existed. **Do not end your turn until the workflow has returned.** Use
-`TaskOutput` with `block: true` and a timeout of at least 600000.
+the background and ending your turn tears it down mid-flight, discarding finished
+agents and leaving no report. **Do not end your turn until the workflow has returned.**
+Use `TaskOutput` with `block: true` and a timeout of at least 600000.
 
 ### `baseDir` — copy it, never reconstruct it
 
@@ -157,18 +142,14 @@ already expanded to the copy of the skill that is actually running, which is the
 only place the correct value exists.
 
 Do not rebuild the path from the plugin name, and above all do not type a version
-number. The plugin is installed at
+number. The plugin installs to
 `~/.claude/plugins/cache/<marketplace>/fp-check/<version>/skills/fp-check`,
-several versions coexist there, and a wrong one **fails silently**: nothing
-validates `baseDir`, so every reference read in every stage resolves to a file
-that is absent or stale, and the agents answer without the lookup table they were
-sent for. Measured: a traced run guessed `2.0.1` while `2.0.2` was the version
-executing.
-
-If you are running the workflows out of a checkout by `scriptPath` rather than by
-name, `baseDir` is that checkout's `plugins/fp-check/skills/fp-check` — and it
-still has to be **absolute**. A path relative to your working directory is not
-relative to the agent's.
+several versions coexist there, and a wrong one **fails silently** — every
+reference read resolves to a file that is absent or stale, and the agents answer
+without the lookup table they were sent for. Running from a checkout by
+`scriptPath` instead, it is that checkout's `plugins/fp-check/skills/fp-check`.
+Either way it must be **absolute**: a path relative to your working directory is
+not relative to the agent's.
 
 ### Stage 1 — always
 
@@ -235,30 +216,27 @@ args = {
 }
 ```
 
-**Only two Stage 1 statuses are accepted here: `TRUE_POSITIVE` and
-`NEEDS_MORE_INFO`.** Anything else returns `BLOCKED` — a finding already dismissed
-on the code does not need a policy check, and running one invites the online
-evidence to argue a dead finding back to life.
+**Only `TRUE_POSITIVE` and `NEEDS_MORE_INFO` are accepted here.** Anything else
+returns `BLOCKED`: a finding already dismissed on the code does not need a policy
+check, and running one invites the online evidence to argue a dead finding back to
+life.
 
 Stage 2 also requires `verification.severity` and all four `verification.impact`
-fields, which a Stage 1 return carries only if it reached the impact phase — so a
-`NEEDS_MORE_INFO` raised before that (an UNCERTAIN layer, an ambiguous scope) is
-rejected too: resolve the missing fact and re-run Stage 1, not a partial return.
+fields, which a return carries only if it reached the impact phase — so a
+`NEEDS_MORE_INFO` raised before that is rejected too. Resolve the missing fact and
+re-run Stage 1 rather than forwarding a partial return.
 
 **A declared scope is overturned by re-running Stage 1, not here.** `OUT_OF_SCOPE`
-is decided before the impact agent runs, so such a return has no impact to forward
-and Stage 2 cannot act on it. If a published policy contradicts the scope you
-declared, correct the `scope` argument and dispatch Stage 1 again — that argument
-is where the input lives.
+is decided before the impact agent runs, so such a return has no impact to forward.
+If a published policy contradicts your declared scope, correct the `scope`
+argument and dispatch Stage 1 again.
 
-**The downstream-consumer census is decided in code, not asked for.** When
-severity turns on how clients use the target — an `integration` or `external` root
-cause, a `hardening_gap`, or a sink no in-repo caller drives — Stage 2 searches the
-dependents graph and the public code indexes for consumers that actually exhibit
-the unsafe pattern, and keeps only confirmed occurrences with links. On a bug
-exploitable in the target itself the census is skipped, because it answers a
-question nobody asked; the skip and its reason come back in `census.why` rather
-than being silent. Read `census.state` before reading anything into the result:
+**The downstream-consumer census is decided in code, not asked for.** When severity
+turns on how clients use the target — an `integration` or `external` root cause, a
+`hardening_gap`, or a sink no in-repo caller drives — Stage 2 searches the
+dependents graph and public code indexes, keeping only confirmed occurrences with
+links. On a bug exploitable in the target itself it is skipped, with the reason in
+`census.why` rather than silently. Read `census.state` first:
 
 | `census.state` | What it means |
 |---|---|
@@ -310,24 +288,18 @@ top-level `severity` the number; relay `report.reportPath`, `band` and the tally
 ## When the user asked for a PoC and Stage 1 said no
 
 Most requests that reach this skill open with *"write a PoC for this"*. When
-Stage 1 then returns a verdict of its own, that request has been **answered, not
-refused**, and answering it is the entire deliverable. This is the most expensive
-failure mode measured here: the orchestrator reads Stage 3's gate as an obstacle,
-builds the exploit by hand *"per your explicit request"*, and the framing reverts
-to what the arm with no plugin at all produces.
+Stage 1 returns a verdict of its own, that request has been **answered, not
+refused**, and answering it is the entire deliverable.
 
 **A terminal Stage 1 verdict ends the PoC work.** Building an exploit by hand
-after it is the failure, not a fallback — the gate that stopped Stage 3 is the
-same gate, and it applies to you. Measured, both directions:
+afterwards is the failure, not a fallback — the gate that stopped Stage 3 is the
+same gate, and it applies to you. Hand-building after a refusal produces a false
+positive with a working exploit attached.
 
-- Three no-plugin runs on `dead-route` wrote a PoC calling the sink directly,
-  **executed real command injection**, and led with *"Confirmed command
-  injection"* before noting the route does not exist. That is a false positive
-  with a working exploit attached, and it is what hand-building produces.
-- On `already-fixed`, all three runs of one sweep **found the fix** and two still
-  scored zero, because they wrote *"Confirmed for v1.4.0 as reported, but already
-  fixed on current HEAD"*. That sentence is verbatim what the no-plugin baseline
-  answers. The analysis was right; the sentence was wrong.
+The other half of the failure is wording, and it survives a correct analysis:
+*"Confirmed for v1.4.0 as reported, but already fixed on current HEAD"* is what a
+session with no verification at all answers. Finding the fix and then writing that
+sentence scores as though the fix had never been found.
 
 ### The verdict is the first clause of the first sentence
 
@@ -350,20 +322,19 @@ could not run; both are answered by closing the gap and re-running Stage 1.
 ### A negative PoC is legitimate; an exploit is not
 
 Demonstrating that the guard **rejects** the payload is different work from
-demonstrating the bug, and it is worth doing when the refusal itself is what the
-reporter disputes. It is optional — Stage 1's evidence already decided the
-verdict — and it is bounded:
+demonstrating the bug, and worth doing when the refusal is what the reporter
+disputes. Optional — Stage 1 already decided the verdict — and bounded:
 
-- It drives the **entry point**. A harness that calls the sink directly is an
-  exploit whatever the file is named, and it shows the sink is dangerous in
-  isolation, which was never in question.
-- Its assertion is the refusal: the payload is rejected, the route has no caller,
-  the digests compare in constant time. It **fails** if the payload ever reaches
-  the sink.
-- It never sits next to a confirmed-vulnerability framing and is never called a
-  PoC for the finding. Say what it is: evidence for the refutation.
+- It drives the **entry point**. A harness calling the sink directly is an exploit
+  whatever the file is named, and only shows the sink is dangerous in isolation,
+  which was never in question.
+- Its assertion is the refusal — the payload is rejected, the route has no caller,
+  the digests compare in constant time — so it **fails** if the payload ever
+  reaches the sink.
+- Never call it a PoC for the finding or place it beside a confirmed-vulnerability
+  framing. It is evidence for the refutation.
 - If it unexpectedly *does* reach the sink, that is a new fact for Stage 1, not a
-  licence to report. Re-dispatch Stage 1 with it as a layer.
+  licence to report. Re-dispatch with it as a layer.
 
 ### If you dispatched Stage 3 anyway
 
@@ -376,27 +347,19 @@ above.
 
 Before you report anything, check what actually came back.
 
-1. **Did the workflow return at all?** A workflow that was **killed** or
-   **aborted** has not failed its gates — it has not finished them. Say so and
-   re-dispatch. Never infer a verdict from partial agent output; doing that is the
-   exact mistake this skill exists to prevent.
+1. **Did the workflow return at all?** One that was killed or aborted has not
+   failed its gates, it has not finished them: say so and re-dispatch. Never infer
+   a verdict from partial agent output.
 2. **Read `status`, not the shape.** Failing returns carry populated payloads, so
-   a result that looks complete may be a `NEEDS_MORE_INFO`. The one named
-   exception is Stage 3's `settledBy`, below — a field the script sets rather
-   than a shape you infer.
-3. **Relay the `reason` verbatim.** Every terminal status carries one, and it
-   names the layer, clause, gate or commit that decided the outcome. That
-   specificity is the deliverable, and for `DO_NOT_SUBMIT` the `reason` is the
-   only thing that says which of two very different outcomes you got — see
-   Verdicts below.
-4. **State the verdict in your final response**, with the severity and the
-   evidence. Stage 3 writes its report to a file, and a file is not an answer.
-   If Stage 3 ran, state the confidence band and the N/5 challenge tally too.
-5. **A stage that correctly refused has finished, not failed.** Item 1 covers a
-   workflow that was torn down mid-flight; this is its opposite, and the two
-   need opposite handling. A refusal is the answer: relay it, do not re-dispatch
-   it, and above all do not do by hand the work the stage declined to do. For
-   Stage 3 that means building the exploit yourself — see the section above.
+   a result that looks complete may be a `NEEDS_MORE_INFO`.
+3. **Relay the `reason` verbatim.** It names the layer, clause, gate or commit
+   that decided the outcome, and that specificity is the deliverable.
+4. **State the verdict in your final response**, with the severity and evidence —
+   Stage 3 writes a report file, and a file is not an answer. If Stage 3 ran, give
+   the confidence band and the N/5 tally too.
+5. **A stage that correctly refused has finished, not failed.** The opposite of
+   item 1, and it needs the opposite handling: relay the refusal, do not
+   re-dispatch it.
 
 ## Verdicts
 
@@ -408,18 +371,15 @@ Stage statuses collapse onto three user-facing verdicts:
 | **FALSE POSITIVE** | `NOT_EXPLOITABLE`, `NOT_VULNERABLE`, `FALSE_POSITIVE` | `BUG #N FALSE POSITIVE — <the reason, verbatim>` |
 | **NEEDS MORE INFO** | `NEEDS_MORE_INFO`, `BLOCKED`, `OFFLINE`, `BUILD_FAILED`, `NO_CANDIDATES` | `BUG #N NEEDS MORE INFO — <the missing fact>` |
 
-`ALREADY_FIXED` and `DUPLICATE` are reported as retractions with their reference,
-and `OUT_OF_SCOPE` as a scope answer rather than a judgement on the bug. A
-retraction is **not** a false positive and **not** a lowered severity: the bug
-was real, a fix landed, and nothing is owed against current code. Say all three.
-The exact opening lines are in the table above.
+`ALREADY_FIXED` and `DUPLICATE` are retractions, reported with their reference;
+`OUT_OF_SCOPE` answers scope, not whether the bug is real. The opening lines for
+each are in the table above.
 
 **Stage 3's `BLOCKED` is four outcomes, and `settledBy` tells the first from the
-rest** — a field, not a prefix of prose, which is `DO_NOT_SUBMIT`'s mistake below.
-With `settledBy`, Stage 1 settled the finding and its verdict is what you report.
-Without it the `reason` says which: an unusable arg shape is re-dispatched with
-the shape fixed, while a failed independent artifact check or a severity above the
-cap names the artifact to correct and is not re-dispatched.
+rest.** With `settledBy`, Stage 1 settled the finding and its verdict is what you
+report. Without it the `reason` says which: an unusable arg shape is re-dispatched
+with the shape fixed, while a failed independent artifact check or a severity
+above the cap names the artifact to correct and is not re-dispatched.
 
 `TRIAGED` is Stage 2 finishing, not a verdict of its own: keep the Stage 1 verdict,
 take its open questions from `summary`, and its scope and severity from the
@@ -427,37 +387,27 @@ take its open questions from `summary`, and its scope and severity from the
 and unvalidated. Out-of-scope ends the stage itself, on a quoted clause.
 
 **`DO_NOT_SUBMIT` is two outcomes wearing one status, and the `reason` tells them
-apart** — the third it carried now returns `ALREADY_FIXED` or `NEEDS_MORE_INFO`.
-Mapping the two below to FALSE POSITIVE is the rounding error this skill prevents:
+apart.** Mapping both to FALSE POSITIVE is the rounding error this skill prevents:
 
 | The `reason` starts with | What actually happened | Report as |
 |---|---|---|
 | `confidence NONE (0/5 defeated)` | not one challenge was rebutted; the reviewers refuted the finding | **FALSE POSITIVE**, naming the unrebutted challenges |
-| `confidence LOW (1/5 defeated)` or `(2/5 defeated)` | some challenges were rebutted with evidence and the rest were not. checkpoints.md 5.1 reads LOW as "gather evidence or downgrade", which is a missing fact, not a refutation | **NEEDS MORE INFO**, naming the unrebutted challenges as the facts to settle |
-
-**NEEDS MORE INFO is not a hedge and must not be rounded to FALSE POSITIVE.**
-"The claim as stated is unproven" is not "no vulnerability exists"; conflating the
-two killed a real, demonstrable finding in this plugin's own history and scored
-the case below the arm that had no plugin at all.
+| `confidence LOW (1/5 defeated)` or `(2/5 defeated)` | some challenges were rebutted with evidence and the rest were not — a missing fact, not a refutation | **NEEDS MORE INFO**, naming the unrebutted challenges as the facts to settle |
 
 ## Batch Triage
 
 **Nothing in code enforces any of this.** Every workflow takes exactly one
-`finding`; the batch is your loop, and there is no gate that fails when you skip
-one. That is a real limit of the merge, not an oversight to be talked around —
-the first row of the Rationalizations table exists because prose arguing with
-prose is what this plugin was built to stop relying on. If a batch matters,
-dispatch each finding and keep your own record of which returned what.
+`finding`; the batch is your loop, with no gate that fails when you skip one, so
+keep your own record of which finding returned what.
 
-
-1. Run Step 0 for every finding first — restating the claims collapses the
-   obvious false positives immediately and costs nothing.
+1. Run Step 0 for every finding first — restating the claims collapses the obvious
+   false positives immediately and costs nothing.
 2. Ask the two questions **once**, for the batch.
-3. Dispatch Stage 1 per finding. Each is independent; they may run concurrently.
-4. After all of them, check for **exploit chains** — also unenforced, and a
-   comparison no workflow can make, since none of them sees a second finding: findings that individually
-   failed a gate may combine into a viable attack. Two `NOT_EXPLOITABLE` results
-   whose blocking layers are different is the shape to look for.
+3. Dispatch Stage 1 per finding. Each is independent and they may run concurrently.
+4. Then check for **exploit chains** — also unenforced, and a comparison no
+   workflow can make, since none of them sees a second finding: findings that
+   individually failed a gate may combine into a viable attack. Two
+   `NOT_EXPLOITABLE` results whose blocking layers differ is the shape to look for.
 
 ## Rationalizations to Reject
 
@@ -465,36 +415,27 @@ dispatch each finding and keep your own record of which returned what.
 |---|---|---|
 | "Rapid analysis of the remaining bugs" | Every finding gets the same dispatch | Go back and dispatch the next one |
 | "This pattern looks dangerous, so it's a vulnerability" | Pattern recognition is not analysis | Let Stage 1 trace the layers |
-| "I can see it's unreachable, no need to dispatch" | That judgement is what the per-layer fan-out exists to make independently, and a linear read gets it wrong: 6 of 6 measured runs named the blocking guard, 1 of 6 concluded correctly | Dispatch |
+| "I can see it's unreachable, no need to dispatch" | That judgement is what the per-layer fan-out exists to make independently, and a linear read gets it wrong: naming the blocking guard and concluding correctly are different skills | Dispatch |
 | "The sink is genuinely injectable, so the finding is real" | Attacker control **of the sink** is not control of any reachable entry point. A PoC calling the sink directly is the canonical false positive with an exploit attached | Gate 2 (Reachability) decides this, on the entry point |
 | "Similar code was vulnerable elsewhere" | Each context has different validation, callers and protections | Verify this instance |
 | "This is clearly critical" | LLMs over-rate severity, and the severity caps are arithmetic | Let Stage 1e apply them |
-| "I'll skip the PoC question and just build one" | A PoC costs 6x and the user gets a bill they did not agree to | Ask, or read the answer from the request |
-| "Stage 3 refused, but the user asked for a PoC, so I'll build one myself" | The refusal **is** the answer to that request. Measured: hand-built exploits after a refusal reproduce the no-plugin arm's framing, and three of them executed real command injection against a route with no caller | State the Stage 1 verdict; build a *negative* PoC if the refusal is what is disputed |
-| "It was real at the reported version, so I'll confirm it and note the fix" | Leading with the confirmation reports a bug the code does not have, and it is the baseline's exact sentence | Open with the retraction and the reference; the version history comes after |
-| "The verdict is unproven, so it is a false positive" | "Unproven" is NEEDS MORE INFO. Conflating the two killed a real finding here and scored below the arm with no plugin | Name the missing fact and re-run Stage 1 with it |
+| "I'll skip the PoC question and just build one" | A PoC costs several times a static run, and the user gets a bill they did not agree to | Ask, or read the answer from the request |
+| "Stage 3 refused, but the user asked for a PoC, so I'll build one myself" | The refusal **is** the answer to that request | State the Stage 1 verdict; build a *negative* PoC if the refusal is what is disputed |
+| "It was real at the reported version, so I'll confirm it and note the fix" | Leading with the confirmation reports a bug the code does not have | Open with the retraction and the reference; the version history comes after |
+| "The verdict is unproven, so it is a false positive" | "Unproven" is NEEDS MORE INFO — a fact still to establish, not a refutation | Name the missing fact and re-run Stage 1 with it |
 
 ## References
 
-- [checkpoints.md]({baseDir}/references/checkpoints.md) — the pass criteria for
-  every checkpoint, and the crosswalk from stages to checkpoints to the six gates
-- [dismissal-grounds.md]({baseDir}/references/dismissal-grounds.md) — why a report
-  may not be a finding, and the guards against wrongly dismissing a valid one
-- [gate-reviews.md]({baseDir}/references/gate-reviews.md) — the six gates and the
-  verdict format
-- [false-positive-patterns.md]({baseDir}/references/false-positive-patterns.md) —
-  the 13-item checklist and the four red-flag lists
-- [bug-class-verification.md]({baseDir}/references/bug-class-verification.md) —
-  what each bug class specifically has to establish
-- [recovery-mechanisms.md]({baseDir}/references/recovery-mechanisms.md) — what
-  each runtime does on a panic, and the checklist before claiming a crash
-- [validation-dimensions.md]({baseDir}/references/validation-dimensions.md) —
-  scope, security model, and design-intent judgement calls
-- [evidence-templates.md]({baseDir}/references/evidence-templates.md) — the
-  algebraic bounds proof and the data-flow trace, as fillable forms
-- [poc-anti-patterns.md]({baseDir}/references/poc-anti-patterns.md) — PoC
-  construction rules, enforced by `scripts/poc-lint.sh`
-- [test-integration.md]({baseDir}/references/test-integration.md) — framework
-  patterns for a test-integrated PoC
-- [safety-guidelines.md]({baseDir}/references/safety-guidelines.md) — the five
-  envelope levels
+| File | What is in it |
+|---|---|
+| [checkpoints.md]({baseDir}/references/checkpoints.md) | the pass criteria for every checkpoint, and the crosswalk from stages to checkpoints to the six gates |
+| [dismissal-grounds.md]({baseDir}/references/dismissal-grounds.md) | why a report may not be a finding, and the guards against wrongly dismissing a valid one |
+| [gate-reviews.md]({baseDir}/references/gate-reviews.md) | the six gates and the verdict format |
+| [false-positive-patterns.md]({baseDir}/references/false-positive-patterns.md) | the 13-item checklist and the four red-flag lists |
+| [bug-class-verification.md]({baseDir}/references/bug-class-verification.md) | what each bug class specifically has to establish |
+| [recovery-mechanisms.md]({baseDir}/references/recovery-mechanisms.md) | what each runtime does on a panic, and the checklist before claiming a crash |
+| [validation-dimensions.md]({baseDir}/references/validation-dimensions.md) | scope, security model, and design-intent judgement calls |
+| [evidence-templates.md]({baseDir}/references/evidence-templates.md) | the algebraic bounds proof and the data-flow trace, as fillable forms |
+| [poc-anti-patterns.md]({baseDir}/references/poc-anti-patterns.md) | PoC construction rules, enforced by `scripts/poc-lint.sh` |
+| [test-integration.md]({baseDir}/references/test-integration.md) | framework patterns for a test-integrated PoC |
+| [safety-guidelines.md]({baseDir}/references/safety-guidelines.md) | the five envelope levels |
