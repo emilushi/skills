@@ -10,16 +10,21 @@ free of design rationale; it belongs here.
 
 ## Why location, not bug class
 
-Location partitioning gives coverage you can prove — every line owned by exactly one
-agent, generated from a parse rather than from an agent's account of what it read — at
-recall comparable to a class-partitioned fan-out. It is **not** reliably cheaper: on the
-measured corpora the class fan-out came out cheaper on one and at parity on the other.
-Pick it for the coverage argument, not for a cost saving.
+**This plugin used to be class-partitioned** — one agent per bug class — and the
+measurement that killed that design was blunt: an *undirected* fan-out of generic agents
+over contiguous line ranges matched the class-partitioned pipeline on recall at **~40% of
+its cost**, twice, on both corpora. Class-per-agent was paying 2.5× for nothing.
 
-The two axes find **different** bugs, so both run. Class-partitioned agents skim a whole
-tree asking one question and are good at scattered single-site slips, particularly in cold
-error paths. Location does the dividing; the class catalogue is a bounded sweep over
-ground nothing covered. **Do not add a class-per-agent fan-out.**
+So location does the dividing now, and the reason to prefer it over an undirected region
+split is **not** recall or cost — a region fan-out is comparable on the first and cheaper
+on the second. It is that the partition is generated from a parse at function granularity,
+and that a gate afterwards checks the reading actually happened. A region fan-out assigns
+coverage; this measures it.
+
+The two axes still find **different** bugs, so both run. Class-partitioned agents skim a
+whole tree asking one question and are good at scattered single-site slips, particularly in
+cold error paths. Location does the dividing; the class catalogue is a bounded sweep over
+ground nothing covered. **Do not go back to a class-per-agent fan-out.**
 
 A label does not buy recall on its own, which is why `logic-flaw` — the least specific
 class in the catalogue — is kept rather than split up, and why it reliably produces the
