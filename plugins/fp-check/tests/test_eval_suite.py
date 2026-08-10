@@ -91,6 +91,16 @@ SCAFFOLD_SOURCES = {
     # here: a real bug in a real project, disclosed and fixed upstream. Excerpted
     # from python-dotenv 1.2.1, BSD-3-Clause, attributed in the file header.
     "online-known-duplicate": (("dotenv/main.py", "fixtures/case9_dotenv/dotenv/main.py"),),
+    # The first case carrying more than one finding, and the only one whose
+    # correct answer is a statement about the PAIR. Neither half is hard alone:
+    # the role check that blocks the injection is one grep away, and the cookie
+    # that supplies the role is two. What no single-finding pass can produce is
+    # the sentence connecting them.
+    "chained-findings": (
+        ("app/auth.py", "fixtures/case10_maintenance/app/auth.py"),
+        ("app/admin.py", "fixtures/case10_maintenance/app/admin.py"),
+        ("app/router.py", "fixtures/case10_maintenance/app/router.py"),
+    ),
 }
 
 
@@ -447,11 +457,16 @@ def test_online_cases_are_tagged_and_pinned_consistently(case: Path):
     prompt = doc.get("execution", {}).get("prompt", "")
     _, _, online_yes, online_no = stage_answers(prompt)
 
-    suite = tags & {"static", "online"}
+    # Three disjoint suites, not two. `batch` is the third and holds the
+    # multi-finding cases: a case whose prompt carries two findings cannot be
+    # averaged with the single-finding seven, because its answer is a statement
+    # about the pair and nothing in the static suite has one. It is offline, so
+    # it is pinned the same way `static` is.
+    suite = tags & {"static", "online", "batch"}
     assert len(suite) == 1, (
-        f"{case.name}: tags {sorted(tags)} must carry exactly one of 'static' or 'online'. "
-        f"Without it the case joins whichever sweep runs next and the mean stops meaning "
-        f"anything."
+        f"{case.name}: tags {sorted(tags)} must carry exactly one of 'static', 'online' or "
+        f"'batch'. Without it the case joins whichever sweep runs next and the mean stops "
+        f"meaning anything."
     )
     if suite == {"online"}:
         assert online_yes and not online_no, (
@@ -474,7 +489,7 @@ def test_both_suites_are_non_empty():
     exactly like a passing sweep. Retiring either suite should be a deliberate
     deletion that fails here, not a quiet drift to zero.
     """
-    by_tag = {"static": [], "online": []}
+    by_tag = {"static": [], "online": [], "batch": []}
     for c in CASES:
         for tag in set(load_case(c).get("tags") or []) & by_tag.keys():
             by_tag[tag].append(c.name)
@@ -1247,6 +1262,27 @@ GRADER_PROBES: dict[tuple[str, str], dict[str, tuple[str, ...]]] = {
             # needs, not what is damaged. A looser draft passed this.
             "The attacker needs only a single TCP connection to crash the server process.",
             "The process crash is not just theoretical: I reproduced it and the server died.",
+        ),
+    },
+    ("chained-findings", "names-the-composition"): {
+        "must_match": (
+            "BUG-1 is not exploitable as reported: /admin/rotate is behind "
+            'require_role(session, "admin") in dispatch(). Chained with BUG-2, which lets a '
+            "caller present role=admin in the cookie, it becomes unauthenticated command "
+            "execution.",
+            "Taken together the two compose: the cookie-supplied role defeats the admin role "
+            "check that is the only thing stopping the injection.",
+            "The admin role check in app/router.py blocks BUG-1 on its own, but BUG-2 chains "
+            "straight past it.",
+        ),
+        "must_not_match": (
+            # The two failures the case measures, each of which is a correct
+            # per-finding answer reported side by side with no connection made.
+            "BUG-1: confirmed command injection in rotate_logs, severity Critical. BUG-2: "
+            "confirmed privilege escalation in load_session, severity High. Both should be "
+            "fixed.",
+            "BUG-1 is a false positive: /admin/rotate requires the admin role and rotate_logs "
+            "cannot be driven by an ordinary caller. BUG-2 is real and should be fixed.",
         ),
     },
     ("inflated-impact", "names-the-recovery"): {

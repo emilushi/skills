@@ -576,6 +576,38 @@ run_mutation "a census that never reached the network reads as a clean result" "
   'perl -0pi -e "s/  if \(result\.reachedNetwork !== true\) \{\n    return \`no consumer index/  if (false) {\n    return \`no consumer index/" "$SANDBOX/workflows/triage-online.js"' \
   'node --test "$SANDBOX/tests/online.test.mjs"'
 
+# Batch triage and the exploit-chain check, restored in 2.7.0. Both are
+# false-NEGATIVE guards, which is what makes them worth mutating: a finding that
+# is silently dropped and a pair that is never compared look exactly like a clean
+# run, so nothing but an assertion on the ledger and on the pairing can see them.
+# Four of the five break in the direction that loses the capability quietly.
+run_mutation "a finding whose sub-workflow died vanishes from the ledger" "L2" \
+  'perl -0pi -e "s/      unverified\.push\(\{ id, why: .the sub-workflow returned nothing/      [].push({ id, why: '"'"'the sub-workflow returned nothing/" "$SANDBOX/workflows/triage-batch.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+run_mutation "a batch where nothing was verified reports as triaged" "L2" \
+  'perl -0pi -e "s/if \(ledger\.verified\.length === 0\) \{/if (false) {/" "$SANDBOX/workflows/triage-batch.js"' \
+  'node --test "$SANDBOX/tests/batch.test.mjs"'
+
+run_mutation "two findings behind the same wall are paid for anyway" "L2" \
+  'perl -0pi -e "s/    if \(first\.join\(. \| .\) === second\.join\(. \| .\)\) return ..$/    if (false) return \x27\x27/m" "$SANDBOX/workflows/triage-batch.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
+run_mutation "an already-fixed finding is argued back to life by the chain agent" "L2" \
+  'perl -0pi -e "s/  return \[.NOT_EXPLOITABLE., .TRUE_POSITIVE., .NEEDS_MORE_INFO.\]\.includes\(status\)/  return status !== \x27NOTHING\x27/" "$SANDBOX/workflows/triage-batch.js"' \
+  'node --test "$SANDBOX/tests/batch.test.mjs"'
+
+run_mutation "a chain is reported without the mechanism connecting the two" "L2" \
+  'perl -0pi -e "s/  if \(supplies === ..\) blank\.push\(.supplies.\)/  if (false) blank.push(\x27supplies\x27)/" "$SANDBOX/workflows/triage-batch.js"' \
+  'node --test "$SANDBOX/tests/batch.test.mjs"'
+
+# The shared context is the batch's cost argument, and it lives in the CHILD:
+# triage-static ignores args it does not read, so a context that never reaches a
+# prompt is dropped in silence and the Context phase becomes decoration.
+run_mutation "the shared context stops reaching the prompts that would re-derive it" "L2" \
+  'perl -0pi -e "s/\\\$\{contextBlock\}Layer under test/Layer under test/" "$SANDBOX/workflows/triage-static.js"' \
+  'node --test "$SANDBOX/tests/coverage.test.mjs"'
+
 # --- Layer 3 -------------------------------------------------------------
 
 defer_mutation "a blocking layer loses its file:line" "L3" \

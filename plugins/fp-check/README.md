@@ -13,6 +13,11 @@ Three stages in a fixed order, behind two questions asked once up front.
 | **2 Online** | on request | the project's published policy, how the bug is reached in the published project, bounty scope, and one agent per named venue searching for past reports and duplicates. Fails closed when offline |
 | **3 PoC** | on request | build the exploit against the real code in an isolated worktree, execute it, then five agents that did not build it try to reject it |
 
+More than one finding at a time goes through **Stage 0, `triage-batch`**, which
+derives the shared context once, runs Stage 1 per finding with it, accounts for
+every finding by id, and then checks the pairs that are only exploitable
+together — the one place in the plugin that sees a second finding.
+
 Every finding gets **TRUE POSITIVE**, **FALSE POSITIVE**, or **NEEDS MORE INFO**.
 The third means the analysis could not settle the question — not that the finding
 was refuted, which is what FALSE POSITIVE means.
@@ -87,6 +92,9 @@ orchestrator cannot argue with:
 | No scope or severity claim is made from memory when offline | `offlineProblem` |
 | Out-of-scope needs a quoted policy clause; "probably" is `unclear` | `scopeHalt` |
 | Destructive PoC operations only at safety levels 1–2 | `missingArgs` in Stage 3 |
+| Every finding in a batch is accounted for by id — one whose Stage 1 returned nothing is reported as unverified, never silently dropped | `accountFindings` |
+| Two findings are only paired for a chain check when one's blocking reason could supply what the other lacks | `pairReason`, `isChainable` |
+| A chain is only reported when the agent names both contributions and the mechanism connecting them | `chainProblem` |
 
 Two of these were measured directly. On identical test cases, the configuration
 enforcing the already-fixed retraction got all 3 runs right where the one without
@@ -99,6 +107,7 @@ numbers are measuring. See [PR-COMMENT.md](PR-COMMENT.md) for the method and
 
 ```
 workflows/
+  triage-batch.js      Stage 0, for more than one finding
   triage-static.js     Stage 1, always
   triage-online.js     Stage 2, on request
   triage-poc.js        Stage 3, on request
@@ -107,7 +116,8 @@ skills/fp-check/
   references/          the criteria, the dismissal grounds, the lookup tables
   scripts/poc-lint.sh  the PoC quality gate
 tests/                 four layers; see tests/README.md
-evals/                 7 cases, each run with and without the plugin
+evals/                 9 cases in three tagged suites, each run with and without
+                       the plugin. Only the 7 `static` cases have been measured
 ```
 
 ### Reference files

@@ -21,13 +21,33 @@ export const meta = {
 // or an omitted block — makes this destructure throw before `missingArgs` can
 // report anything, so the run dies with a TypeError instead of returning
 // BLOCKED.
-const { baseDir, finding, entryPoint, scope, layersSearched } = args || {}
+const { baseDir, finding, entryPoint, scope, layersSearched, context } = args || {}
 // `|| []`, not a destructure default: the default only fires on `undefined`, and
 // `missingArgs` reads a null `layers` as "none supplied" and passes it whenever
 // `layersSearched` declares the absence. A null would then reach `layers.map`
 // below and throw a TypeError, killing the run with no status at all — the one
 // outcome this script's whole arg gate exists to prevent.
 const layers = (args && args.layers) || []
+
+// Optional, and supplied only by triage-batch: the routing table, trust
+// boundaries, framework and recovery defaults, derived ONCE for a whole batch
+// instead of independently by every finding's layer and recovery agents. Absent
+// on a single dispatch, where those agents derive it themselves as they always
+// have.
+//
+// Built into a labelled block here rather than interpolated raw, because a
+// `context` that arrives undefined would otherwise reach the prompt as the
+// literal text 'undefined' under a heading announcing it as established fact.
+// Trimmed, not merely presence-checked: '   ' is a string, and a heading with
+// whitespace under it says the same wrong thing.
+const contextBlock =
+  typeof context === 'string' && context.trim() !== ''
+    ? `Shared context, already established across this batch — treat it as given and do
+not re-derive it, but say so if what you read contradicts it:
+${context.trim()}
+
+`
+    : ''
 
 const MAX_LAYERS = 4
 
@@ -458,7 +478,7 @@ Finding: ${finding.summary}
 Entry point: ${entryPoint.description} (${entryPoint.location})
 Attacker payload: ${entryPoint.payload}
 
-Layer under test: ${layer.name} at ${layer.location}
+${contextBlock}Layer under test: ${layer.name} at ${layer.location}
 What it checks: ${layer.checks || 'determine this from the code'}
 
 Read the actual code. Decide whether the payload above survives this layer and
@@ -512,7 +532,7 @@ Finding: ${finding.summary}
 Claimed impact: ${finding.claimedImpact}
 Vulnerable code: ${finding.sink}
 
-Determine whether a panic/exception at that location is caught by any recovery
+${contextBlock}Determine whether a panic/exception at that location is caught by any recovery
 in the call stack — language-level, framework middleware, or server built-in —
 and state the impact that actually survives.
 

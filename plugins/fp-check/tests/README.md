@@ -22,7 +22,7 @@ bash plugins/fp-check/tests/mutation-gate.sh     # not in CI; see "The gate"
   --with jsonschema python -m pytest tests -q)
 ```
 
-Current: **358 node, 382 pytest (+25 skipped), 44 bats**; mutation gate **146
+Current: **380 node, 427 pytest (+25 skipped), 44 bats**; mutation gate **152
 run, 0 survived, 12 deferred**.
 
 **No measurement lives in this file.** Every paid sweep is in
@@ -52,12 +52,21 @@ is missing — a renamed helper fails loudly rather than silently testing nothin
 was inlining the sibling's logic at both call sites, and duplicated logic in a
 gate is the drift this suite exists to catch, so the harness gives way.
 
-Covered: `missingArgs` (three copies), `selectRoute`, `triageBrocards`,
+Covered: `missingArgs` (four copies), `selectRoute`, `triageBrocards`,
 `upstreamFixStands`, `decideGate`, `missingPrecondition`, `capSeverity`,
 `decideVerdict`, `selectAttempts`, `isAcceptableBuild`, `artifactProblem`,
 `tallyChallenges`, `alreadyFixedStands`, `confidenceBand`, `reportProblem`,
 `severityCapViolation`, `offlineProblem`, `scopeHalt`, `summaryProblem`,
-`needsUserCensus`, `censusProblem`.
+`needsUserCensus`, `censusProblem`, `accountFindings`, `contextBlock`,
+`isChainable`, `blockingLayers`, `pairReason`, `chainCandidates`, `chainProblem`.
+
+The fourth `missingArgs` is triage-batch's, and it re-validates each entry
+against triage-static's own field list rather than delegating. It duplicates that
+list because workflow scripts have no module system, and
+`test_the_batch_entry_contract_matches_triage_static` compares the two in both
+directions so neither can quietly gain or lose a field. The duplication buys the
+one thing delegation cannot: an unusable entry is rejected **before** the
+shared-context agent is paid for.
 
 **Two verdict vocabularies, deliberately different.** A layer is asked what
 happens to the payload (`PAYLOAD_REACHES_SINK` / `PAYLOAD_STOPPED_HERE`); a
@@ -84,8 +93,17 @@ Layer 2 was not enough: every pure helper was covered, none *where it is used*. 
 review disabled twelve call sites — both gate halts, `isAcceptableBuild`,
 `alreadyFixedStands`, the confidence band, the severity cap — and the entire free
 suite stayed green. `runScript()` in `extract.mjs` wraps the script body in an
-async function and injects fakes for `agent`, `parallel`, `phase` and `log`, so
-`wiring.test.mjs` scripts each stage's answer and asserts on the status back.
+async function and injects fakes for `agent`, `parallel`, `pipeline`, `workflow`,
+`phase` and `log`, so `wiring.test.mjs` scripts each stage's answer and asserts on
+the status back.
+
+**The `workflow` fake was added for triage-batch, and writing the first test
+against it found a second gap.** The fake `pipeline` did not catch a throwing
+stage while the real runtime does, so a sub-workflow that threw killed the test
+instead of producing the `null` the batch ledger exists to report — the harness
+was wrong in exactly the direction that would have hidden that workflow's main
+gate. Both fakes now mirror the documented contract: a thunk or stage that throws
+resolves to `null` in place, and `.filter(Boolean)` is what removes it.
 
 ## Layer 3 — capture once, regrade forever
 
@@ -121,9 +139,10 @@ regrade then failed and read as model variance when the plugin was correct.
 
 ## Layer 4 — eval
 
-**Two suites, and `--tag` is what keeps them apart.** `claude plugin eval` runs
-every `case.yaml` it finds, so the tag is all that stops the online case joining
-the static mean; two tests and `validate_eval_result.py` enforce that.
+**Three suites, and `--tag` is what keeps them apart.** `claude plugin eval` runs
+every `case.yaml` it finds, so the tag is all that stops the online and batch
+cases joining the static mean; two tests and `validate_eval_result.py` enforce
+that.
 
 ```bash
 export CLAUDE_CODE_WALNUT_SPIRE=1
@@ -145,6 +164,17 @@ claude plugin eval ./plugins/fp-check --tag online \
   --output-dir /tmp/fp-online --json /tmp/fp-online/result.json
 ```
 
+```bash
+# The batch suite: one case, NEVER measured, NEVER averaged with the seven.
+# Its answer is a statement about a PAIR of findings, which nothing in the static
+# suite has, so the two means are not the same quantity.
+claude plugin eval ./plugins/fp-check --tag batch \
+  --runs 3 --ablation with-without --scaffold \
+  --allow-tools Bash Write Skill Workflow WebFetch WebSearch Task TaskCreate TaskUpdate TaskList TaskGet \
+  --model sonnet --judge-model sonnet \
+  --output-dir /tmp/fp-batch --json /tmp/fp-batch/result.json
+```
+
 `WebFetch` and `WebSearch` are in **both** grants deliberately: a grant without
 them lets the run start, denies it the network, and Stage 2 halts `OFFLINE` —
 correct behaviour, scored as a failure, on a run that measured the operator's
@@ -160,6 +190,12 @@ the grant out of this file and pins it against what the cases declare.
 | `already-fixed` | `regex` for `#412`, plus `tool_used` Bash `min: 1` |
 | `dead-route` | `regex` (weight 2) naming the routing table or the absence of a caller |
 | `wrong-parameter` | `regex` (weight 2) telling the two subprocess call sites apart |
+| `chained-findings` | `regex` (weight 2) connecting the pair — a chain word within 400 characters of the role check, in either order. **`--tag batch`, not `static`** |
+
+**`chained-findings` has been measured zero times.** It is the only multi-finding
+case and the only one whose correct answer is a statement about a pair, so it
+carries its own tag rather than joining the static mean — the rule two paragraphs
+below, applied to itself. Admit it to a mean only after it discriminates at n=3.
 
 `integration-cap` and `already-fixed` are the only cases carrying a finding past
 the gate into Phases 4–6; without them the five challenges, `confidenceBand` and
@@ -340,8 +376,8 @@ green.
 | CLI at authoring time | 2.1.224 |
 | node | v22.13.1 |
 | bats | 1.14.0 (`brew install bats-core`; required, not optional) |
-| Layers 1–3 status | 382 pytest (+25 skipped) + 358 node + 44 bats passing |
-| Mutation gate | 158 mutations — 146 run, 0 survived, 0 stale, 12 deferred |
+| Layers 1–3 status | 427 pytest (+25 skipped) + 380 node + 44 bats passing |
+| Mutation gate | 164 mutations — 152 run, 0 survived, 0 stale, 12 deferred |
 | Layer 3 capture | stale: records `concept-prover:verify-attack-path`, so the module skips |
 | Layer 4 sweeps | every one, with its delta and cost, in [../MEASUREMENTS.md](../MEASUREMENTS.md) |
 | Raw results kept | the current sweep, the cross-plugin baselines this merge was justified against, and `eval-result-2026-07-30.json`, which `test_validate_eval_result.py` reads as a real-shaped result so a schema change cannot pass by agreeing with a mock |

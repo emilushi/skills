@@ -13,6 +13,7 @@ agents read at runtime via the `baseDir` argument. `tests/` has four layers,
 
 | Path | What belongs there |
 |---|---|
+| `workflows/triage-batch.js` | Stage 0, more than one finding. The only script that calls `workflow()`, and the only one that sees a second finding |
 | `workflows/triage-static.js` | Stage 1, always runs, reaches a verdict alone |
 | `workflows/triage-online.js` | Stage 2, on request, public posture. Fails closed offline |
 | `workflows/triage-poc.js` | Stage 3, on request. Builds, executes, then five challenge agents that did not build it |
@@ -133,6 +134,13 @@ wasted sweep:
 - Numbers in [MEASUREMENTS.md](MEASUREMENTS.md) describe the tree at the sweep
   that produced them. Do not quote a delta for code that has changed since; see
   the warning at the top of that file.
-- Known-missing capabilities (batch triage, the exploit-chain check) are recorded
-  in [TODO-batch-and-users.md](TODO-batch-and-users.md) and pinned by live guards
-  in `tests/coverage.test.mjs`. Do not silently "fix" a guard that asserts absence.
+- [TODO-batch-and-users.md](TODO-batch-and-users.md) records what each landed
+  capability was designed for and where the build diverged from the sketch. Its
+  guards in `tests/coverage.test.mjs` now exercise those capabilities; if you add
+  a guard that asserts an ABSENCE, say so in the test name, and do not silently
+  "fix" one.
+- **`chained-findings` has never been measured.** It is tagged `batch` rather than
+  `static` for that reason, so `--tag static` still selects exactly the seven
+  cases every number in MEASUREMENTS.md came from. Admitting it to a mean needs
+  n=3 discrimination first; see tests/README.md on the two cases that were
+  admitted on n=1.

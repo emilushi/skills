@@ -14,6 +14,49 @@ decision that needs making before any code.
 
 # 1. `triage-batch.js` — shared context, fan out, then chain
 
+> **LANDED in 2.7.0.** Built close to the sketch below. `missingArgs`,
+> `accountFindings`, `contextBlock`, `isChainable`, `pairReason`,
+> `chainCandidates` and `chainProblem` are pure and unit-tested in
+> `tests/batch.test.mjs`; the ledger, the chain fan-out, the cap and the
+> rejections are wire-tested there and in `tests/coverage.test.mjs`, whose two
+> guards now exercise the capabilities instead of pinning their loss.
+>
+> Four things went differently, all recorded in the script:
+>
+> - **The harness came first, as the Testing section below insisted.**
+>   `runScript` takes a `workflows` fake and returns `workflowCalls`. Writing the
+>   first test against it found a second gap nobody was looking for: the fake
+>   `pipeline` did not catch a throwing stage, while the real runtime does. A
+>   sub-workflow that threw killed the test instead of producing the `null` the
+>   ledger exists to report, so the harness was wrong in exactly the direction
+>   that would have hidden this workflow's main gate.
+> - **`chainCandidates` selects on STATUS SHAPE; the semantics go to the agent.**
+>   Rules 2 and 3 below — "whose impact includes reaching that component",
+>   "whose missing fact is another finding's established impact" — cannot be
+>   decided by a function without reading meaning out of a sentence, which is the
+>   string heuristic this plugin has regressed on five times. So the pure
+>   function pairs `NOT_EXPLOITABLE + TRUE_POSITIVE` and
+>   `NEEDS_MORE_INFO + TRUE_POSITIVE` on the statuses alone and the agent decides
+>   whether the supply is real. Rule 1 stayed structural, because comparing two
+>   sets of `file:line` blocking layers needs no interpretation.
+> - **`FALSE_POSITIVE` is not chainable, and is named rather than dropped.** It
+>   means one of six gates failed, and which one is only recoverable from prose.
+>   `TRUE_POSITIVE + TRUE_POSITIVE` is excluded too: both are already reportable,
+>   so a chain between them recovers nothing that was lost, and this phase exists
+>   for findings that were wrongly dismissed.
+> - **The shared context needed a hole in `triage-static`.** It ignores unknown
+>   args, so folding context into the child dispatch would have been silently
+>   dropped and the Context phase would have been decoration. `triage-static` now
+>   takes an optional `context` string and interpolates it into the layer and
+>   recovery prompts — the two that would otherwise re-derive the router and the
+>   framework's recovery default for every finding.
+>
+> The eval case is `evals/chained-findings`, and it is **tagged `batch`, not
+> `static`**: it has been measured zero times, and the Eval section below is
+> emphatic that a case joins a mean only after it discriminates at n=3.
+>
+> The rest of this section is kept as the record of the design.
+
 ## What is missing and why it matters
 
 Old fp-check verified several findings in one pass. In the merge **every workflow

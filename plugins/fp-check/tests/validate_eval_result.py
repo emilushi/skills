@@ -22,11 +22,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-# Two suites, and a result JSON belongs to exactly one of them. `--tag static`
+# Three suites, and a result JSON belongs to exactly one of them. `--tag static`
 # is the seven-case mean quoted against concept-prover; `--tag online` is Stage 2,
-# whose ground truth is public record. They are never averaged together — the
-# static fixtures carry no public evidence for Stage 2 to read, and Stage 2's own
-# rule is to stop when offline, so its correct behaviour scores zero there.
+# whose ground truth is public record; `--tag batch` is the multi-finding case,
+# whose answer is a statement about a PAIR of findings. None of the three is ever
+# averaged with another — the static fixtures carry no public evidence for Stage 2
+# to read, Stage 2's own rule is to stop when offline, and no static case has a
+# second finding for the batch case's question to be asked of.
 #
 # Split rather than unioned so that a run of ONE suite still has a complete-set
 # check. A single union would have made every `--tag static` result look like it
@@ -44,6 +46,9 @@ CASE_SUITES = {
     },
     "online": {
         "online-known-duplicate",
+    },
+    "batch": {
+        "chained-findings",
     },
 }
 

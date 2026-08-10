@@ -113,6 +113,57 @@ const staticAgents = (over = {}) => ({
   ...over,
 })
 
+// --- batch fixtures. `summary` carries the id so a scripted sub-workflow can
+// tell the findings apart from the args it was handed, which is also the only
+// evidence that each child got ITS finding rather than the first one repeatedly.
+const batchArgs = (ids = ['a', 'b'], over = {}) => ({
+  baseDir: BASE,
+  scope: 'the billing service and the rate client it calls',
+  findings: ids.map((id) => ({
+    id,
+    finding: { ...finding, summary: `finding ${id}` },
+    entryPoint,
+    layers: [{ name: 'sign-check', location: 'billing/charge.py:40' }],
+  })),
+  ...over,
+})
+
+const CONTEXT = {
+  entryPoints: 'POST /orders reaches billing.charge through api/orders.py',
+  trustBoundaries: 'api/mw.py authenticates every request before the router',
+  framework: 'flask 3.0 on cpython 3.12',
+  recoveryDefaults: 'werkzeug returns 500 and the worker survives',
+  declaredScope: 'SECURITY.md covers the billing service',
+  evidence: 'api/mw.py, billing/charge.py',
+}
+
+// A Stage 1 return that is unexploitable and says WHERE, in the structured layer
+// verdicts rather than only in the reason sentence — which is what pairReason
+// compares.
+const blockedAt = (name) => ({
+  status: 'NOT_EXPLOITABLE',
+  reason: `blocked at ${name} (billing/${name}.py:10)`,
+  layers: [
+    { layer: name, location: `billing/${name}.py:10`, verdict: 'PAYLOAD_STOPPED_HERE', evidence: 'the payload is rejected here' },
+  ],
+})
+
+const CHAIN_CONFIRMED = {
+  chains: true,
+  firstContribution: 'supplies an authenticated session for any tenant',
+  secondContribution: 'accepts a negative rate once past the authz layer',
+  supplies: 'the first defeats the authz check the second is blocked by',
+  impact: 'balance is minted against another tenant',
+  evidence: 'billing/authz.py:10 and billing/charge.py:44',
+}
+const NO_CHAIN = {
+  chains: false,
+  firstContribution: 'nothing',
+  secondContribution: 'nothing',
+  supplies: '',
+  evidence: 'the two are unrelated code paths',
+}
+
 const labels = (r) => r.calls.map((c) => c.label)
 const promptFor = (r, label) => {
   const call = r.calls.find((c) => c.label === label)
@@ -577,39 +628,81 @@ test('[old fp-check] on the STANDARD route the bounds proof is only a self-repor
   assert.match(promptFor(r, 'gates'), /gateMathBounds/, 'the verdict agent is not even asked about Gate 5 on the standard route')
 })
 
-test('[old fp-check] batch triage is absent, and SKILL.md says so', () => {
-  // Every workflow destructures a single `finding`, so the batch is the
-  // orchestrator's loop with no gate behind it. That is a real capability old
-  // fp-check had and the merge does not.
+test('[old fp-check] batch triage accounts for a finding whose sub-workflow died', async () => {
+  // This test used to pin the ABSENCE of batch triage, because every workflow
+  // destructured a single `finding` and the batch was the orchestrator's loop
+  // with no gate behind it. triage-batch.js is that gate, so the guard now
+  // exercises the capability instead of recording its loss.
   //
-  // This asserts the HONEST STATE rather than failing forever: the gap is fine,
-  // claiming it is not. A test that is permanently red teaches everyone to ignore
-  // red, and the next real regression goes with it.
-  assert.match(STATIC_SRC, /const \{[^}]*\bfinding\b[^}]*\} = args \|\| \{\}/)
-  assert.ok(!/\bfindings\s*[:=]/.test(STATIC_SRC), 'a findings collection exists now — rewrite this to exercise it')
-  assert.ok(/## Batch Triage/.test(SKILL_SRC), 'SKILL.md no longer mentions batch triage')
-  assert.match(
-    SKILL_SRC,
-    /Nothing in code enforces any of this/,
-    'SKILL.md describes batch triage without saying nothing enforces it. The instruction is fine; ' +
-      'presenting it as a guarantee is not, because every workflow takes exactly one finding.',
+  // The assertion is the one thing prose could never make good on: a finding
+  // whose Stage 1 returned nothing is REPORTED, matched by id. Tallying the
+  // returned array instead would show two of two verified with the third gone.
+  const r = await runScript('triage-batch.js', {
+    args: batchArgs(['a', 'b', 'c']),
+    agents: { context: CONTEXT, chain: NO_CHAIN },
+    workflows: (name, sub) => {
+      assert.equal(name, 'fp-check:triage-static', 'the batch dispatches something other than Stage 1')
+      return sub.finding.summary === 'finding b' ? null : blockedAt('authz')
+    },
+  })
+  assert.equal(r.result.status, 'BATCH_TRIAGED')
+  assert.deepEqual(r.result.findings.map((f) => f.id), ['a', 'c'])
+  assert.deepEqual(r.result.unverified.map((u) => u.id), ['b'])
+  assert.match(r.result.unverified[0].why, /returned nothing/)
+  assert.ok(
+    r.logs.some((l) => /UNVERIFIED b/.test(l)),
+    'a finding that was never triaged is absent from the log as well as from the ledger',
   )
 })
 
-test('[old fp-check] the exploit-chain check is absent, and SKILL.md says so', () => {
-  // "Two NOT_EXPLOITABLE results whose blocking layers differ" is a comparison no
-  // workflow can make: none of them sees a second finding.
+test('[old fp-check] the exploit-chain check compares two findings, in code', async () => {
+  // "Two NOT_EXPLOITABLE results whose blocking layers differ" is the comparison
+  // no single-finding workflow can make. It is `pairReason` now, and this asserts
+  // the whole route: the pair is selected, an agent is dispatched for it, and the
+  // chain reaches the return.
   assert.ok(/exploit chain/i.test(SKILL_SRC), 'SKILL.md no longer mentions exploit chains')
-  // Narrowed from /chain/i, which matched "privilege-escalation chain" in a
-  // brocard prompt and made this fail on unrelated prose.
-  for (const [name, src] of [['triage-static.js', STATIC_SRC], ['triage-online.js', ONLINE_SRC], ['triage-poc.js', POC_SRC]]) {
-    assert.ok(!/exploit.chain|chain.check/i.test(src), `${name} implements a chain check now — rewrite this`)
-  }
-  assert.match(
-    SKILL_SRC,
-    /also unenforced/,
-    'SKILL.md describes the exploit-chain check without saying no workflow can make that comparison',
+  const r = await runScript('triage-batch.js', {
+    args: batchArgs(),
+    agents: { context: CONTEXT, chain: CHAIN_CONFIRMED },
+    workflows: (name, sub) => blockedAt(sub.finding.summary === 'finding a' ? 'authz' : 'quota'),
+  })
+  assert.equal(r.result.chains.length, 1, 'no chain was reported between two differently-blocked findings')
+  assert.ok(
+    labels(r).some((l) => l.startsWith('chain:')),
+    'no chain agent was dispatched, so the comparison was never made',
   )
+})
+
+test('[old fp-check] the batch context reaches the prompts that would re-derive it', async () => {
+  // The other half of the batch's cost argument, and the half that lives in
+  // triage-static: deriving the router, the trust boundaries and the framework's
+  // recovery default ONCE is only a saving if the children are actually told.
+  // triage-static ignores args it does not read, so a context that never reached
+  // a prompt would be silently dropped and the Context phase would be decoration.
+  const r = await runScript('triage-static.js', {
+    args: standardArgs({ context: 'Framework: flask 3.0; werkzeug returns 500 and the worker survives' }),
+    agents: staticAgents(),
+  })
+  for (const label of ['layer:sign-check', 'recovery']) {
+    assert.match(promptFor(r, label), /werkzeug returns 500/, `the ${label} agent was not given the shared context`)
+  }
+  // And a single dispatch, which supplies none, must not get the heading with
+  // nothing under it — an empty block reads to the agent as an established fact.
+  const alone = await runScript('triage-static.js', { args: standardArgs(), agents: staticAgents() })
+  assert.ok(!/Shared context/.test(promptFor(alone, 'recovery')), 'a single dispatch was given an empty context heading')
+})
+
+test('[old fp-check] two findings behind the SAME wall are not paired', async () => {
+  // The other half of the rule, and the half that keeps this phase affordable:
+  // the same blocking layer means the same wall, and composing two findings that
+  // die at it changes nothing.
+  const r = await runScript('triage-batch.js', {
+    args: batchArgs(),
+    agents: { context: CONTEXT, chain: CHAIN_CONFIRMED },
+    workflows: () => blockedAt('authz'),
+  })
+  assert.deepEqual(r.result.chainCandidates, [], 'identically-blocked findings were paired')
+  assert.ok(!labels(r).some((l) => l.startsWith('chain:')), 'an agent was paid for a pair with nothing to compose')
 })
 
 // ===================================================================

@@ -396,18 +396,66 @@ apart.** Mapping both to FALSE POSITIVE is the rounding error this skill prevent
 
 ## Batch Triage
 
-**Nothing in code enforces any of this.** Every workflow takes exactly one
-`finding`; the batch is your loop, with no gate that fails when you skip one, so
-keep your own record of which finding returned what.
+More than one finding goes through **`fp-check:triage-batch`**, not through your
+own loop. It derives the shared context once, dispatches Stage 1 per finding with
+it, and **accounts for every finding by id** — one whose sub-workflow returned
+nothing comes back in `unverified`, never silently absent. That accounting is the
+reason it is a workflow and not an instruction.
 
 1. Run Step 0 for every finding first — restating the claims collapses the obvious
    false positives immediately and costs nothing.
 2. Ask the two questions **once**, for the batch.
-3. Dispatch Stage 1 per finding. Each is independent and they may run concurrently.
-4. Then check for **exploit chains** — also unenforced, and a comparison no
-   workflow can make, since none of them sees a second finding: findings that
-   individually failed a gate may combine into a viable attack. Two
-   `NOT_EXPLOITABLE` results whose blocking layers differ is the shape to look for.
+3. Dispatch `fp-check:triage-batch` once, with all of them.
+4. Stages 2 and 3 stay yours, per finding. `workflow()` does not nest, so the
+   batch dispatches Stage 1 and nothing else.
+
+```text
+Workflow({ name: 'fp-check:triage-batch', args })
+
+args = {
+  baseDir   absolute path of this skill's directory — see above
+  scope     a STRING, the declared scope for the whole batch; forwarded to every
+            Stage 1 dispatch, so a per-finding scope means separate dispatches
+  project   optional; what the codebase is, for the shared-context agent
+  findings: [ { id, finding, entryPoint, layers, layersSearched, route,
+                crossComponent, ambiguous } ]
+            at most 5, and more is rejected before anything is spent. `id` is
+            yours, must be unique, and is what the ledger and any chain names.
+            Every other field is Stage 1's, with the contract documented above
+}
+```
+
+Returns `BATCH_TRIAGED`, carrying `findings` (a row per verdict), `unverified`,
+`chains`, and `notChainable`. Report each row exactly as you would a single
+dispatch, using the Verdicts table — **an `unverified` row is NEEDS MORE INFO and
+must be reported, not omitted.** `BLOCKED` means the batch itself could not run:
+an unusable arg shape, or no finding reaching a verdict at all.
+
+The shared context reaches each Stage 1 as its `context` argument. That argument
+is the batch's to supply; do not send one on a single dispatch, where the agents
+derive those facts themselves.
+
+### The exploit chain check
+
+Findings that individually failed a gate may combine into a viable attack. This is
+the only place in the plugin where that comparison exists, because no other
+workflow sees a second finding. The pairs worth an agent are chosen in code:
+
+| Pair | Why it is checked |
+|---|---|
+| two `NOT_EXPLOITABLE` **whose blocking layers differ** | the same wall stopping both composes to nothing; different walls may. This is the shape the check is for |
+| `NOT_EXPLOITABLE` + `TRUE_POSITIVE` | "you cannot get there" plus "here is how you get there" |
+| `NEEDS_MORE_INFO` + `TRUE_POSITIVE` | the missing fact may be the other finding's established impact |
+
+`ALREADY_FIXED` pairs with nothing — it is dead, and pairing it invites the chain
+agent to argue it back to life. `NOT_VULNERABLE`, `OUT_OF_SCOPE`, `FALSE_POSITIVE`
+and `BLOCKED` are not chainable either, and come back named in `notChainable`
+rather than dropped. At most **3** pairs are checked; the rest are named in
+`chainsBeyondCap` as unchecked, which is not the same as no chain.
+
+A chain is only reported when the agent names both contributions **and** the
+mechanism by which one supplies what the other lacks. "Both are auth bugs" is
+rejected in code and logged.
 
 ## Rationalizations to Reject
 

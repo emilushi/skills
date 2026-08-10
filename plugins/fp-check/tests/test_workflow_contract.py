@@ -579,6 +579,12 @@ GATE_FIELD_CONTRACTS = [
     # require the one field this gate reads.
     ("triage-online.js", "needsUserCensus", "REACHABILITY_SCHEMA", ("reachability",), set()),
     ("triage-online.js", "needsUserCensus", "SCOPE_SCHEMA", ("scope",), set()),
+    # `impact` is exempt: the batch return carries it through for the reader and
+    # `chainProblem` does not branch on it, so requiring it would pin a field the
+    # gate does not read. Everything the gate DOES read decides whether a claimed
+    # chain is reported, so all four are required.
+    ("triage-batch.js", "chainProblem", "CHAIN_SCHEMA", ("v",), set()),
+    ("triage-batch.js", "contextBlock", "CONTEXT_SCHEMA", ("ctx",), set()),
 ]
 
 
@@ -1024,6 +1030,61 @@ def test_the_layer_cap_default_matches_max_layers():
     assert const.group(1) == default.group(1), (
         f"MAX_LAYERS is {const.group(1)} but missingArgs defaults maxLayers to "
         f"{default.group(1)}; the arg gate and the dispatch cap disagree"
+    )
+
+
+def test_the_findings_cap_default_matches_max_findings():
+    """`missingArgs(a, maxFindings = N)` must not drift from `MAX_FINDINGS = N`.
+
+    Same bargain, and same reason for it, as MAX_LAYERS: the cap is a defaulted
+    parameter so the unit tests can extract the function and evaluate it alone,
+    and that independence is exactly what lets the two numbers drift.
+    """
+    src = strip_strings_and_comments((WORKFLOW_DIR / "triage-batch.js").read_text())
+    const = re.search(r"const\s+MAX_FINDINGS\s*=\s*(\d+)", src)
+    default = re.search(r"function\s+missingArgs\(\s*a\s*,\s*maxFindings\s*=\s*(\d+)\s*\)", src)
+    assert const, "MAX_FINDINGS constant not found"
+    assert default, "triage-batch's missingArgs does not take a defaulted maxFindings parameter"
+    assert const.group(1) == default.group(1), (
+        f"MAX_FINDINGS is {const.group(1)} but missingArgs defaults maxFindings to "
+        f"{default.group(1)}; the arg gate and the dispatch cap disagree"
+    )
+
+
+def test_the_batch_entry_contract_matches_triage_static():
+    """triage-batch re-validates each entry against triage-static's own field list.
+
+    It has to duplicate that list — workflow scripts have no module system — and
+    a duplicated validator is exactly the drift this repo has been bitten by. The
+    duplication buys something real: the batch rejects an unusable entry BEFORE
+    the shared-context agent is paid for, rather than after. This pin is what
+    makes it safe, and it fails in both directions, so neither list can quietly
+    gain or lose a field.
+    """
+    # Comment-stripped: the field names are string literals, so the full stripper
+    # would blank the very thing being compared, while a commented-out `need` is
+    # not a requirement and must not count on either side.
+    static_src = strip_comments((WORKFLOW_DIR / "triage-static.js").read_text())
+    static_body = re.search(r"function missingArgs\([\s\S]*?\n\}", static_src)
+    assert static_body, "triage-static's missingArgs not found; this pin is stale"
+    static_fields = set(re.findall(r"need\(\s*'(finding|entryPoint)\.(\w+)'", static_body.group(0)))
+    assert static_fields, (
+        "triage-static requires no finding/entryPoint field; refusing to report success"
+    )
+
+    batch_src = strip_comments((WORKFLOW_DIR / "triage-batch.js").read_text())
+    # `\n\s*\]`, not `\n\]`: ENTRY_FIELDS lives INSIDE missingArgs, because the
+    # unit tests extract that function and evaluate it alone, where a module-level
+    # const is a ReferenceError. So its closing bracket is indented.
+    listing = re.search(r"const ENTRY_FIELDS = \[[\s\S]*?\n\s*\]", batch_src)
+    assert listing, "triage-batch's ENTRY_FIELDS not found; this pin is stale"
+    batch_fields = set(re.findall(r"\[\s*'(finding|entryPoint)',\s*'(\w+)'\s*\]", listing.group(0)))
+    assert batch_fields, "ENTRY_FIELDS is empty; the batch would dispatch entries it never checked"
+
+    assert batch_fields == static_fields, (
+        f"triage-batch checks {sorted(batch_fields - static_fields)} that triage-static does not "
+        f"require, and misses {sorted(static_fields - batch_fields)} that it does. A field only "
+        f"triage-static requires is one the batch pays for a context agent before discovering."
     )
 
 

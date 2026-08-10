@@ -95,14 +95,23 @@ export const script = (file) => join(WORKFLOWS, file)
  * `label` (falling back to positional order), so a test scripts what each stage
  * answers and asserts on the status that comes back.
  *
+ * A nested `workflow()` is served the same way, from `workflows`, and left
+ * throwing when a test does not script one. triage-batch.js is the only script
+ * that calls it, and every gate it exists for — the per-finding ledger, the
+ * unverified report, the chain fan-out — is downstream of what the sub-workflow
+ * returned. Without an injectable fake none of them can be exercised without a
+ * model, which is the same hole `agent` had before this harness existed.
+ *
  * @param {string} file      workflow filename, e.g. 'review-poc.js'
  * @param {object} opts
  * @param {object} opts.args        the `args` global the script destructures
  * @param {object} opts.agents      label -> response (or a function of the prompt)
  * @param {Array}  [opts.sequence]  responses by call order, when labels collide
- * @returns {Promise<{result: any, calls: Array, logs: string[], phases: string[]}>}
+ * @param {object|Function} [opts.workflows]  name -> response (or a function of
+ *                                  the name and the args the script passed down)
+ * @returns {Promise<{result: any, calls: Array, logs: string[], phases: string[], workflowCalls: Array}>}
  */
-export async function runScript(file, { args, agents = {}, sequence = null }) {
+export async function runScript(file, { args, agents = {}, sequence = null, workflows = null }) {
   const src = readFileSync(script(file), 'utf8')
   const body = src.replace(/^export const meta = \{[\s\S]*?\n\}\n/, '')
   if (body === src) throw new Error(`${file}: could not strip the meta block`)
@@ -110,6 +119,7 @@ export async function runScript(file, { args, agents = {}, sequence = null }) {
   const calls = []
   const logs = []
   const phases = []
+  const workflowCalls = []
 
   const agent = async (prompt, opts = {}) => {
     const label = opts.label || `call-${calls.length}`
@@ -124,14 +134,42 @@ export async function runScript(file, { args, agents = {}, sequence = null }) {
   // rejecting the whole call, so `.filter(Boolean)` is what removes it.
   const parallel = async (thunks) =>
     Promise.all(thunks.map((t) => Promise.resolve().then(t).catch(() => null)))
+  // Mirrors the real contract on both counts: results keep their POSITION, and a
+  // stage that throws drops THAT item to null and skips its remaining stages
+  // rather than rejecting the whole call. The second half was missing, so a
+  // sub-workflow that threw — which is how `workflow()` reports an unknown name
+  // or a dead child — killed the test instead of producing the null the caller
+  // has to account for.
+  //
+  // The cost of the fidelity is real and worth stating: a TypeError in the script
+  // under test now becomes a null here too, exactly as it would in production.
   const pipeline = async (items, ...stages) => {
     const out = []
     for (const [i, item] of items.entries()) {
       let value = item
-      for (const stage of stages) value = await stage(value, item, i)
+      try {
+        for (const stage of stages) value = await stage(value, item, i)
+      } catch {
+        value = null
+      }
       out.push(value)
     }
     return out
+  }
+
+  // Records the call BEFORE deciding what to answer with, so a test can assert on
+  // what was dispatched even when it scripted no response for it — and so the
+  // unscripted case still throws, which is what `pipeline` turns into the `null`
+  // the batch ledger has to report as unverified.
+  const workflow = async (name, subArgs) => {
+    workflowCalls.push({ name, args: subArgs })
+    if (!workflows) {
+      throw new Error(`nested workflow('${name}') is not scripted; pass \`workflows\` to runScript`)
+    }
+    const i = workflowCalls.length - 1
+    const canned = typeof workflows === 'function' ? workflows(name, subArgs, i) : workflows[name]
+    if (canned === undefined) throw new Error(`no scripted response for workflow('${name}')`)
+    return typeof canned === 'function' ? canned(subArgs, i) : canned
   }
 
   const fn = new Function(
@@ -146,9 +184,7 @@ export async function runScript(file, { args, agents = {}, sequence = null }) {
     (m) => logs.push(String(m)),
     (p) => phases.push(String(p)),
     { total: null, spent: () => 0, remaining: () => Infinity },
-    async () => {
-      throw new Error('nested workflow() is not supported in tests')
-    },
+    workflow,
   )
-  return { result, calls, logs, phases }
+  return { result, calls, logs, phases, workflowCalls }
 }
