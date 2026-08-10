@@ -15,7 +15,8 @@ export const meta = {
 
 // ============================================================================
 // Design, in three rules. The measurements behind them are in
-// tools/c-review-bench/MEASUREMENTS.md; they are not repeated here because a
+// the internal c-review benchmark harness, which does not ship with this plugin; they are
+// not repeated here because a
 // number copied into a comment goes stale and no test catches it.
 //
 //   1. LOCATION is the partition. Every line has exactly one owner, generated

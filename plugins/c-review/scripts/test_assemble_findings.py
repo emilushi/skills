@@ -211,7 +211,7 @@ def big_run(tmp_path, per_part=22, parts=4):
 
 
 def test_p1_large_run_keeps_every_finding_and_every_evidence_field(tmp_path):
-    """tools/c-review-bench/MEASUREMENTS.md §5: 86 candidates in, 23 out, evidence stripped from 23 of 23.
+    """A measured harness failure: 86 candidates in, 23 out, evidence stripped from 23 of 23.
 
     An LLM persist agent is faithful at 15 and 25 findings and destroys the document at 75
     and 86, which is why assembly is code. This is that volume.

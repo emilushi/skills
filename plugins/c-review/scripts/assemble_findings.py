@@ -116,7 +116,7 @@ FLOW_STOPWORDS = frozenset(
     read copy copied""".split()
 )
 
-# The consolidated 56-class catalogue (66 -> 56, see tools/c-review-bench/MEASUREMENTS.md). It is
+# The consolidated 56-class catalogue (66 -> 56, per the internal benchmark harness). It is
 # duplicated from the JS workflow's CLASSES object rather than parsed out of it: this script
 # must run with no dependencies and no JS runtime, and a parser that half-matches a foreign
 # file is this repository's most expensive recurring bug. The duplication is held honest by

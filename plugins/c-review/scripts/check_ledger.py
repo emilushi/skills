@@ -9,7 +9,7 @@ Coverage is measured against the parse, **never against the reviewer's own accou
 what it reviewed**: validating the rows that are present rather than the rows that are
 owed lets a fabricated or omitted row pass as clean.
 
-Four rules, each from a measured failure (tools/c-review-bench/MEASUREMENTS.md):
+Four rules, each from a measured failure recorded by the internal benchmark harness:
 
 1. **A finding raises the prior; it never closes the unit.** A `finding` row still
    owes an account of the rest of its population.

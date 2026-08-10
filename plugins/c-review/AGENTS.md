@@ -296,18 +296,14 @@ crowds out the expensive one inside a single agent's budget.
 
 ## Evaluation
 
-The plugin is measured, not argued. The benchmark harness is `tools/c-review-bench/` in the
-[trailofbits/skills](https://github.com/trailofbits/skills) repository — it does **not** ship
-with the installed plugin, so everything named here is a path in that repository rather than
-a file a user has. `MEASUREMENTS.md` there records every measured cell and its `README.md`
-how to reproduce one.
+The plugin is measured, not argued. The measurements come from an internal benchmark harness
+that is **not part of this repository** — it is kept separately because it carries sealed
+corpora whose answers must not be public. Nothing in this plugin resolves to it; every claim
+below is stated so it stands without the harness in front of you.
 
 Do not quote a per-cell number into a doc in this plugin: a number in a doc goes stale and
-no test catches it.
-
-The harness suite runs in neither `make check` nor CI — `make python-tests` discovers under
-`plugins/` only — so run `uv run pytest tools/c-review-bench/tests` by hand after touching
-the harness.
+no test catches it. Ask for the harness if you need to re-measure before changing a
+load-bearing rule.
 
 Bugs are injected at sites we chose rather than taken from public CVEs, so no database holds
 the answers, and the real-C corpora are de-identified. **De-identification is not sufficient
