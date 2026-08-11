@@ -40,7 +40,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # --effort below is ignored once the skill loads, and the EFFORTS sweep that chose
 # that value cannot be reproduced against the plugin as shipped. To re-sweep, copy
 # the plugin, strip the `effort:` line from the copy, and point PLUGIN_DIR at it.
-plugin_root="${PLUGIN_DIR:-$(cd "$here/../../.." && pwd)}"
+plugin_root="${PLUGIN_DIR:-$(cd "$here/.." && pwd)}"
 efforts="${EFFORTS:-low medium high}"
 noplugin="${NOPLUGIN:-}"
 # Pinned for the same reason as run.sh: a score with no model attached cannot be

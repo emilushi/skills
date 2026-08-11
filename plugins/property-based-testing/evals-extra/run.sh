@@ -48,7 +48,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 # PLUGIN_DIR points the sweep at a different copy of the plugin — used to score an
 # older SKILL.md against the current one without touching the working tree.
-plugin_root="${PLUGIN_DIR:-$(cd "$here/../../.." && pwd)}"
+plugin_root="${PLUGIN_DIR:-$(cd "$here/.." && pwd)}"
 skill_id="property-based-testing"
 # Pinned, not inherited. Trigger rate is a property of a description *and* a model,
 # so a result recorded without one is not comparable to the next one.

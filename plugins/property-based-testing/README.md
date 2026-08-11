@@ -55,7 +55,6 @@ The skill ships three evals, because "the skill fires" and "the skill helps" are
 different claims and only the second one matters to a user.
 
 ```sh
-cd skills/property-based-testing
 ./evals-extra/run.sh              # trigger rate against labelled queries
 ./evals-extra/effectiveness.sh    # does the generated suite catch a real bug?
 ```

@@ -16,19 +16,29 @@ EVM smart contracts.
 ## Structure
 
 ```
-property-based-testing/
+skills/property-based-testing/
 ├── SKILL.md                          # Property catalog, failure modes, routing
-├── references/
-│   ├── generating.md                 # Strategy design, settings, edge cases
-│   ├── reviewing.md                  # Quality issues by severity
-│   ├── interpreting-failures.md      # Grounding and classifying a failure
-│   └── libraries.md                  # Library per language; Echidna/Medusa
-└── evals-extra/                      # run by hand, never by `make check`
-    ├── run.sh                        # Trigger-rate eval
-    ├── effectiveness.sh              # Does the suite find a real bug?
-    ├── *.md                          # Labelled queries (query/should_trigger)
-    └── fixture/                      # Small repo the queries refer to
+└── references/
+    ├── generating.md                 # Strategy design, settings, edge cases
+    ├── reviewing.md                  # Quality issues by severity
+    ├── interpreting-failures.md      # Grounding and classifying a failure
+    └── libraries.md                  # Library per language; Echidna/Medusa
 ```
+
+The eval harnesses are deliberately **not** inside the skill. They sit at the plugin
+root alongside `evals/`, so a directory the model reads guidance from does not also
+ship 900 lines of bash, a `requirements.txt` naming hypothesis, and a fixture full of
+tests that are broken on purpose:
+
+```
+evals-extra/                          # run by hand, never by `make check`
+├── run.sh                            # Trigger-rate eval
+├── effectiveness.sh                  # Does the suite find a real bug?
+├── *.md                              # Labelled queries (query/should_trigger)
+└── fixture/                          # Small repo the queries refer to
+```
+
+**Every command below runs from the plugin root** (`plugins/property-based-testing/`).
 
 ## Evals
 
