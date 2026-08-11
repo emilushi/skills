@@ -80,7 +80,8 @@ run_suite() {
 # not — quoting with "%" in the safe set still lets NFKC folding reintroduce
 # uppercase after .lower(). Identity sidesteps that entirely.
 patch_codec() {
-  python3 - "$1/src/codec.py" <<'PY'
+  # Through uv: a bare `python3` is rejected by the modern-python shim (#207).
+  uv run --no-project python3 - "$1/src/codec.py" <<'PY'
 import re, sys
 p = sys.argv[1]
 src = open(p).read()
@@ -102,7 +103,16 @@ grade() {
   }
 
   cp "$dir/src/codec.py" "$dir/src/codec.py.bak"
-  patch_codec "$dir"
+  # A failed patch is ERR, never a grade. `set -e` does not propagate out of a
+  # function into the command substitution this runs in, so without this branch the
+  # "after" suite scored against the UNPATCHED fixture — before and after come out
+  # identical, nothing moves, and a suite that caught the defect is written down as
+  # `part`. It also disarmed patch_codec's own fixture-drift guard.
+  if ! patch_codec "$dir"; then
+    mv "$dir/src/codec.py.bak" "$dir/src/codec.py"
+    echo ERR
+    return
+  fi
   after="$(run_suite "$dir")"
   mv "$dir/src/codec.py.bak" "$dir/src/codec.py"
 
@@ -180,9 +190,28 @@ PY
   check "an unimportable suite is ERR, not a clean miss" ERR "$got"
   rm -rf "$d"
 
+  # Fixture drift: a codec.py with no canonicalize_url to replace. The patch cannot
+  # run, so there is no "after" to compare against and the only honest answer is ERR.
+  # Graded rather than refused, this is the flattered broken run — a real detection
+  # written down as `part`, forever, with nothing in the output saying why.
+  d="$(mktemp -d)"
+  cp -R "$here/fixture/." "$d/"
+  mkdir -p "$d/tests"
+  printf 'def unrelated():\n    return 1\n' >"$d/src/codec.py"
+  cat >"$d/tests/test_codec_props.py" <<'PY'
+from src.codec import unrelated
+
+
+def test_unrelated():
+    assert unrelated() == 2
+PY
+  got="$(grade "$d" 2>/dev/null)"
+  check "a fixture the patch cannot apply to is ERR, not a grade" ERR "$got"
+  rm -rf "$d"
+
   echo
-  if [ "$asserts" -lt 3 ]; then
-    echo "self-test ran $asserts assertions, expected 3 — the self-test is broken" >&2
+  if [ "$asserts" -lt 4 ]; then
+    echo "self-test ran $asserts assertions, expected 4 — the self-test is broken" >&2
     exit 2
   fi
   [ "$fails" -eq 0 ] || {
