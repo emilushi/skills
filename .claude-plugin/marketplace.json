@@ -10,20 +10,9 @@
   },
   "plugins": [
     {
-      "name": "ask-questions-if-underspecified",
-      "version": "1.0.2",
-      "description": "Clarify ambiguous requirements by asking questions before implementing. Only when invoked explicitly.",
-      "author": {
-        "name": "Kevin Valerio",
-        "email": "opensource@trailofbits.com",
-        "url": "https://github.com/trailofbits"
-      },
-      "source": "./plugins/ask-questions-if-underspecified"
-    },
-    {
       "name": "audit-context-building",
-      "description": "Build deep architectural context through ultra-granular code analysis before vulnerability hunting",
-      "version": "1.1.1",
+      "description": "Understand a codebase before looking for bugs in it. Reads it function by function, records what each one assumes and depends on, and saves the write-ups to files instead of filling up the conversation.",
+      "version": "2.0.0",
       "author": {
         "name": "Omar Inuwa"
       },
@@ -34,7 +23,7 @@
       "version": "1.1.2",
       "description": "Comprehensive smart contract security toolkit based on Trail of Bits' Building Secure Contracts framework. Includes vulnerability scanners for 6 blockchains and 5 development guideline assistants.",
       "author": {
-        "name": "Omar Inuwa && Paweł Płatek"
+        "name": "Omar Inuwa && Pawe\u0142 P\u0142atek"
       },
       "source": "./plugins/building-secure-contracts"
     },
@@ -58,7 +47,7 @@
     },
     {
       "name": "constant-time-analysis",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "description": "Detect compiler-induced timing side-channels in cryptographic code",
       "author": {
         "name": "Scott Arciszewski",
@@ -74,16 +63,6 @@
         "name": "Dan Guido"
       },
       "source": "./plugins/culture-index"
-    },
-    {
-      "name": "debug-buttercup",
-      "version": "1.0.1",
-      "description": "Debug Buttercup Kubernetes deployments",
-      "author": {
-        "name": "Ronald Eytchison",
-        "email": "opensource@trailofbits.com"
-      },
-      "source": "./plugins/debug-buttercup"
     },
     {
       "name": "devcontainer-setup",
@@ -126,8 +105,8 @@
     },
     {
       "name": "dwarf-expert",
-      "description": "Interact with and understand the DWARF debugging format",
-      "version": "1.0.1",
+      "description": "Analyze DWARF debug information: parse and search DIEs with dwarfdump and readelf, verify debug info integrity, and write DWARF parsing code",
+      "version": "1.1.0",
       "author": {
         "name": "Evan Hellman",
         "email": "opensource@trailofbits.com"
@@ -148,7 +127,7 @@
     {
       "name": "mutation-testing",
       "version": "1.0.1",
-      "description": "Configures mewt or muton mutation testing campaigns — scopes targets, tunes timeouts, and optimizes long-running runs. Use when the user mentions mewt, muton, mutation testing, or wants to configure or optimize a mutation testing campaign.",
+      "description": "Configures mewt or muton mutation testing campaigns \u2014 scopes targets, tunes timeouts, and optimizes long-running runs. Use when the user mentions mewt, muton, mutation testing, or wants to configure or optimize a mutation testing campaign.",
       "author": {
         "name": "Trail of Bits",
         "email": "opensource@trailofbits.com",
@@ -177,7 +156,7 @@
     },
     {
       "name": "semgrep-rule-variant-creator",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "description": "Creates language variants of existing Semgrep rules with proper applicability analysis and test-driven validation",
       "author": {
         "name": "Maciej Domanski",
@@ -198,17 +177,17 @@
     },
     {
       "name": "static-analysis",
-      "version": "1.2.2",
+      "version": "1.3.0",
       "description": "Static analysis toolkit with CodeQL, Semgrep, and SARIF parsing for security vulnerability detection",
       "author": {
-        "name": "Axel Mierczuk & Paweł Płatek"
+        "name": "Axel Mierczuk & Pawe\u0142 P\u0142atek"
       },
       "source": "./plugins/static-analysis"
     },
     {
       "name": "spec-to-code-compliance",
-      "description": "Specification-to-code compliance checker for blockchain audits with evidence-based alignment analysis",
-      "version": "1.1.1",
+      "description": "Check code against the documentation that specifies it: one agent per requirement, divergences refuted before they are reported, evidence cited to the line",
+      "version": "2.0.0",
       "author": {
         "name": "Omar Inuwa"
       },
@@ -219,14 +198,14 @@
       "version": "1.0.2",
       "description": "Skills from the Trail of Bits Application Security Testing Handbook (appsec.guide)",
       "author": {
-        "name": "Paweł Płatek"
+        "name": "Pawe\u0142 P\u0142atek"
       },
       "source": "./plugins/testing-handbook-skills"
     },
     {
       "name": "trailmark",
-      "version": "0.8.2",
-      "description": "Builds multi-language source code graphs for security analysis: call graphs, attack surface mapping, blast radius, taint propagation, complexity hotspots, and entry point enumeration. Generates Mermaid diagrams (call graphs, class hierarchies, dependency maps, heatmaps). Compares code graph snapshots for structural diff and evolution analysis. Runs graph-informed mutation testing triage (genotoxic). Generates mutation-driven test vectors (vector-forge). Extracts crypto protocol message flows and converts Mermaid diagrams to ProVerif models. Projects SARIF and weAudit findings onto code graphs. Use when analyzing call paths, mapping attack surface, visualizing code architecture, triaging survived mutants, generating cryptographic test vectors, diagramming crypto protocols, formally verifying protocols, or augmenting audits with static analysis findings.",
+      "version": "0.10.0",
+      "description": "Builds multi-language source and binary code graphs for security analysis: call graphs, attack surface mapping, blast radius, taint propagation, complexity hotspots, entry point enumeration, proxy/unresolved-call tracking, type/reference analysis, and structural diffs. Creates bounded, graph-informed source packets for delegating focused work to constrained subagents. Generates Mermaid diagrams, runs graph-informed mutation testing triage (genotoxic), generates mutation-driven test vectors (vector-forge), extracts crypto protocol message flows, converts Mermaid diagrams to ProVerif models, projects SARIF/weAudit/binary findings onto code graphs, triages single findings with graph evidence, gates branch diffs for structural review regressions, and expands seed findings into variant-neighborhood candidates. Use when analyzing call paths, slicing source context for smaller models, mapping attack surface, visualizing code architecture, triaging survived mutants, generating cryptographic test vectors, diagramming crypto protocols, formally verifying protocols, augmenting audits with static analysis findings, deciding whether one candidate issue is reachable, reviewing graph-level PR risk, or seeding variant analysis.",
       "author": {
         "name": "Scott Arciszewski",
         "url": "https://github.com/tob-scott-a"
@@ -235,7 +214,7 @@
     },
     {
       "name": "variant-analysis",
-      "version": "1.0.1",
+      "version": "2.0.1",
       "description": "Find similar vulnerabilities and bugs across codebases using pattern-based analysis",
       "author": {
         "name": "Axel Mierczuk"
@@ -244,16 +223,25 @@
     },
     {
       "name": "c-review",
-      "version": "1.1.3",
+      "version": "1.2.0",
       "description": "Comprehensive C/C++ security code review with specialized bug-finding agents covering memory safety, type safety, concurrency, and Linux/Windows userspace-specific issues",
       "author": {
-        "name": "Paweł Płatek"
+        "name": "Pawe\u0142 P\u0142atek"
       },
       "source": "./plugins/c-review"
     },
     {
+      "name": "rust-review",
+      "version": "1.0.0",
+      "description": "Comprehensive Rust security code review with specialized bug-finding agents covering the safe/unsafe boundary, memory safety in unsafe blocks, concurrency, panic-induced DoS, recursion-induced stack overflow, FFI, and async runtime hazards",
+      "author": {
+        "name": "Andrea Cappa (Aptos Labs) & Pawe\u0142 P\u0142atek (Trail of Bits)"
+      },
+      "source": "./plugins/rust-review"
+    },
+    {
       "name": "modern-python",
-      "version": "1.5.2",
+      "version": "1.5.3",
       "description": "Modern Python best practices. Use when creating new Python projects, and writing Python scripts, or migrating existing projects from legacy tools.",
       "author": {
         "name": "William Tan",
@@ -264,7 +252,7 @@
     },
     {
       "name": "insecure-defaults",
-      "version": "1.0.1",
+      "version": "2.0.0",
       "description": "Detects insecure default configurations including hardcoded credentials, fallback secrets, weak authentication defaults, and dangerous values in production",
       "author": {
         "name": "Trail of Bits",
@@ -284,7 +272,7 @@
     },
     {
       "name": "yara-authoring",
-      "version": "2.0.1",
+      "version": "2.1.0",
       "description": "YARA-X detection rule authoring with linting and quality analysis",
       "author": {
         "name": "Trail of Bits",
@@ -305,31 +293,11 @@
       "source": "./plugins/git-cleanup"
     },
     {
-      "name": "workflow-skill-design",
-      "version": "1.0.2",
-      "description": "Teaches design patterns for workflow-based Claude Code skills and provides a review agent for auditing existing skills",
-      "author": {
-        "name": "Benjamin Samuels",
-        "email": "opensource@trailofbits.com",
-        "url": "https://github.com/trailofbits"
-      },
-      "source": "./plugins/workflow-skill-design"
-    },
-    {
-      "name": "seatbelt-sandboxer",
-      "version": "1.0.1",
-      "description": "Generate minimal macOS Seatbelt sandbox configurations for applications",
-      "author": {
-        "name": "Spencer Michaels"
-      },
-      "source": "./plugins/seatbelt-sandboxer"
-    },
-    {
       "name": "supply-chain-risk-auditor",
-      "version": "1.0.1",
-      "description": "Audit supply-chain threat landscape of project dependencies for exploitation or takeover risk",
+      "version": "2.0.0",
+      "description": "Audit a project's npm, PyPI, and Go dependencies for supply-chain risk: version-matched advisories for direct dependencies and the full lockfile tree, abandoned upstreams, npm publisher concentration, and install scripts",
       "author": {
-        "name": "Spencer Michaels"
+        "name": "Eric Quintero"
       },
       "source": "./plugins/supply-chain-risk-auditor"
     },
@@ -346,7 +314,7 @@
     },
     {
       "name": "let-fate-decide",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "description": "Draws the 12 Houses of the Zodiac Tarot spread using cryptographic randomness to add 100+ bits of entropy to vague or underspecified planning. Interprets the spread to guide next steps. Use when feeling lucky, invoking heart-of-the-cards energy, or when prompts are ambiguous.",
       "author": {
         "name": "Scott Arciszewski",
@@ -359,16 +327,16 @@
       "version": "1.2.1",
       "description": "Audits GitHub Actions workflows for security vulnerabilities in AI agent integrations (Claude Code Action, Gemini CLI, OpenAI Codex, GitHub AI Inference)",
       "author": {
-        "name": "Emilio López & Will Vandevanter"
+        "name": "Emilio L\u00f3pez & Will Vandevanter"
       },
       "source": "./plugins/agentic-actions-auditor"
     },
     {
       "name": "skill-improver",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "description": "Automatically reviews and fixes Claude Code skills through iterative refinement until they meet quality standards. Requires plugin-dev plugin.",
       "author": {
-        "name": "Paweł Płatek",
+        "name": "Pawe\u0142 P\u0142atek",
         "url": "https://github.com/GrosQuildu"
       },
       "source": "./plugins/skill-improver"
@@ -392,6 +360,50 @@
         "url": "https://github.com/trailofbits"
       },
       "source": "./plugins/dimensional-analysis"
+    },
+    {
+      "name": "vulnerability-triage-brocards",
+      "version": "0.1.0",
+      "description": "Principled framework for triaging vulnerability reports using 7 brocards (rules of thumb). Evaluates incoming CVEs, bug bounty submissions, and security findings against structured dismissal/acceptance criteria before escalating to deeper analysis.",
+      "author": {
+        "name": "Alexis Challande",
+        "email": "opensource@trailofbits.com",
+        "url": "https://github.com/trailofbits"
+      },
+      "source": "./plugins/vulnerability-triage-brocards"
+    },
+    {
+      "name": "github-triage",
+      "version": "0.1.0",
+      "description": "Triages a repository's open GitHub issues and pull requests via the gh CLI: optionally merges ready bot and maintainer-approved PRs and spawns review subagents for unreviewed ones, closes already-resolved issues with referenced explanations, cross-links issues with pending fix PRs, and assigns local-only priority and change-size estimates.",
+      "author": {
+        "name": "Evan Sultanik",
+        "email": "opensource@trailofbits.com",
+        "url": "https://github.com/trailofbits"
+      },
+      "source": "./plugins/github-triage"
+    },
+    {
+      "name": "open-sourcing",
+      "version": "0.1.0",
+      "description": "Prepares a repository for public open-source release: secrets-history hygiene, license selection, documentation and CI readiness checks, and language-specific packaging and release guidance.",
+      "author": {
+        "name": "Evan Sultanik",
+        "email": "opensource@trailofbits.com",
+        "url": "https://github.com/trailofbits"
+      },
+      "source": "./plugins/open-sourcing"
+    },
+    {
+      "name": "writing-lean-proofs",
+      "version": "0.1.0",
+      "description": "Structured Lean 4 proof writing and library design following Mathlib conventions",
+      "author": {
+        "name": "Fredrik Dahlgren",
+        "email": "opensource@trailofbits.com",
+        "url": "https://github.com/trailofbits"
+      },
+      "source": "./plugins/writing-lean-proofs"
     }
   ]
 }

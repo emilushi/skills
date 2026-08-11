@@ -5,6 +5,8 @@
 
 # Python
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 *.py[cod]
 *$py.class
 *.so
@@ -13,7 +15,10 @@ __pycache__/
 venv/
 ENV/
 .uv/
-uv.lock
+# Root uv.lock is ephemeral (no root pyproject.toml); plugin lockfiles are real
+# artifacts and must be committed, or Dependabot can only raise version floors.
+/uv.lock
+!plugins/**/uv.lock
 
 # IDE
 .idea/
