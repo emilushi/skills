@@ -86,8 +86,16 @@ turns="${TURNS:-200}"
 threshold_num=1
 threshold_den=2 # trigger rate must exceed 1/2
 
+# Through uv, like the rest of the repo: a bare `python3` is rejected by the
+# modern-python plugin's shim (#207). Reassigned by --self-test.
+py_run=(uv run --no-project python3)
+
 command -v "$claude_bin" >/dev/null || {
   echo "claude CLI not found: $claude_bin" >&2
+  exit 2
+}
+command -v uv >/dev/null || {
+  echo "uv not found — needed to run the JSON detectors" >&2
   exit 2
 }
 
@@ -111,7 +119,7 @@ cp -R "$here/fixture/." "$workdir/"
 # indistinguishable from having discarded stderr in the first place.
 extract_error() {
   [ -s "$1" ] || return 0
-  python3 -c '
+  "${py_run[@]}" -c '
 import json, sys
 best = ""
 for line in sys.stdin:
@@ -132,11 +140,23 @@ print(best)
 ' <"$1" 2>/dev/null || true
 }
 
-# Returns 0 if the session invoked this skill. Split out of check_triggered so the
+# Echoes `yes`, `no`, or `error:<detail>`. Split out of check_triggered so the
 # detector can run BEFORE the exit-status ladder — see the ordering note there.
+#
+# THE VERDICT IS A PRINTED TOKEN, NOT AN EXIT STATUS. `no` is the one verdict the
+# aggregator treats as a measurement, so a detector that could not run must be
+# distinguishable from a model that declined — and an exit status cannot carry that:
+# python3's own failure status is 1, exactly what the detector returns for "not
+# found". A broken interpreter therefore scored every positive session as a clean
+# negative, and the sweep read as a recall regression.
 skill_invoked() {
-  [ -s "$1" ] || return 1
-  python3 -c '
+  local out
+  [ -s "$1" ] || {
+    echo "no"
+    return
+  }
+  # stderr folded in: it is what names the reason when the interpreter is what failed.
+  out="$("${py_run[@]}" -c '
 import json, sys
 for line in sys.stdin:
     line = line.strip()
@@ -149,9 +169,15 @@ for line in sys.stdin:
     for c in (d.get("message") or {}).get("content") or []:
         if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "Skill":
             if "'"$skill_id"'" in json.dumps(c.get("input") or {}):
+                print("yes")
                 sys.exit(0)
-sys.exit(1)
-' <"$1"
+print("no")
+' <"$1" 2>&1)" || true
+
+  case "$out" in
+    yes | no) printf '%s\n' "$out" ;;
+    *) printf 'error:%s\n' "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-40)" ;;
+  esac
 }
 
 # Echoes one of: yes | no | timeout | crash:<detail>, where a failure verdict may
@@ -171,7 +197,7 @@ sys.exit(1)
 # worse, still counts toward a passing score. `no` now means the model decided;
 # anything else means we did not get a measurement.
 check_triggered() {
-  local query="$1" prefix="${2:-}" out err rc=0 result detail keep=1
+  local query="$1" prefix="${2:-}" out err rc=0 result detail keep=1 verdict detector_note=""
   if [ -n "$prefix" ]; then
     out="$prefix.stdout.json"
     err="$prefix.stderr"
@@ -206,7 +232,8 @@ check_triggered() {
   # is not random: the queries needing the most exploration are both the likeliest
   # to reach the cap and the ones whose positive evidence matters most, so the
   # inversion quietly depressed recall on exactly the queries under study.
-  if skill_invoked "$out"; then
+  verdict="$(skill_invoked "$out")"
+  if [ "$verdict" = "yes" ]; then
     result="yes"
   elif [ "$rc" -eq 124 ]; then
     # GNU timeout(1) reserves 124 for "the command hit the limit".
@@ -220,6 +247,11 @@ check_triggered() {
     # stream-json always emits an init record, so a clean exit with no output at
     # all is a failed session wearing a success status.
     result="crash:nooutput"
+  elif [ "$verdict" != "no" ]; then
+    # The session itself was healthy and the detector was not. Anything but a
+    # failure verdict here scores a broken harness as data.
+    result="crash:detector"
+    detector_note="${verdict#error:}"
   else
     result="no"
   fi
@@ -236,7 +268,11 @@ check_triggered() {
   case "$result" in
     yes | no) ;;
     *)
-      detail="$(extract_error "$out")"
+      # The detector's own message wins when it is the thing that failed: a healthy
+      # session has no error record for extract_error to find, so without this the
+      # NOTE column would say `crash:detector` and nothing about why.
+      detail="$detector_note"
+      [ -n "$detail" ] || detail="$(extract_error "$out")"
       if [ -z "$detail" ]; then
         detail="$(grep -E '[^[:space:]]' "$err" 2>/dev/null | tail -1 || true)"
       fi
@@ -384,6 +420,16 @@ SH
   got="$(check_triggered q)"
   check "session over the limit -> timeout" timeout "$got"
 
+  # The bug this whole token-vs-exit-status design exists to prevent: a healthy
+  # session whose detector could not run must be a failure, never a negative
+  # verdict. An interpreter shim did exactly this and scored every positive `no`.
+  export STUB_MODE=trigger
+  py_run=(/nonexistent/python3)
+  got="$(check_triggered q)"
+  py_run=(uv run --no-project python3)
+  case "$got" in crash:detector*) got="crash:detector" ;; esac
+  check "detector that cannot run -> crash:detector, not no" crash:detector "$got"
+
   # End to end: the exit code is what CI reads, so assert on that directly.
   # A crash must invalidate (3) even though it would otherwise look like a miss.
   rc=0
@@ -421,8 +467,8 @@ SH
   rm -rf "$d"
 
   echo
-  if [ "$asserts" -lt 15 ]; then
-    echo "self-test ran $asserts assertions, expected 15 — the self-test is broken" >&2
+  if [ "$asserts" -lt 16 ]; then
+    echo "self-test ran $asserts assertions, expected 16 — the self-test is broken" >&2
     exit 2
   fi
   [ "$fails" -eq 0 ] || {
@@ -447,7 +493,7 @@ for f in "$here"/*.md; do
   [ -n "$only" ] && [[ "$base" != *"$only"* ]] && continue
 
   query="$(
-    python3 - "$f" <<'PY'
+    "${py_run[@]}" - "$f" <<'PY'
 import re, sys
 t = open(sys.argv[1]).read()
 m = re.search(r'^---\n(.*?)\n---', t, re.S)
