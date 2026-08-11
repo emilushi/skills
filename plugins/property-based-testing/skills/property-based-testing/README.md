@@ -212,9 +212,12 @@ tests that fail before and pass after. The verdict never comes from the model's 
 account of how it did, and never from matching test names.
 
 ```sh
-./evals-extra/effectiveness.sh              # sweep low/medium/high
+EFFORTS=low ./evals-extra/effectiveness.sh  # score the skill as shipped
 NOPLUGIN=1 ./evals-extra/effectiveness.sh   # baseline without the skill loaded
 ```
+
+A bare `./evals-extra/effectiveness.sh` asks for low/medium/high and is **refused**
+while `SKILL.md` pins an effort — see below.
 
 Run the baseline before adding to this skill. Opus already writes competent Hypothesis
 suites unaided, so content that does not move a number against `NOPLUGIN=1` is
@@ -232,6 +235,13 @@ Worth knowing before you change it: `effort` overrides the session level in both
 directions, so this drags a deliberate `xhigh` session *down* while the skill is
 active. That is the real cost of setting it at all, and it argues for raising the
 value — not lowering it further — if the generation path ever starts regressing.
+
+**The pin also breaks the sweep that justified it**, because `--effort` is ignored
+once the skill loads: all three arms would run at `low` under the labels they asked
+for, and three identical rows are what a healthy sweep looks like too. So
+`effectiveness.sh` refuses a multi-level sweep while the pin is there (exit 2) and
+tells you to strip it from a copy and use `PLUGIN_DIR`. Re-sweep that way before
+changing the pinned value.
 
 ## Example prompts
 

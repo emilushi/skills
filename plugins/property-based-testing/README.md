@@ -55,8 +55,8 @@ The skill ships three evals, because "the skill fires" and "the skill helps" are
 different claims and only the second one matters to a user.
 
 ```sh
-./evals-extra/run.sh              # trigger rate against labelled queries
-./evals-extra/effectiveness.sh    # does the generated suite catch a real bug?
+./evals-extra/run.sh                          # trigger rate against labelled queries
+EFFORTS=low ./evals-extra/effectiveness.sh    # does the generated suite catch a real bug?
 ```
 
 Both spend real API budget — `run.sh` runs one session per query per run, 45 at its

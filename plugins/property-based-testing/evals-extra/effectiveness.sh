@@ -24,22 +24,18 @@
 # it. The verdict never comes from the model's own report of how it did.
 #
 # Usage:
-#   ./effectiveness.sh                     # sweep low/medium/high with the skill
-#   EFFORTS="high" ./effectiveness.sh      # single level
+#   EFFORTS=low ./effectiveness.sh         # score the skill at its pinned effort
 #   NOPLUGIN=1 ./effectiveness.sh          # baseline: same task, skill not loaded
 #   PLUGIN_DIR=/tmp/copy ./effectiveness.sh  # score a different copy of the skill
 #   ./effectiveness.sh --self-test         # prove the grader still discriminates
 #
-# Exits non-zero if no session was inspected, or if every session produced
-# nothing — a harness failure must not read as a clean result.
+# Exits non-zero if no session was inspected, if every session produced nothing, or
+# if the skill pins `effort:` and would flatten the sweep (see check_effort_pin) —
+# a harness failure must not read as a clean result.
 
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-# SKILL.md sets `effort: low`, and a skill's effort overrides the session level — so
-# --effort below is ignored once the skill loads, and the EFFORTS sweep that chose
-# that value cannot be reproduced against the plugin as shipped. To re-sweep, copy
-# the plugin, strip the `effort:` line from the copy, and point PLUGIN_DIR at it.
 plugin_root="${PLUGIN_DIR:-$(cd "$here/.." && pwd)}"
 efforts="${EFFORTS:-low medium high}"
 noplugin="${NOPLUGIN:-}"
@@ -131,8 +127,29 @@ grade() {
   fi
 }
 
+# A skill's `effort:` frontmatter overrides the session level, so --effort is ignored
+# once the skill loads: every arm of the sweep runs at the pinned value while the
+# table prints the level it asked for. Three identical rows are also what a healthy
+# sweep looks like, so nothing in the output gives it away — hence the refusal.
+# Requesting the pinned level alone is fine; that scores the shipped config and the
+# label is true.
+check_effort_pin() {
+  local md="$1/skills/property-based-testing/SKILL.md" pinned
+  [ -f "$md" ] || return 0
+  # `q` after the first hit: a second `effort:` line anywhere (a fenced YAML example,
+  # say) would otherwise make $pinned multi-line and refuse even a correct EFFORTS.
+  pinned="$(sed -nE '/^effort:/{s/^effort:[[:space:]]*([[:alnum:]]+).*/\1/p;q}' "$md")"
+  if [ -z "$pinned" ] || [ "$2" = "$pinned" ]; then
+    return 0
+  fi
+  echo "$md pins \`effort: $pinned\`, which overrides --effort — so all of" >&2
+  echo "\"$2\" would run at \`$pinned\` under the wrong labels. Use EFFORTS=$pinned to" >&2
+  echo "score it as shipped, or strip the pin from a copy and set PLUGIN_DIR to it." >&2
+  return 2
+}
+
 # A grader that always says "no" would look like a stable, defensible result
-# forever. These three cases prove it still separates the outcomes it exists to
+# forever. These cases prove it still separates the outcomes it exists to
 # separate. Mirrors the repo validator's --self-test.
 self_test() {
   local asserts=0 fails=0 d got
@@ -209,9 +226,23 @@ PY
   check "a fixture the patch cannot apply to is ERR, not a grade" ERR "$got"
   rm -rf "$d"
 
+  # The pin guard is a checker too, and one that has stopped firing looks exactly
+  # like a clean run. Synthetic plugin tree, so no session is launched.
+  status() {
+    local rc=0
+    check_effort_pin "$1" "$2" >/dev/null 2>&1 || rc=$?
+    echo "$rc"
+  }
+  d="$(mktemp -d)"
+  mkdir -p "$d/skills/property-based-testing"
+  printf -- '---\neffort: low\n---\n' >"$d/skills/property-based-testing/SKILL.md"
+  check "a pinned effort refuses a multi-level sweep" 2 "$(status "$d" "low medium high")"
+  check "the pinned level alone is allowed" 0 "$(status "$d" "low")"
+  rm -rf "$d"
+
   echo
-  if [ "$asserts" -lt 4 ]; then
-    echo "self-test ran $asserts assertions, expected 4 — the self-test is broken" >&2
+  if [ "$asserts" -lt 6 ]; then
+    echo "self-test ran $asserts assertions, expected 6 — the self-test is broken" >&2
     exit 2
   fi
   [ "$fails" -eq 0 ] || {
@@ -230,6 +261,11 @@ command -v claude >/dev/null || {
   echo "claude CLI not found" >&2
   exit 2
 }
+
+# NOPLUGIN loads no skill, so nothing overrides the session level.
+if [ -z "$noplugin" ]; then
+  check_effort_pin "$plugin_root" "$efforts" || exit 2
+fi
 
 read -r -d '' prompt <<'EOF' || true
 Write property-based tests for the functions in src/codec.py. Put them in
