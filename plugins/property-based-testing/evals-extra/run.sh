@@ -316,7 +316,11 @@ esac
 SH
   chmod +x "$stub"
 
-  # Unit: one session at a time, straight through the classifier.
+  # Unit: one session at a time, straight through the classifier. `self` is the
+  # script's own path: the end-to-end cases below re-execute it, and `$0` alone is
+  # only a runnable command when the caller happened to pass a path with a slash in
+  # it — `bash run.sh --self-test` from this directory made all four exit 127.
+  local self="$here/run.sh"
   claude_bin="$stub"
   timeout_s=2
 
@@ -384,13 +388,13 @@ SH
   # A crash must invalidate (3) even though it would otherwise look like a miss.
   rc=0
   STUB_MODE=crash CLAUDE_BIN="$stub" TIMEOUT_S=2 RUNS=1 JOBS=4 \
-    "$0" >/dev/null 2>&1 || rc=$?
+    "$self" >/dev/null 2>&1 || rc=$?
   check "sweep with crashed sessions exits 3 (invalid)" 3 "$rc"
 
   # ...and a sweep that merely scores badly must stay distinguishable from that.
   rc=0
   STUB_MODE=notrigger CLAUDE_BIN="$stub" TIMEOUT_S=2 RUNS=1 JOBS=4 \
-    "$0" >/dev/null 2>&1 || rc=$?
+    "$self" >/dev/null 2>&1 || rc=$?
   check "clean sweep below the floor exits 1 (regression)" 1 "$rc"
 
   # The case that motivated all of this, tested as a matched pair. Both runs answer
@@ -405,12 +409,12 @@ SH
   # retune EXPECT_PASS, instead of the pair silently stopping testing precedence.
   rc=0
   STUB_MODE=notrigger CLAUDE_BIN="$stub" TIMEOUT_S=2 RUNS=1 JOBS=4 EXPECT_PASS=8 \
-    "$0" >/dev/null 2>&1 || rc=$?
+    "$self" >/dev/null 2>&1 || rc=$?
   check "control: this score clears a floor of 8" 0 "$rc"
 
   rc=0
   STUB_MODE=selective CLAUDE_BIN="$stub" TIMEOUT_S=2 RUNS=1 JOBS=4 EXPECT_PASS=8 \
-    "$0" >/dev/null 2>&1 || rc=$?
+    "$self" >/dev/null 2>&1 || rc=$?
   check "same score + one crashed query -> invalid, not a pass" 3 "$rc"
 
   unset STUB_MODE
