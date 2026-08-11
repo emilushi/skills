@@ -39,6 +39,11 @@ self-test:
 # real sweeps are too slow or too expensive to belong in any automated run and are
 # invoked by hand. Their --self-test is still free and still the thing that proves the
 # harness discriminates, so it stays in `check` even though the sweep never runs here.
+#
+# Run under `uv run`, which puts a real interpreter ahead of the modern-python
+# plugin's `python3` shim (#207). Discovery is repo-wide, so a bare `python3` in any
+# one plugin's harness would fail the whole build. Harnesses should still call uv
+# themselves — that is what makes them runnable by hand, which is how sweeps are run.
 eval-self-tests:
 	@echo "→ eval self-tests"
 	@scripts=$$(find plugins -type f -path '*/evals*/*.sh' \
@@ -49,7 +54,8 @@ eval-self-tests:
 	fi; \
 	for s in $$scripts; do \
 		echo "  → $$s"; \
-		bash "$$s" --self-test >/dev/null || { echo "  ✗ $$s failed"; exit 1; }; \
+		uv run --no-project bash "$$s" --self-test >/dev/null \
+			|| { echo "  ✗ $$s failed"; exit 1; }; \
 	done; \
 	echo "  ran $$(printf '%s\n' $$scripts | wc -l | tr -d ' ') eval self-test(s)"
 
