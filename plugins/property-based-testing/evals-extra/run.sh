@@ -90,10 +90,11 @@ threshold_den=2 # trigger rate must exceed 1/2
 # modern-python plugin's shim (#207). Reassigned by --self-test.
 py_run=(uv run --no-project python3)
 
-command -v "$claude_bin" >/dev/null || {
-  echo "claude CLI not found: $claude_bin" >&2
-  exit 2
-}
+# uv is needed by --self-test itself, which drives the detectors, so it is checked
+# here. The claude CLI is not: the self-test swaps $claude_bin for a stub, and that
+# check sits below the --self-test dispatch so the assertions stay runnable on a
+# machine that has never installed the real CLI. That is what makes them free enough
+# for `make check` to depend on.
 command -v uv >/dev/null || {
   echo "uv not found — needed to run the JSON detectors" >&2
   exit 2
@@ -463,12 +464,22 @@ SH
     "$self" >/dev/null 2>&1 || rc=$?
   check "same score + one crashed query -> invalid, not a pass" 3 "$rc"
 
+  # The CLI preflight lives below the --self-test dispatch so these assertions run on
+  # a machine without the real binary. Moving it there is only safe if a real sweep
+  # still refuses to start without one, so pin that: the risk on the next edit is the
+  # check being deleted rather than moved, which would turn a typo'd CLAUDE_BIN into
+  # 45 crash:rc127 sessions instead of an immediate exit.
+  rc=0
+  CLAUDE_BIN=/nonexistent/claude TIMEOUT_S=2 RUNS=1 JOBS=1 \
+    "$self" >/dev/null 2>&1 || rc=$?
+  check "a real sweep with no CLI still exits 2" 2 "$rc"
+
   unset STUB_MODE
   rm -rf "$d"
 
   echo
-  if [ "$asserts" -lt 16 ]; then
-    echo "self-test ran $asserts assertions, expected 16 — the self-test is broken" >&2
+  if [ "$asserts" -lt 17 ]; then
+    echo "self-test ran $asserts assertions, expected 17 — the self-test is broken" >&2
     exit 2
   fi
   [ "$fails" -eq 0 ] || {
@@ -482,6 +493,14 @@ if [ "${1:-}" = "--self-test" ]; then
   self_test
   exit 0
 fi
+
+# Below the dispatch on purpose — see the uv check at the top. A real sweep still
+# refuses to start without its binary, and the self-test's child sweeps pass
+# CLAUDE_BIN=<stub>, so they validate that stub here like any other run.
+command -v "$claude_bin" >/dev/null || {
+  echo "claude CLI not found: $claude_bin" >&2
+  exit 2
+}
 
 bases=()
 expects=()
