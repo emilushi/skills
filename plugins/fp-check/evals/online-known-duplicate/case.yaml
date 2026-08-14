@@ -76,9 +76,9 @@ graders:
 # scaffolded source. The only way into the last message is to have gone and read
 # the advisory.
 #
-# That is the property the handoff asks for in as many words - "ground truth is
-# free because it is public record and a `GHSA-` id cannot be guessed" - and it
-# is why this case exists rather than an offline one with a hand-written key.
+# Ground truth is therefore free: it is public record, and a `GHSA-` id cannot be
+# guessed. That is why this case exists rather than an offline one with a
+# hand-written key.
 #
 # The CVE alternative is accepted because the advisory carries both and either
 # one proves the same thing. Deliberately NOT accepted: the bare words

@@ -320,7 +320,7 @@ def test_the_workflow_opt_in_is_plugin_neutral(case: Path):
 # not to, is meaningful to a plain session as well as to this plugin.
 #
 # Six of the seven prompts open with "Write a PoC for this ...", which IS the
-# PoC answer, stated the way a real request states it. The handoff's suggested
+# PoC answer, stated the way a real request states it. An earlier draft of this
 # table pinned five of them to `no`; that would have put a flat contradiction in
 # the prompt, and a contradicted instruction measures neither configuration.
 #
@@ -441,7 +441,7 @@ def test_online_cases_are_tagged_and_pinned_consistently(case: Path):
     Stage 2 has never run in a graded run, and it cannot be measured by the seven
     static cases: their premise is synthetic code with no public record, and
     Stage 2's own rule is to stop when offline, so its correct behaviour there
-    scores zero. The handoff is explicit that these numbers are never mixed.
+    scores zero. The two numbers are therefore never mixed.
 
     Nothing enforced that. `claude plugin eval <plugin>` runs every case.yaml it
     finds, so adding an online case to evals/ silently changed what the documented

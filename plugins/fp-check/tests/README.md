@@ -22,8 +22,9 @@ bash plugins/fp-check/tests/mutation-gate.sh     # not in CI; see "The gate"
   --with jsonschema python -m pytest tests -q)
 ```
 
-Current: **380 node, 427 pytest (+25 skipped), 44 bats**; mutation gate **152
-run, 0 survived, 12 deferred**.
+Run the suites above for current counts — a number written down here drifts with
+the next test added. The gate's bar is **no survivors**; its deferred mutations
+are the ones blocked behind the Layer 3 capture.
 
 Two things are open: **Layer 3 does not run**, its capture recording a script
 this plugin does not ship; and **Stage 2 has no eval case that discriminates**,
@@ -109,8 +110,9 @@ resolves to `null` in place, and `.filter(Boolean)` is what removes it.
 capture records `concept-prover:verify-attack-path`, the plugin fp-check was
 merged from, and that script is not shipped here. `test_regrade.py` therefore
 skips the whole module — written as a filesystem check rather than a bare `skip`,
-so promoting a new capture re-arms it — and 12 mutation-gate entries stay
-deferred. Capture against `fp-check:triage-static`, then re-point the constants.
+so promoting a new capture re-arms it — and the mutation-gate entries that depend
+on it stay deferred. Capture against `fp-check:triage-static`, then re-point the
+constants.
 
 ```bash
 # N runs with a pass RATE, each regraded independently (this is the one to use):
@@ -311,19 +313,20 @@ returns a `Counter` over the arms and says UNVERIFIED unless both are non-zero.
 
 `mutation-gate.sh` breaks each covered behaviour in a sandbox copy and requires
 the suite to go red. Anything that survives is testing the model, not the plugin.
-It fails if zero mutations run. **146 run, 0 survived, 0 stale, 12 deferred.**
+It fails if zero mutations run. **No survivors, none stale.**
 
 **Run it as `bash plugins/fp-check/tests/mutation-gate.sh` — `bash`, not `zsh`.**
 Under zsh `BASH_SOURCE` is clobbered, the script cannot locate itself, and every
 mutation reports as a survivor. Run it with nothing else going: under contention
 one mutation took 25 minutes where it is caught in 60 seconds in isolation.
 
-**Why 12 are deferred.** They break the recorded run `test_regrade.py` grades, and
-that module skips because its capture records `concept-prover:verify-attack-path`
-— a skipped pytest exits 0, which this harness would read as "the mutation
-survived". So `defer_mutation` counts and names them instead: as `run_mutation`
-they would report 12 phantom coverage gaps, and deleting them would shrink the
-gate with nothing saying so. One paid capture (Layer 3) re-arms them.
+**Why some are deferred.** They break the recorded run `test_regrade.py` grades,
+and that module skips because its capture records
+`concept-prover:verify-attack-path` — a skipped pytest exits 0, which this
+harness would read as "the mutation survived". So `defer_mutation` counts and
+names them instead: as `run_mutation` they would report phantom coverage gaps,
+and deleting them would shrink the gate with nothing saying so. One paid capture
+(Layer 3) re-arms them.
 
 **A mutation is only "caught" if its test command passes on UNMUTATED code**, so
 the harness proves that first in a pristine sandbox. Otherwise anything failing a
@@ -374,7 +377,7 @@ green.
 | CLI at authoring time | 2.1.224 |
 | node | v22.13.1 |
 | bats | 1.14.0 (`brew install bats-core`; required, not optional) |
-| Layers 1–3 status | 427 pytest (+25 skipped) + 380 node + 44 bats passing |
-| Mutation gate | 164 mutations — 152 run, 0 survived, 0 stale, 12 deferred |
+| Layers 1–3 status | pytest, node and bats all passing |
+| Mutation gate | no survivors, none stale; the deferred ones are blocked behind the Layer 3 capture |
 | Layer 3 capture | stale: records `concept-prover:verify-attack-path`, so the module skips |
 | Raw results kept | `eval-result-2026-07-30.json`, which `test_validate_eval_result.py` reads as a real-shaped result so a schema change cannot pass by agreeing with a mock |

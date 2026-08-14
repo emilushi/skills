@@ -17,7 +17,7 @@ agents read at runtime via the `baseDir` argument. `tests/` has four layers,
 | `workflows/triage-static.js` | Stage 1, always runs, reaches a verdict alone |
 | `workflows/triage-online.js` | Stage 2, on request, public posture. Fails closed offline |
 | `workflows/triage-poc.js` | Stage 3, on request. Builds, executes, then five challenge agents that did not build it |
-| `skills/fp-check/SKILL.md` | Under a 500-line validator limit; currently ~441 |
+| `skills/fp-check/SKILL.md` | Under a 500-line validator limit — `wc -l` it before adding, the headroom is thinner than it looks |
 | `skills/fp-check/references/` | Read by agents at runtime — a wrong `baseDir` makes every read resolve to nothing, silently |
 | `tests/*.test.mjs` | Layer 2: pure helpers and whole-script runs against scripted agents |
 | `tests/test_workflow_contract.py` | Layer 1: structural pins, including on SKILL.md |
@@ -88,8 +88,8 @@ bash plugins/fp-check/tests/mutation-gate.sh     # NOT in CI; run it by hand
   literal spaces. **Re-wrapping a paragraph can turn a test red without changing a
   word**; that is working as intended, not a flaky test.
 - **Layer 3 (regrade) does not run.** The checked-in capture predates the merge,
-  so `test_regrade.py` skips and 12 mutations stay deferred. One paid capture via
-  `tests/capture-runs.sh` re-arms both.
+  so `test_regrade.py` skips and its mutation-gate entries stay deferred. One
+  paid capture via `tests/capture-runs.sh` re-arms both.
 
 ## Terminology
 
