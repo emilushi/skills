@@ -24,7 +24,12 @@ invention, and easy-out closure against the fixture's actual contents.
 
 Measured on 2026-08-14 (4 runs per arm per case, pooled over two suite runs): the plugin arm passed every
 grader in every run; the bare arm was bimodal — the deterministic stop-clause regex alone failed half its
-grounded-migration runs (multiline rewrites, no bound), and it fumbled single-line format on other cases
-intermittently. On strong current models the plugin's measurable value is consistency: it pins the contract
-and the format every run rather than most runs. Expect deltas to grow on weaker session models and shrink
-on stronger ones; the ungrounded-vague case doubles as a no-invention regression guard either way.
+grounded-migration runs (multiline rewrites, no bound).
+
+**Baseline contamination caveat (trailofbits/skills-internal#546).** The eval scaffold does not isolate the
+repo: baseline-arm responses from these runs cite the fixture's absolute repo path and reproduce SKILL.md
+sentences verbatim ("scope to read first", "terminates on the wrong contract"), meaning the no-plugin arm
+found and read the plugin under test off disk. Contaminated baselines imitate the skill, so measured deltas
+are lower bounds on the plugin's real effect; the uncontaminated baseline runs scored 0. Until the harness
+denies the baseline Read access to the plugin directory, run with `--keep-temp`, and audit baseline traces
+and responses for the plugin's path and distinctive SKILL.md phrases before trusting a small delta.
