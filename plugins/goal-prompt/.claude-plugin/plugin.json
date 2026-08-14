@@ -1,7 +1,7 @@
 {
   "name": "goal-prompt",
   "version": "0.1.0",
-  "description": "Drafts copy-ready Codex /goal commands with deterministic whitespace normalization.",
+  "description": "Drafts copy-ready /goal commands for goal mode in Claude Code and Codex with deterministic whitespace normalization.",
   "author": {
     "name": "Trail of Bits",
     "email": "opensource@trailofbits.com",

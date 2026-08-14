@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Format a Codex /goal command with deterministic whitespace normalization."""
+"""Format a /goal command with deterministic whitespace normalization."""
 
 from __future__ import annotations
 
@@ -50,9 +50,7 @@ def format_goal_command(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Normalize text into a copy-ready Codex /goal command."
-    )
+    parser = argparse.ArgumentParser(description="Normalize text into a copy-ready /goal command.")
     parser.add_argument(
         "path",
         nargs="?",

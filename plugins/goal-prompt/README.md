@@ -1,16 +1,16 @@
 # goal-prompt
 
-Drafts copy-paste-ready Codex `/goal` commands with deterministic whitespace normalization.
+Drafts copy-paste-ready `/goal` commands for goal mode with deterministic whitespace normalization. Works in both Claude Code and Codex.
 
 ## What It Does
 
-Codex goal mode takes a single `/goal <objective>` line capped at 4,000 characters. Asking a model to draft one usually yields multiline text with indentation artifacts that is cumbersome to copy-paste. This skill drafts the objective, then runs a deterministic formatter that:
+Goal mode takes a single `/goal <objective>` line. Asking a model to draft one usually yields multiline text with indentation artifacts that is cumbersome to copy-paste. This skill drafts the objective, then runs a deterministic formatter that:
 
 - strips duplicate `/goal` prefixes, wrapping quotes, and code fences
 - collapses all whitespace to single ASCII spaces
-- rejects output longer than 4,000 characters instead of silently truncating
+- rejects output longer than 4,000 characters (Codex's `/goal` cap) instead of silently truncating
 
-The result is exactly one fenced line, ready to paste into Codex.
+The result is exactly one fenced line, ready to paste.
 
 ## When to Use
 
