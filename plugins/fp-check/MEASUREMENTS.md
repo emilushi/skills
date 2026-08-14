@@ -227,9 +227,9 @@ a failure count is attributable to the header above it, not below.
 - **Cost of removing the brocard pre-gate** — Stage 1 dropped 9.33 → 5.44 agents,
   but the no-plugin baseline's cost rose 11.3% over the same interval, so the
   cost data cannot separate the plugin from harness drift.
-- **Batch triage and the exploit-chain check** — absent, pinned by live guards in
-  `tests/coverage.test.mjs`. The design work for both is in
-  [TODO-batch-and-users.md](TODO-batch-and-users.md).
+- **Batch triage and the exploit-chain check** — landed in 2.0.0, never
+  measured. Their one eval case, `chained-findings`, is tagged `batch` and joins
+  a mean only after it discriminates at n=3.
 - **Layer 3 (regrade) does not run.** The checked-in capture still records
   `concept-prover:verify-attack-path`, from before the merge, so `test_regrade.py`
   skips on a condition it checks and **12 mutations stay deferred** behind it. One

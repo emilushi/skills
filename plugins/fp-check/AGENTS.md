@@ -134,11 +134,9 @@ wasted sweep:
 - Numbers in [MEASUREMENTS.md](MEASUREMENTS.md) describe the tree at the sweep
   that produced them. Do not quote a delta for code that has changed since; see
   the warning at the top of that file.
-- [TODO-batch-and-users.md](TODO-batch-and-users.md) records what each landed
-  capability was designed for and where the build diverged from the sketch. Its
-  guards in `tests/coverage.test.mjs` now exercise those capabilities; if you add
-  a guard that asserts an ABSENCE, say so in the test name, and do not silently
-  "fix" one.
+- The batch and census capabilities are exercised by guards in
+  `tests/coverage.test.mjs`; if you add a guard that asserts an ABSENCE, say so
+  in the test name, and do not silently "fix" one.
 - **`chained-findings` has never been measured.** It is tagged `batch` rather than
   `static` for that reason, so `--tag static` still selects exactly the seven
   cases every number in MEASUREMENTS.md came from. Admitting it to a mean needs
