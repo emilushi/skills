@@ -12,6 +12,7 @@ import pytest
 from format_goal_prompt import (
     DEFAULT_MAX_PROMPT_CHARS,
     format_goal_command,
+    has_stop_clause,
     main,
     normalize_objective,
 )
@@ -68,3 +69,31 @@ def test_main_returns_nonzero_on_empty_draft(tmp_path, capsys) -> None:
     draft.write_text("   \n", encoding="utf-8")
     assert main([str(draft)]) == 1
     assert "empty" in capsys.readouterr().err
+
+
+def test_stop_clause_detects_turn_bound() -> None:
+    assert has_stop_clause("fix the tests, or stop after 20 turns")
+    assert has_stop_clause("iterate; pause after 3 attempts")
+
+
+def test_stop_clause_detects_blocked_clause() -> None:
+    assert has_stop_clause("if blocked, stop and report the blocker")
+
+
+def test_stop_clause_rejects_end_state_only() -> None:
+    assert not has_stop_clause("all tests pass and the queue is empty")
+    assert not has_stop_clause("keep each file under a 300-line budget")
+
+
+def test_main_warns_without_stop_clause(tmp_path, capsys) -> None:
+    draft = tmp_path / "draft.txt"
+    draft.write_text("make npm test exit 0\n", encoding="utf-8")
+    assert main([str(draft)]) == 0
+    assert "no stop bound or blocked clause" in capsys.readouterr().err
+
+
+def test_main_does_not_warn_with_stop_clause(tmp_path, capsys) -> None:
+    draft = tmp_path / "draft.txt"
+    draft.write_text("make npm test exit 0, or stop after 20 turns\n", encoding="utf-8")
+    assert main([str(draft)]) == 0
+    assert capsys.readouterr().err == ""

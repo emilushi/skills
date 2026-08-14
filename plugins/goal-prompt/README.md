@@ -1,16 +1,19 @@
 # goal-prompt
 
-Drafts copy-paste-ready `/goal` commands for goal mode with deterministic whitespace normalization. Works in both Claude Code and Codex.
+Drafts copy-paste-ready `/goal` commands for goal mode in Claude Code and Codex: verifiable completion conditions, formatted to a single copy-ready line.
 
 ## What It Does
 
-Goal mode takes a single `/goal <objective>` line. Asking a model to draft one usually yields multiline text with indentation artifacts that is cumbersome to copy-paste. This skill drafts the objective, then runs a deterministic formatter that:
+Goal mode keeps the agent working across turns until a completion condition is met. Both harnesses take `/goal` as a single-line command capped at 4,000 characters, and both terminate on the condition you write — so a goal prompt has to satisfy two requirements at once. This plugin handles both:
+
+**Make the prompt optimal.** The skill drafts the objective as a termination contract: a measurable end state (not an activity), a named command that proves it with transcript-visible output, invariants that must not change (including "don't weaken the check itself"), and an explicit stop bound or blocked clause so a mis-stated condition cannot loop forever.
+
+**Make the prompt match requirements.** A deterministic formatter then:
 
 - strips duplicate `/goal` prefixes, wrapping quotes, and code fences
 - collapses all whitespace to single ASCII spaces
-- rejects output longer than 4,000 characters (Codex's `/goal` cap) instead of silently truncating
-
-The result is exactly one fenced line, ready to paste.
+- warns when no stop bound or blocked clause is present
+- rejects output longer than 4,000 characters (the `/goal` cap in both harnesses) instead of silently truncating
 
 ## When to Use
 
@@ -20,15 +23,16 @@ Ask for a goal prompt in either Claude Code or Codex: "write a /goal command for
 
 ```
 User: turn this into a /goal command:
-      Refactor the auth module:
-        - replace MD5 password hashing with argon2id
-        - add tests for the login flow
+      Migrate the auth module:
+        - replace legacyAuth() with auth.verify()
+        - make sure the tests still work
 
 Assistant:
-/goal Refactor the auth module: - replace MD5 password hashing with argon2id - add tests for the login flow
+/goal All legacyAuth() call sites use auth.verify(): `rg "legacyAuth\(" -t ts` prints nothing AND `npm test` exits 0 (run both, show the output), without modifying vendor/ or weakening any test. If blocked, stop and report attempted paths and the blocker, or stop after 20 turns.
 ```
 
 ## Components
 
-- `skills/goal-prompt/SKILL.md` — drafting guidance and output contract
+- `skills/goal-prompt/SKILL.md` — drafting checklist and output contract
+- `skills/goal-prompt/references/goal-mode.md` — goal-mode mechanics and limits per harness, with sources
 - `skills/goal-prompt/scripts/format_goal_prompt.py` — stdlib-only formatter (`--fenced`, `--objective-only`, `--max-chars`)

@@ -10,6 +10,19 @@ from pathlib import Path
 
 DEFAULT_MAX_PROMPT_CHARS = 4000
 
+# A numeric turn/time bound ("or stop after 20 turns") or a blocked clause
+# ("if blocked, stop and report..."). Without one, a mis-stated condition
+# keeps the goal loop running indefinitely.
+STOP_CLAUSE_PATTERN = re.compile(
+    r"\bafter\s+\d+\s+(?:turns?|iterations?|attempts?|rounds?|hours?|minutes?)\b"
+    r"|\bblocked\b",
+    re.IGNORECASE,
+)
+
+
+def has_stop_clause(objective: str) -> bool:
+    return bool(STOP_CLAUSE_PATTERN.search(objective))
+
 
 def read_text(path: str | None) -> str:
     if path in (None, "-"):
@@ -87,6 +100,14 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"format_goal_prompt.py: error: {exc}", file=sys.stderr)
         return 1
+
+    if not has_stop_clause(output):
+        print(
+            "format_goal_prompt.py: warning: no stop bound or blocked clause found; "
+            'consider adding "or stop after 20 turns" or '
+            '"if blocked, stop and report the blocker"',
+            file=sys.stderr,
+        )
 
     if args.fenced:
         print("```text")
