@@ -1,23 +1,12 @@
 # goal-prompt
 
-Drafts copy-paste-ready `/goal` commands for goal mode in Claude Code and Codex: verifiable completion conditions, formatted to a single copy-ready line.
+Turns a task description into a copy-paste-ready `/goal` command for goal mode in Claude Code or Codex.
 
 ## What It Does
 
-Goal mode keeps the agent working across turns until a completion condition is met. Both harnesses take `/goal` as a single-line command capped at 4,000 characters, and both terminate on the condition you write — so a goal prompt has to satisfy two requirements at once. This plugin handles both:
+A goal prompt has to do two things at once: fit the format (`/goal` is a single line, max 4,000 characters in both harnesses) and actually terminate (goal mode keeps looping until the condition is judged met — a vague condition burns turns forever).
 
-**Make the prompt optimal.** The skill drafts the objective as a termination contract: a measurable end state (not an activity), the scope to read first, a named command that proves it with transcript-visible output, invariants that must not change (including "don't weaken the check itself"), and an explicit stop bound or blocked clause so a mis-stated condition cannot loop forever. Security-research goals get extra hardening against reward hacking (neutral wording, threat-model scoping, demonstrated preconditions, second-pass validation), following [trailofbits/codex-config](https://github.com/trailofbits/codex-config/blob/main/README.md#goal).
-
-**Make the prompt match requirements.** A deterministic formatter then:
-
-- strips duplicate `/goal` prefixes, wrapping quotes, and code fences
-- collapses all whitespace to single ASCII spaces
-- warns when no stop bound or blocked clause is present
-- rejects output longer than 4,000 characters (the `/goal` cap in both harnesses) instead of silently truncating
-
-## When to Use
-
-Ask for a goal prompt in either Claude Code or Codex: "write a /goal command for refactoring the auth module", "compress this task into a goal prompt", "clean up this goal-mode objective".
+The skill drafts the objective as a termination contract — a measurable end state, what to read first, the command that proves completion, invariants that must hold, and an explicit stop bound — then a deterministic formatter collapses it to one line, warns if the stop clause is missing, and rejects oversized output instead of truncating. Security-audit goals get extra hardening against reward hacking (neutral wording, threat-model scoping, demonstrated preconditions, second-pass validation), following [trailofbits/codex-config](https://github.com/trailofbits/codex-config/blob/main/README.md#goal).
 
 ## Example
 
@@ -34,5 +23,5 @@ Assistant:
 ## Components
 
 - `skills/goal-prompt/SKILL.md` — drafting checklist and output contract
-- `skills/goal-prompt/references/goal-mode.md` — goal-mode mechanics and limits per harness, the Trail of Bits work-order template, with sources
+- `skills/goal-prompt/references/goal-mode.md` — per-harness goal-mode mechanics and limits, with sources
 - `skills/goal-prompt/scripts/format_goal_prompt.py` — stdlib-only formatter (`--fenced`, `--objective-only`, `--max-chars`)

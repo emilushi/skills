@@ -6,45 +6,39 @@ allowed-tools: Bash Read Write
 
 # Goal Prompt
 
-Goal mode keeps the agent working across turns until a completion condition is met. In Claude Code, a small transcript-only model re-judges the condition after every turn; in Codex, the objective persists on the thread and continuation is evidence-based. Both take `/goal` as a single-line command capped at 4,000 characters. Mechanics and sources: [goal-mode.md](references/goal-mode.md).
+`/goal` keeps the agent working until a completion condition is met. Both Claude Code and Codex take it as one line, max 4,000 characters. In Claude Code a small model re-judges the condition after each turn from the transcript alone — it cannot run commands. Platform details and sources: [goal-mode.md](references/goal-mode.md).
 
-This skill has two jobs: draft an objective that can actually terminate, then format it so it pastes cleanly.
+Draft a condition that can terminate, then format it. A goal fits work bigger than one turn with a checkable finish line; chain small goals with review between them rather than writing one giant goal.
 
-A goal fits work that is larger than one turn, has a clear stopping condition, and can be validated by commands or artifacts. Rule of thumb: an instruction you would repeat three turns in a row belongs in the goal. For long efforts, chain smaller goals with review between checkpoints rather than writing one giant goal.
+## Draft
 
-## Draft the objective
+Include, joined with AND — never "or", the loop takes the cheaper branch:
 
-Write the condition so a model that only reads the transcript can judge it true or false. Include:
+1. **End state, not activity** — "all `legacyAuth()` call sites use `auth.verify()`", not "migrate the auth code". An activity can be claimed; an end state is true or false.
+2. **Scope to read first** — the files, issue, logs, or plan to read before acting.
+3. **Stated check** — the exact command and its observable result ("`npm test` exits 0"), plus an instruction to run it and show the output; a result that never lands in the transcript does not exist to the evaluator.
+4. **Invariants** — what must not change ("without modifying vendor/"), always including "do not weaken, skip, or edit the checks themselves".
+5. **Stop bound or blocked clause** — "or stop after 20 turns", "if blocked, stop and report the blocker". Without one, a mis-stated condition loops forever; the formatter warns when it is missing.
 
-1. **End state, not activity** — "all `legacyAuth()` call sites use `auth.verify()`", not "migrate the auth code". An activity can be claimed; an end state is either true or false.
-2. **Scope to read first** — the files, directories, issue, logs, or plan the agent must read before acting. Without it the loop rediscovers context every turn.
-3. **A stated check** — the exact command that proves it and the observable result: "`npm test` exits 0", "`rg 'legacyAuth\(' -t ts` prints nothing". Tell the agent to run the check and show the output: the Claude Code evaluator cannot run commands itself, so a result that never lands in the transcript does not exist.
-4. **Constraints that must hold** — what must not change on the way there: "without modifying vendor/", "no other test file is modified". Always forbid weakening the check itself; the cheapest way to turn a red gate green is to edit the gate.
-5. **A stop bound or blocked clause** — "or stop after 20 turns", or "if blocked, stop and report attempted paths and the blocker". Without one, a mis-stated condition burns turns until someone notices. The formatter warns when this is missing.
-
-Join success criteria with AND, never "or" — given alternatives, the loop takes the cheaper branch.
-
-For goals spanning many checkpoints, also name the final evidence to deliver (diff, report, artifact) and require a short progress log file in the repo — it gives compaction and resumed sessions durable state.
-
-If the brief cannot fit in 4,000 characters, do not compress it into mush: write the details to a `GOAL.md` or `PLAN.md` file and reference that file from the objective. This is the official Codex guidance for oversized goals and works in Claude Code too.
+For long goals, also name the final evidence (diff, report, artifact) and require a progress log file — durable state across compaction and resume. If the brief exceeds 4,000 characters, put the details in a `GOAL.md` and reference that file from the objective.
 
 ## Security research goals
 
-Audit goals need hardening against reward hacking — a flood of impact-inflated findings reads as a denial-of-service on a maintainer's time. When the objective is finding vulnerabilities, additionally:
+Harden audit goals against reward hacking:
 
-- Use neutral wording: "trigger and validate the issue", not "prove this is exploitable".
-- Reference a threat model stating what is in and out of scope, what the attacker can and cannot do, and what baseline severity means for this project.
-- Require demonstrating attacker preconditions in scope, never assuming them — "attacker already controls an internal caller" is the most common false positive.
-- Require checking open issues, PRs, and known-findings files before treating a bug as new, and a findings log file for durable state.
-- Stop for human review after each meaningful finding instead of piling up untriaged reports, and require a second pass by a fresh agent before a finding is treated as real.
+- Neutral wording: "trigger and validate the issue", not "prove this is exploitable".
+- Reference a threat model: what is in and out of scope, attacker powers, baseline severity.
+- Demonstrate attacker preconditions in scope, never assume them.
+- Check open issues, PRs, and known-findings files before calling a bug new; keep a findings log.
+- Stop for human review after each meaningful finding; require a second pass by a fresh agent before a finding counts.
 
-Field notes and high-signal goal patterns (differential testing, invariant breaking, variant analysis): [trailofbits/codex-config](https://github.com/trailofbits/codex-config/blob/main/README.md#goal).
+More goal patterns: [trailofbits/codex-config](https://github.com/trailofbits/codex-config/blob/main/README.md#goal).
 
-## Format and return it
+## Format
 
-Run `python3 {baseDir}/scripts/format_goal_prompt.py --fenced` on a draft file or stdin. The formatter strips duplicate `/goal` prefixes, removes wrapping quotes/fences, collapses all whitespace to single ASCII spaces, warns on a missing stop bound or blocked clause, and rejects a final command longer than 4,000 characters. If it rejects the draft, shorten the objective or move detail into a referenced file and rerun it.
+Run `python3 {baseDir}/scripts/format_goal_prompt.py --fenced` on the draft (file or stdin). It collapses whitespace to one line, strips `/goal` prefixes, quotes, and fences, warns on a missing stop clause, and rejects output over 4,000 characters — shorten or move detail to a file and rerun.
 
-Return exactly one fenced `text` block with one line and no extra prose:
+Return exactly one fenced `text` block, one line, no extra prose:
 
 ```text
 /goal <single normalized objective>
@@ -52,7 +46,7 @@ Return exactly one fenced `text` block with one line and no extra prose:
 
 ## Example
 
-Draft (messy, multiline, no termination contract):
+Draft:
 
 ```
 /goal Migrate the auth module:
@@ -65,5 +59,3 @@ Redrafted and formatted:
 ```text
 /goal All legacyAuth() call sites use auth.verify(): `rg "legacyAuth\(" -t ts` prints nothing AND `npm test` exits 0 (run both, show the output), without modifying vendor/ or weakening any test. If blocked, stop and report attempted paths and the blocker, or stop after 20 turns.
 ```
-
-The redraft turned an activity ("migrate") into a checkable end state, named the proving commands, protected the gate, and bounded the loop.
