@@ -136,9 +136,14 @@ grade() {
 check_effort_pin() {
   local md="$1/skills/property-based-testing/SKILL.md" pinned
   [ -f "$md" ] || return 0
-  # `q` after the first hit: a second `effort:` line anywhere (a fenced YAML example,
-  # say) would otherwise make $pinned multi-line and refuse even a correct EFFORTS.
-  pinned="$(sed -nE '/^effort:/{s/^effort:[[:space:]]*([[:alnum:]]+).*/\1/p;q}' "$md")"
+  # `exit` after the first hit: a second `effort:` line anywhere (a fenced YAML
+  # example, say) would otherwise make $pinned multi-line and refuse even a correct
+  # EFFORTS. awk rather than sed, because BSD sed rejects `{s/…/p;q}` — "extra
+  # characters at the end of q command" — leaving $pinned empty on macOS, which this
+  # function reads as "no pin" and allows the sweep it exists to refuse. GNU sed
+  # accepts it, so CI was green while the guard did nothing on every contributor's
+  # laptop. `$1` after the sub also drops a trailing `# comment`.
+  pinned="$(awk '/^effort:/ {sub(/^effort:[[:space:]]*/, ""); print $1; exit}' "$md")"
   if [ -z "$pinned" ] || [ "$2" = "$pinned" ]; then
     return 0
   fi
