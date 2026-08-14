@@ -293,6 +293,17 @@
       "source": "./plugins/git-cleanup"
     },
     {
+      "name": "goal-prompt",
+      "version": "0.1.0",
+      "description": "Drafts copy-ready Codex /goal commands with deterministic whitespace normalization.",
+      "author": {
+        "name": "Trail of Bits",
+        "email": "opensource@trailofbits.com",
+        "url": "https://github.com/trailofbits"
+      },
+      "source": "./plugins/goal-prompt"
+    },
+    {
       "name": "supply-chain-risk-auditor",
       "version": "2.0.0",
       "description": "Audit a project's npm, PyPI, and Go dependencies for supply-chain risk: version-matched advisories for direct dependencies and the full lockfile tree, abandoned upstreams, npm publisher concentration, and install scripts",
