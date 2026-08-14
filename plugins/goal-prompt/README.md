@@ -6,7 +6,14 @@ Turns a task description into a copy-paste-ready `/goal` command for goal mode i
 
 A goal prompt has to do two things at once: fit the format (`/goal` is a single line, max 4,000 characters in both harnesses) and actually terminate (goal mode keeps looping until the condition is judged met — a vague condition burns turns forever).
 
-The skill drafts the objective as a termination contract — a measurable end state, what to read first, the command that proves completion, invariants that must hold, and an explicit stop bound — and closes the easy-outs a lazy model would take (deleting code to silence a check, passing on a subset, gaming the gate) while keeping the goal small, since every constraint narrows what the model can explore. A deterministic formatter then collapses it to one line, warns if the stop clause is missing, and rejects oversized output instead of truncating. Elements it cannot ground in your request or the repo are reported back as missing, never invented — an invented success condition terminates the goal on the wrong contract. Security-audit goals get extra hardening against reward hacking (neutral wording, threat-model scoping, demonstrated preconditions, second-pass validation), following [trailofbits/codex-config](https://github.com/trailofbits/codex-config/blob/main/README.md#goal).
+The skill:
+
+- drafts the objective as a termination contract: measurable end state, scope to read first, the command that proves completion, invariants, explicit stop bound
+- closes the easy-outs a lazy model would take: deleting code to silence a check, passing on a subset, gaming the gate
+- keeps the goal small — every constraint narrows what the model can explore
+- never invents missing elements — anything it cannot ground in your request or the repo comes back as a `Missing:` warning
+- hardens security-audit goals against reward hacking, following [trailofbits/codex-config](https://github.com/trailofbits/codex-config/blob/main/README.md#goal)
+- formats deterministically to one line, warning on a missing stop clause and rejecting output over 4,000 characters instead of truncating
 
 ## Example
 
