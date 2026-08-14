@@ -18,20 +18,39 @@ Source: <https://code.claude.com/docs/en/goal>
 
 ## Codex `/goal`
 
-Sources: <https://developers.openai.com/codex/use-cases/follow-goals>, <https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex>
+Sources: <https://developers.openai.com/codex/use-cases/follow-goals>, <https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex>, <https://developers.openai.com/codex/prompting#goal-mode>, <https://developers.openai.com/codex/cli/slash-commands>
 
 - `/goal <objective>` persists the objective as thread state. Codex continues only when the thread is idle, the goal is active, and budget remains; completion must be checked against concrete evidence (files changed, commands run, test output, artifacts), not the model's belief that it is probably done.
 - The stored objective is **hard-capped at 4,000 characters** and the TUI rejects oversized input before sending anything. Official guidance for longer briefs: write the instructions to a file and reference that file from the objective.
 - Lifecycle: bare `/goal` shows the current goal; `/goal pause`, `/goal resume`, `/goal clear` control the run. Reaching a budget limit stops substantive work but is not completion.
-- Older CLIs gate the feature behind `[features] goals = true` in `config.toml`.
+- Older CLIs gate the feature behind `[features] goals = true` in `~/.codex/config.toml`.
+- Requires an interactive session: `codex exec` is non-interactive and does not expose slash commands.
 - The cookbook's strong-goal contract names six parts: outcome, verification surface, constraints, boundaries, iteration policy, and a blocked stop condition, with this template:
 
   ```text
   /goal <desired end state> verified by <specific evidence> while preserving <constraints>. Use <allowed inputs, tools, or boundaries>. Between iterations, <how to choose the next best action>. If blocked or no valid paths remain, <what to report and what would unlock progress>.
   ```
 
+## Trail of Bits work-order template
+
+Source: <https://github.com/trailofbits/codex-config/blob/main/README.md#goal>
+
+Draft the goal against these fields, then collapse it to one line:
+
+```text
+Objective:   one-sentence outcome
+Scope:       files, directories, issue, logs, or plan the agent must read first
+Constraints: what must not change
+Validation:  exact commands or artifacts that prove progress
+Stop:        explicit done condition or reason to pause
+Checkpoints: smaller milestones with their own validation
+Evidence:    output, diff, report, screenshot, or other proof to show at the end
+```
+
+If the goal is hard to define, start with `/plan`, refine the contract, then set `/goal`. The same page carries the security-research hardening rules summarized in SKILL.md, plus field notes on high-signal goal patterns.
+
 ## Shared implications for drafting
 
 - 4,000 characters and a single line are the binding format constraints on both platforms.
 - Both platforms' guidance converges on the same termination contract: measurable end state, named verification, invariants, and an explicit stop/blocked clause.
-- Both recommend the same escape hatch for large briefs: details in a file, referenced from a short objective.
+- Both recommend the same escape hatch for large briefs: details in a file (`GOAL.md`/`PLAN.md`), referenced from a short objective.
