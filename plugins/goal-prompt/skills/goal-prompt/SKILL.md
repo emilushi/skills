@@ -6,7 +6,7 @@ allowed-tools: Bash Read Write
 
 # Goal Prompt
 
-`/goal` keeps the agent working until a completion condition is met. Both Claude Code and Codex take it as one line, max 4,000 characters. In Claude Code a small model re-judges the condition after each turn from the transcript alone — it cannot run commands. Platform details and sources: [goal-mode.md](references/goal-mode.md).
+`/goal` keeps the agent working until a completion condition is met ([Claude Code docs](https://code.claude.com/docs/en/goal), [Codex docs](https://developers.openai.com/codex/use-cases/follow-goals)). Both harnesses take it as one line, max 4,000 characters. In Claude Code a small model re-judges the condition after each turn from the transcript alone — it cannot run commands. In Codex, older CLIs need `[features] goals = true` in `~/.codex/config.toml`, and slash commands exist only in interactive sessions, not `codex exec`.
 
 Draft a condition that can terminate, then format it. A goal fits work bigger than one turn with a checkable finish line; chain small goals with review between them rather than writing one giant goal.
 
@@ -18,7 +18,7 @@ Include, joined with AND — never "or", the loop takes the cheaper branch:
 2. **Scope to read first** — the files, issue, logs, or plan to read before acting.
 3. **Stated check** — the exact command and its observable result ("`npm test` exits 0"), plus an instruction to run it and show the output; a result that never lands in the transcript does not exist to the evaluator.
 4. **Invariants** — what must not change ("without modifying vendor/"), always including "do not weaken, skip, or edit the checks themselves".
-5. **Stop bound or blocked clause** — "or stop after 20 turns", "if blocked, stop and report the blocker". Without one, a mis-stated condition loops forever; the formatter warns when it is missing.
+5. **Stop bound or blocked clause** — "or stop after 20 turns", "if blocked, stop and report the blocker". Without one, a mis-stated condition loops forever; the formatter warns when it is missing. (Claude Code resets the turn counter on session resume, so a turn bound silently extends across resumes.)
 
 For long goals, also name the final evidence (diff, report, artifact) and require a progress log file — durable state across compaction and resume. If the brief exceeds 4,000 characters, put the details in a `GOAL.md` and reference that file from the objective.
 

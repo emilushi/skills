@@ -23,5 +23,4 @@ Assistant:
 ## Components
 
 - `skills/goal-prompt/SKILL.md` — drafting checklist and output contract
-- `skills/goal-prompt/references/goal-mode.md` — per-harness goal-mode mechanics and limits, with sources
 - `skills/goal-prompt/scripts/format_goal_prompt.py` — stdlib-only formatter (`--fenced`, `--objective-only`, `--max-chars`)
