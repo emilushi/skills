@@ -22,6 +22,8 @@ Include, joined with AND — never "or", the loop takes the cheaper branch:
 
 For long goals, also name the final evidence (diff, report, artifact) and require a progress log file — durable state across compaction and resume. If the brief exceeds 4,000 characters, put the details in a `GOAL.md` and reference that file from the objective.
 
+**Never invent missing elements.** Ground every element in the user's request, the conversation, or the repository — look up the real check command (Makefile, package.json, CI config) rather than guessing one. If an element cannot be filled from available information — no measurable threshold stated, no test suite found — still optimize and format what the user provided, leave the element out, and flag it as missing (see Format). A goal with an invented success condition terminates on the wrong contract.
+
 ## Security research goals
 
 Harden audit goals against reward hacking:
@@ -38,11 +40,13 @@ More goal patterns: [trailofbits/codex-config](https://github.com/trailofbits/co
 
 Run `python3 {baseDir}/scripts/format_goal_prompt.py --fenced` on the draft (file or stdin). It collapses whitespace to one line, strips `/goal` prefixes, quotes, and fences, warns on a missing stop clause, and rejects output over 4,000 characters — shorten or move detail to a file and rerun.
 
-Return exactly one fenced `text` block, one line, no extra prose:
+Return exactly one fenced `text` block, one line:
 
 ```text
 /goal <single normalized objective>
 ```
+
+Add no prose around it — except when checklist elements could not be grounded: then follow the block with a `Missing:` list, one line per gap, telling the user what to supply.
 
 ## Example
 
@@ -59,3 +63,16 @@ Redrafted and formatted:
 ```text
 /goal All legacyAuth() call sites use auth.verify(): `rg "legacyAuth\(" -t ts` prints nothing AND `npm test` exits 0 (run both, show the output), without modifying vendor/ or weakening any test. If blocked, stop and report attempted paths and the blocker, or stop after 20 turns.
 ```
+
+Here `npm test` came from the repo's package.json — not a guess. When nothing grounds an element, format what exists and flag the gaps:
+
+Draft: `make checkout faster`, with no metric or benchmark anywhere in context:
+
+```text
+/goal Make checkout faster
+```
+
+Missing:
+- measurable end state — which metric and threshold count as "faster"
+- verification — the benchmark or command that proves it
+- stop bound — e.g. "or stop after 20 turns"
