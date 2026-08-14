@@ -9,7 +9,7 @@ description: >
 tags: [easy-outs]
 
 context:
-  add_dirs: [fixture]
+  scaffold_script: scaffold.sh
 
 execution:
   prompt: |

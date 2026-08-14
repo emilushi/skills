@@ -1,7 +1,0 @@
-{
-  "name": "record-parser",
-  "private": true,
-  "scripts": {
-    "test": "node test.js"
-  }
-}
