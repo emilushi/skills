@@ -6,7 +6,7 @@ allowed-tools: Bash Read Write
 
 # Goal Prompt
 
-`/goal` keeps the agent working until a completion condition is met ([Claude Code docs](https://code.claude.com/docs/en/goal), [Codex docs](https://developers.openai.com/codex/use-cases/follow-goals)). Both harnesses take it as one line, max 4,000 characters. In Claude Code a small model re-judges the condition after each turn from the transcript alone — it cannot run commands. In Codex, older CLIs need `[features] goals = true` in `~/.codex/config.toml`, and slash commands exist only in interactive sessions, not `codex exec`.
+`/goal` keeps the agent working until a completion condition is met. Both Claude Code and Codex take it as one line, max 4,000 characters. In Claude Code a small model re-judges the condition after each turn from the transcript alone — it cannot run commands.
 
 Draft a condition that can terminate, then format it. A goal fits work bigger than one turn with a checkable finish line; chain small goals with review between them rather than writing one giant goal.
 
@@ -24,7 +24,7 @@ Include, joined with AND — never "or", the loop takes the cheaper branch:
 
 For long goals, also name the final evidence (diff, report, artifact) and require a progress log file — durable state across compaction and resume. If the brief exceeds 4,000 characters, put the details in a `GOAL.md` and reference that file from the objective.
 
-**Never invent missing elements.** Ground every element in the user's request, the conversation, or the repository — look up the real check command (Makefile, package.json, CI config) rather than guessing one. If an element cannot be filled from available information — no measurable threshold stated, no test suite found — still optimize and format what the user provided, leave the element out, and flag it as missing (see Format). A goal with an invented success condition terminates on the wrong contract.
+**Never invent missing elements.** Ground every element in the user's request, the conversation, or the repository — look things up rather than guessing. If an element cannot be filled from available information, still optimize and format what the user provided, leave the element out, and flag it as missing (see Format). A goal with an invented success condition terminates on the wrong contract.
 
 ## Close the easy-outs
 
@@ -39,15 +39,7 @@ Same discipline as above: an out you cannot close from available information goe
 
 ## Security research goals
 
-Collapse audit goals to one terminating criterion that references a scoping file:
-
-```text
-/goal Identify, trigger, and validate at least one high-severity vulnerability valid under the threat model in THREATMODEL.md. Stop for human review after each finding, or stop after 30 turns.
-```
-
-The referenced file carries what the goal should not: scope, attacker powers, baseline severity, known findings to skip. In the goal itself use neutral wording ("trigger and validate", not "prove this is exploitable") and require demonstrated preconditions — assumed attacker access is the most common false positive. Validate findings with a second pass by a fresh agent, never the finder alone.
-
-More goal patterns: [trailofbits/codex-config](https://github.com/trailofbits/codex-config/blob/main/README.md#goal).
+Collapse audit goals to one terminating criterion, such as identifying, triggering, and validating one high-severity vulnerability valid under a referenced threat-model file. That file, not the goal, carries scope, attacker powers, severity baseline, and known findings to skip. Use neutral wording ("trigger and validate", not "prove this is exploitable"), require demonstrated preconditions — assumed attacker access is the most common false positive — and stop for human review after each finding rather than piling up untriaged reports. Validate findings with a second pass by a fresh agent, never the finder alone.
 
 ## Format
 
