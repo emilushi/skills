@@ -86,4 +86,4 @@ graders:
 # discriminate at n=3 before it joins a mean, and two cases were admitted on n=1
 # smoke tests showing +0.60 and came in at +0.07 and -0.20. This case has been
 # measured zero times. Tagged `batch`, `--tag static` still selects exactly the
-# seven cases every number in MEASUREMENTS.md was produced from.
+# seven cases the static mean is taken over.

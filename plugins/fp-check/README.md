@@ -96,13 +96,6 @@ orchestrator cannot argue with:
 | Two findings are only paired for a chain check when one's blocking reason could supply what the other lacks | `pairReason`, `isChainable` |
 | A chain is only reported when the agent names both contributions and the mechanism connecting them | `chainProblem` |
 
-Two of these were measured directly. On identical test cases, the configuration
-enforcing the already-fixed retraction got all 3 runs right where the one without
-it got 0 of 3, and the severity cap likewise. Both rules had previously been
-written in a prompt and left to the agent to apply — which is the difference the
-numbers are measuring. See [PR-COMMENT.md](PR-COMMENT.md) for the method and
-[MEASUREMENTS.md](MEASUREMENTS.md) for every run.
-
 ## Components
 
 ```

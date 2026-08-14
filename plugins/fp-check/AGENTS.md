@@ -131,14 +131,11 @@ wasted sweep:
 - Bump `version` in **both** `.claude-plugin/plugin.json` and the root
   `.claude-plugin/marketplace.json` for any behaviour change; the validator only
   checks that they agree.
-- Numbers in [MEASUREMENTS.md](MEASUREMENTS.md) describe the tree at the sweep
-  that produced them. Do not quote a delta for code that has changed since; see
-  the warning at the top of that file.
 - The batch and census capabilities are exercised by guards in
   `tests/coverage.test.mjs`; if you add a guard that asserts an ABSENCE, say so
   in the test name, and do not silently "fix" one.
 - **`chained-findings` has never been measured.** It is tagged `batch` rather than
   `static` for that reason, so `--tag static` still selects exactly the seven
-  cases every number in MEASUREMENTS.md came from. Admitting it to a mean needs
-  n=3 discrimination first; see tests/README.md on the two cases that were
-  admitted on n=1.
+  cases the static mean is taken over. Admitting it to a mean needs n=3
+  discrimination first; see tests/README.md on the two cases that were admitted
+  on n=1.

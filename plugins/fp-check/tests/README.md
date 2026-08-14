@@ -25,11 +25,9 @@ bash plugins/fp-check/tests/mutation-gate.sh     # not in CI; see "The gate"
 Current: **380 node, 427 pytest (+25 skipped), 44 bats**; mutation gate **152
 run, 0 survived, 12 deferred**.
 
-**No measurement lives in this file.** Every paid sweep is in
-[../MEASUREMENTS.md](../MEASUREMENTS.md); quote from there. Two things are open:
-**Layer 3 does not run**, its capture recording a script this plugin does not
-ship; and **Stage 2 has no eval case that discriminates**, its premise being
-public evidence the synthetic fixtures do not have.
+Two things are open: **Layer 3 does not run**, its capture recording a script
+this plugin does not ship; and **Stage 2 has no eval case that discriminates**,
+its premise being public evidence the synthetic fixtures do not have.
 
 ## Layer 1 — the contract
 
@@ -146,7 +144,7 @@ that.
 
 ```bash
 export CLAUDE_CODE_WALNUT_SPIRE=1
-# The seven static cases. This is the mean quoted in ../MEASUREMENTS.md.
+# The seven static cases.
 claude plugin eval ./plugins/fp-check --tag static \
   --runs 3 --ablation with-without --scaffold \
   --allow-tools Bash Write Skill Workflow WebFetch WebSearch Task TaskCreate TaskUpdate TaskList TaskGet \
@@ -379,5 +377,4 @@ green.
 | Layers 1–3 status | 427 pytest (+25 skipped) + 380 node + 44 bats passing |
 | Mutation gate | 164 mutations — 152 run, 0 survived, 0 stale, 12 deferred |
 | Layer 3 capture | stale: records `concept-prover:verify-attack-path`, so the module skips |
-| Layer 4 sweeps | every one, with its delta and cost, in [../MEASUREMENTS.md](../MEASUREMENTS.md) |
-| Raw results kept | the current sweep, the cross-plugin baselines this merge was justified against, and `eval-result-2026-07-30.json`, which `test_validate_eval_result.py` reads as a real-shaped result so a schema change cannot pass by agreeing with a mock |
+| Raw results kept | `eval-result-2026-07-30.json`, which `test_validate_eval_result.py` reads as a real-shaped result so a schema change cannot pass by agreeing with a mock |
