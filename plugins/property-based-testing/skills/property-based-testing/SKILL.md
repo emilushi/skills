@@ -11,6 +11,11 @@ domain and lets the generator hunt for the counterexample. That trade is worth m
 when the code has an algebraic shape — an inverse, an invariant, an oracle — and not
 otherwise. Code with no such shape gets example tests; saying so is a valid outcome.
 
+Check first whether the shape is missing or merely buried. A calculation wrapped in I/O,
+a string built by concatenation, an in-place mutation — each has a property and no seam
+to assert it through. See [references/refactoring.md](references/refactoring.md) before
+concluding there is nothing to assert.
+
 ## Property catalog
 
 | Property | Formula | Where it applies |
@@ -29,8 +34,9 @@ Strength ordering, weakest to strongest:
 `no crash → type preservation → invariant → idempotence → roundtrip / oracle`.
 
 Assert the strongest property the code supports. "No crash" alone rarely justifies the
-dependency — if that is all you can find, the honest report is that this code is a
-poor PBT candidate.
+dependency — if that is all you can find, either a small rearrangement exposes something
+stronger, or the honest report is that this code is a poor PBT candidate. Rule out the
+first before settling for the second.
 
 ## The two ways a property test asserts nothing
 
@@ -50,6 +56,7 @@ Load the one that matches the task in front of you:
 | Task | File |
 |---|---|
 | Writing new tests, designing strategies | [references/generating.md](references/generating.md) |
+| The code has no property to assert yet | [references/refactoring.md](references/refactoring.md) |
 | Reviewing existing property tests | [references/reviewing.md](references/reviewing.md) |
 | A property test just failed | [references/interpreting-failures.md](references/interpreting-failures.md) |
 | Library choice, Echidna and Medusa | [references/libraries.md](references/libraries.md) |

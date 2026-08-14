@@ -20,10 +20,36 @@ skills/property-based-testing/
 ├── SKILL.md                          # Property catalog, failure modes, routing
 └── references/
     ├── generating.md                 # Strategy design, settings, edge cases
+    ├── refactoring.md                # Rearrangements that expose a property
     ├── reviewing.md                  # Quality issues by severity
     ├── interpreting-failures.md      # Grounding and classifying a failure
     └── libraries.md                  # Library per language; Echidna/Medusa
 ```
+
+### What was cut, and why
+
+Three reference files were removed rather than rewritten, and one was kept after
+initially being cut. Recorded because a deletion with no rationale is indistinguishable
+from an oversight:
+
+- **`design.md`** — a Phase 1–5 prose workflow. AGENTS.md is explicit that a procedure
+  a model is meant to follow step by step belongs in a script, where it either runs or
+  fails, not in prose it can drift from.
+- **`strategies.md`** — per-language generator syntax. `st.integers(min_value=1)` and
+  `fc.string()` are not knowledge a current model lacks, and paying context for them
+  crowds out the judgment it does lack. `generating.md` keeps the parts that are
+  decisions rather than syntax: constraints in the strategy instead of `assume()`,
+  `@example` pinning, `deadline=None`.
+- **`refactoring.md`** — cut, then **restored** in trimmed form. The cut was wrong. Both
+  SKILL.md and the strength ordering send you to "this code is a poor PBT candidate",
+  and without this file that is a dead end where an answer exists: extract the pure core,
+  add the missing inverse, structure-plus-render, return instead of mutate, inject the
+  dependency. `evals/03`'s own fixture is the case in point — `send_welcome_email` is
+  impure SMTP whose message construction is separable and property-worthy, and the
+  measured runs found that seam unprompted. Trimmed on the way back in: the `rg`
+  detection one-liners (fragile, and two of them wrong), an effort/risk table and a
+  prioritisation list that both restated the strength ordering, and a "generators for
+  validators" pattern already covered by `st.composite` in `generating.md`.
 
 The eval harnesses are deliberately **not** inside the skill. They sit at the plugin
 root alongside `evals/`, so a directory the model reads guidance from does not also
