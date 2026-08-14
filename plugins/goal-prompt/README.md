@@ -31,3 +31,4 @@ Assistant:
 
 - `skills/goal-prompt/SKILL.md` — drafting checklist and output contract
 - `skills/goal-prompt/scripts/format_goal_prompt.py` — stdlib-only formatter (`--fenced`, `--objective-only`, `--max-chars`)
+- `evals/` — with/without-plugin ablation cases (`claude plugin eval goal-prompt --ablation with-without`)

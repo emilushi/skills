@@ -1,0 +1,7 @@
+{
+  "name": "shop-auth",
+  "private": true,
+  "scripts": {
+    "test": "node test.js"
+  }
+}
