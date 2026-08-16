@@ -367,6 +367,11 @@ while [ $i -lt ${#CLONE_URLS[@]} ]; do
   find "$dest" \( -name '*.yaml' -o -name '*.yml' \) -type f \
     ! -exec grep -q '^rules:' {} \; -delete 2>/dev/null || true
 
+  # `mode: join` rules are experimental and crash semgrep 1.173 outright (AttributeError in
+  # join_rule.py), taking the whole batch down and writing no output at all — a hard process
+  # failure, not a rule-level error. elttam's rules/generic/jsp-likely-xss.yaml does this.
+  grep -rlE 'mode:[[:space:]]*join' "$dest" 2>/dev/null | xargs -r rm -f || true
+
   # A repository that cloned but carries no rules scans nothing, and reporting it as fine would
   # show a completed scan against a ruleset that never ran.
   #
