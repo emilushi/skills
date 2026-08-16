@@ -553,9 +553,18 @@ while IFS=$'\t' read -r stem lang ruleset config includes; do
   scanned=-1
   ok=""
   # Exit 0 covers both "found nothing" and "found plenty", so it says nothing about findings.
-  # Exit 1 is a successful scan on older versions. 7 means the config would not load and 2 a
-  # bad argument; in both cases no scan happened.
-  if { [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; } && [ -s "$json" ] && [ -s "$sarif" ]; then
+  # Exit 1 is a successful scan on older versions.
+  #
+  # Exit 2 is NOT "no scan happened". semgrep also returns 2 when individual rules fail to
+  # compile while the rest of the run completes and writes complete output — e.g. 12 Java
+  # rules in elttam/semgrep-rules that current semgrep cannot parse, alongside 107 that ran
+  # fine. Gating on rc alone threw that whole SARIF away, and the same gate discarded
+  # apiiro/malicious-code-ruleset while its own log read "Scan completed successfully •
+  # Findings: 51". Judge on the artifacts instead — the `jq -e` below already proves semgrep
+  # produced a parseable result set — and keep rc to flag the run as partial.
+  partial=""
+  { [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; } || partial=1
+  if [ -s "$json" ] && [ -s "$sarif" ]; then
     if findings=$(jq -e '.results | length' "$json" 2>/dev/null); then
       ok=1
       # null and empty are different answers: a semgrep that does not report .paths gives -1,
@@ -569,9 +578,14 @@ while IFS=$'\t' read -r stem lang ruleset config includes; do
   fi
   if [ -n "$ok" ]; then
     [ "$scanned" -ne 0 ] || printf '%s/%s\n' "$lang" "$ruleset" >>"$COVERED_NOTHING"
+    # `partial` marks a run whose results are real but incomplete — some rules failed to
+    # compile. Reporting it as an unqualified success would overstate coverage; dropping it
+    # entirely (the old behaviour) understated it far worse.
     jq -nc --arg lang "$lang" --arg ruleset "$ruleset" --arg json "$json" \
       --arg sarif "$sarif" --argjson findings "$findings" --argjson scanned "$scanned" \
-      '{lang:$lang, ruleset:$ruleset, json:$json, sarif:$sarif, findings:$findings, filesScanned:$scanned}' \
+      --argjson partial "$([ -n "$partial" ] && echo true || echo false)" --arg rc "$rc" \
+      '{lang:$lang, ruleset:$ruleset, json:$json, sarif:$sarif, findings:$findings,
+        filesScanned:$scanned, partial:$partial, exitCode:($rc|tonumber)}' \
       >>"$WORK/scans.jsonl"
   else
     # Carries the same paths a success does: a scan that crashed part-way may still have
