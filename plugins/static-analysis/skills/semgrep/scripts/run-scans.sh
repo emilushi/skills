@@ -353,6 +353,20 @@ while [ $i -lt ${#CLONE_URLS[@]} ]; do
     printf '%s\t%s\n' "$url" "$(printf '%s' "$err" | tail -n 3 | tr '\n' ' ')" >>"$SKIPPED"
     continue
   fi
+  # semgrep parses EVERY .yaml/.yml under a --config directory as a rule file, and a single
+  # unparseable one aborts the whole scan with exit 7 — no findings from any of the rules that
+  # were fine. Rule repos ship their own CI config alongside their rules, and a workflow's
+  # `on: pull_request:` is a null value, which semgrep rejects outright. Observed killing both
+  # trailofbits/semgrep-rules (.github/workflows/semgrep-rules-format.yml) and
+  # elttam/semgrep-rules (perf-templates/benchmark-tests.yml) — two required rulesets silently
+  # contributing nothing.
+  #
+  # A semgrep rule file always has a top-level `rules:` key; nothing else here does. Pruning on
+  # that also drops the `*.test.yaml` fixtures, which are rule test inputs rather than rules.
+  # Measured: keeps 118/145 files for trailofbits and 80/94 for elttam, losing no real rule.
+  find "$dest" \( -name '*.yaml' -o -name '*.yml' \) -type f \
+    ! -exec grep -q '^rules:' {} \; -delete 2>/dev/null || true
+
   # A repository that cloned but carries no rules scans nothing, and reporting it as fine would
   # show a completed scan against a ruleset that never ran.
   #
