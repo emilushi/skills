@@ -555,16 +555,35 @@ while IFS=$'\t' read -r stem lang ruleset config includes; do
   # Exit 0 covers both "found nothing" and "found plenty", so it says nothing about findings.
   # Exit 1 is a successful scan on older versions.
   #
-  # Exit 2 is NOT "no scan happened". semgrep also returns 2 when individual rules fail to
-  # compile while the rest of the run completes and writes complete output — e.g. 12 Java
+  # Exit 2 is not only "no scan happened". semgrep also returns 2 when individual rules fail
+  # to compile while the rest of the run completes and writes complete output — e.g. 12 Java
   # rules in elttam/semgrep-rules that current semgrep cannot parse, alongside 107 that ran
-  # fine. Gating on rc alone threw that whole SARIF away, and the same gate discarded
-  # apiiro/malicious-code-ruleset while its own log read "Scan completed successfully •
-  # Findings: 51". Judge on the artifacts instead — the `jq -e` below already proves semgrep
-  # produced a parseable result set — and keep rc to flag the run as partial.
+  # fine, and apiiro/malicious-code-ruleset whose own log read "Scan completed successfully
+  # • Findings: 51". Both were thrown away. Exit 2 also still covers a bad argument, where
+  # nothing is written at all; the artifact checks below tell the two apart, so 2 is allowed
+  # through and flagged partial rather than trusted outright.
+  #
+  # Anything outside 0/1/2 stays fatal however plausible the artifacts look, exit 7 (config
+  # would not load) included. Verified on semgrep 1.173: the exit code for an unloadable
+  # config depends on the OUTPUT FLAGS, which is worth knowing before trusting either number.
+  # Same rules directory, same target, back to back:
+  #
+  #   semgrep --config rules target                              -> 7, nothing written
+  #   semgrep --config rules -o out.json --sarif-output=out.sarif -> 2, nothing written
+  #
+  # This script uses the second form, so a config that will not load reaches here as 2 with
+  # no artifacts, and the -s checks below reject it on their own. The fatal branch is
+  # therefore belt-and-braces rather than the thing doing the work — but it costs nothing,
+  # it is what the suite pins, and it means a future semgrep that writes an empty result set
+  # alongside a hard failure cannot be read as a clean scan.
   partial=""
-  { [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; } || partial=1
-  if [ -s "$json" ] && [ -s "$sarif" ]; then
+  fatal=""
+  case "$rc" in
+    0 | 1) ;;
+    2) partial=1 ;;
+    *) fatal=1 ;;
+  esac
+  if [ -z "$fatal" ] && [ -s "$json" ] && [ -s "$sarif" ]; then
     if findings=$(jq -e '.results | length' "$json" 2>/dev/null); then
       ok=1
       # null and empty are different answers: a semgrep that does not report .paths gives -1,
